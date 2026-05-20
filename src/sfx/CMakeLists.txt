@@ -1,0 +1,10 @@
+add_subdirectory(mixer)
+add_subdirectory(pcm_device)
+add_subdirectory(player)
+add_subdirectory(seq)
+add_subdirectory(timer)
+add_subdirectory(softseq)
+add_subdirectory(device)
+
+add_library(scisound STATIC iterator.c songlib.c core.c pcm-iterator.c)
+add_library(scisoundlib STATIC time.c adlib.c)

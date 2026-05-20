@@ -27,12 +27,7 @@
 #  include <sys/time.h>
 #endif
 
-#include <SDL_config.h>
-#undef HAVE_ICONV
-#undef HAVE_ICONV_H
-#undef HAVE_ALLOCA_H
-
-#include <SDL.h>
+#include <SDL2/SDL.h>
 
 #define DELTA_TIME_LIMIT 10000 /* Report errors above this delta time */
 
@@ -130,7 +125,7 @@ pcmout_sdl_init(sfx_pcm_device_t *self)
 {
 	SDL_AudioSpec a;
 
-	if (SDL_Init(SDL_INIT_AUDIO|SDL_INIT_NOPARACHUTE) != 0) {
+	if (SDL_Init(SDL_INIT_AUDIO) != 0) {
 		fprintf (stderr, "[SND:SDL] Error while initialising: %s\n", SDL_GetError());
 		return -1;
 	}

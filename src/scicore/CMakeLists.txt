@@ -1,0 +1,25 @@
+add_library(scicore STATIC
+    aatree.c
+    tools.c
+    resource.c
+    decompress0.c
+    versions.c
+    decompress01.c
+    decompress1.c
+    decompress11.c
+    script.c
+    vocab.c
+    vocab_debug.c
+    old_objects.c
+    modules.c
+    sci_memory.c
+    resource_map.c
+    resource_patch.c
+    fnmatch.c
+    int_hashmap.c
+    console.c
+    exe.c
+    exe_lzexe.c
+    exe_raw.c
+    reg_t_hashmap.c
+)

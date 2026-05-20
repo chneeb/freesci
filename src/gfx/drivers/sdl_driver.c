@@ -47,15 +47,13 @@
 #  include <sys/time.h>
 #endif
 
-#include <SDL_config.h>
-#undef HAVE_ICONV
-#undef HAVE_ICONV_H
-#undef HAVE_ALLOCA_H
-
-#include <SDL.h>
+#include <SDL2/SDL.h>
 
 #ifndef SDL_DISABLE
-#	define SDL_DISABLE 0
+#	define SDL_DISABLE SDL_CURSOR_HIDE
+#endif
+#ifndef SDL_ENABLE
+#	define SDL_ENABLE SDL_CURSOR_SHOW
 #endif
 #ifndef SDL_ALPHA_OPAQUE
 #	define SDL_ALPHA_OPAQUE 255
@@ -77,7 +75,10 @@ struct _sdl_state {
 	gfx_pixmap_t *priority[2];
 	SDL_Color colors[256];
 	SDL_Surface *visual[3];
-	SDL_Surface *primary;
+	SDL_Surface *primary;      /* software compositing surface */
+	SDL_Window   *window;
+	SDL_Renderer *renderer;
+	SDL_Texture  *screen_texture;
 	int buckystate;
 	byte *pointer_data[2];
 	int alpha_mask;
@@ -114,12 +115,12 @@ sdlprintf(const char *fmt, ...)
 static int
 sdl_init_libsdl(struct _gfx_driver *drv)
 {
-	if (SDL_Init(SDL_INIT_VIDEO|SDL_INIT_NOPARACHUTE)) {
+	if (SDL_Init(SDL_INIT_VIDEO)) {
 		DEBUGB("Failed to init SDL\n");
 		return -1;
 	}
 
-	SDL_EnableUNICODE(SDL_ENABLE);
+	SDL_StartTextInput();
 
 	return 0;
 }
@@ -127,27 +128,56 @@ sdl_init_libsdl(struct _gfx_driver *drv)
 static int
 sdl_alloc_primary(struct _gfx_driver *drv, int xfact, int yfact, int bytespp)
 {
-	int i = SDL_HWSURFACE | SDL_HWPALETTE;
+	int w = xfact * 320;
+	int h = yfact * 200;
+	Uint32 window_flags = SDL_WINDOW_SHOWN;
 
-	if (flags & SCI_SDL_FULLSCREEN) {
-		i |= SDL_FULLSCREEN;
+	if (flags & SCI_SDL_FULLSCREEN)
+		window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+
+	if (S->window) {
+		/* Already created — just toggle fullscreen */
+		SDL_SetWindowFullscreen(S->window,
+			(flags & SCI_SDL_FULLSCREEN) ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+		if (flags & SCI_SDL_FULLSCREEN)
+			drv->capabilities &= ~GFX_CAPABILITY_WINDOWED;
+		else
+			drv->capabilities |= GFX_CAPABILITY_WINDOWED;
+		return 0;
 	}
 
-	S->primary = SDL_SetVideoMode(xfact * 320, yfact * 200, bytespp << 3, i);
+	S->window = SDL_CreateWindow("FreeSCI",
+		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+		w, h, window_flags);
+	if (!S->window) {
+		SDLERROR("Could not create SDL window: %s\n", SDL_GetError());
+		return -1;
+	}
 
+	S->renderer = SDL_CreateRenderer(S->window, -1, 0);
+	if (!S->renderer) {
+		SDLERROR("Could not create SDL renderer: %s\n", SDL_GetError());
+		return -1;
+	}
+
+	S->screen_texture = SDL_CreateTexture(S->renderer,
+		SDL_PIXELFORMAT_ARGB8888,
+		SDL_TEXTUREACCESS_STREAMING,
+		w, h);
+	if (!S->screen_texture) {
+		SDLERROR("Could not create SDL screen texture: %s\n", SDL_GetError());
+		return -1;
+	}
+
+	/* Software surface used for compositing; always 32-bit ARGB */
+	S->primary = SDL_CreateRGBSurface(0, w, h, 32,
+		0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
 	if (!S->primary) {
-		SDLERROR("Could not set up a primary SDL surface!\n");
+		SDLERROR("Could not allocate primary software surface!\n");
 		return -1;
 	}
 
-	if (S->primary->format->BytesPerPixel != bytespp) {
-		SDLERROR("Could not set up a primary SDL surface of depth %d bpp!\n",bytespp);
-		S->primary = NULL;
-		return -1;
-	}
-
-	/* Set windowed flag */
-	if (S->primary->flags & SDL_FULLSCREEN)
+	if (flags & SCI_SDL_FULLSCREEN)
 		drv->capabilities &= ~GFX_CAPABILITY_WINDOWED;
 	else
 		drv->capabilities |= GFX_CAPABILITY_WINDOWED;
@@ -160,8 +190,10 @@ sdl_blit_surface(gfx_driver_t *drv,
 		 SDL_Surface *src, SDL_Rect *srcrect, SDL_Surface *dst, SDL_Rect *dstrect)
 {
 	if (S->used_bytespp == 1) {
-		SDL_SetColors(src, S->colors, 0, 256);
-		SDL_SetColors(dst, S->colors, 0, 256);
+		if (src->format->palette)
+			SDL_SetPaletteColors(src->format->palette, S->colors, 0, 256);
+		if (dst->format->palette)
+			SDL_SetPaletteColors(dst->format->palette, S->colors, 0, 256);
 	}
 	return SDL_BlitSurface(src, srcrect, dst, dstrect);
 }
@@ -212,10 +244,12 @@ sdl_init_specific(struct _gfx_driver *drv, int xfact, int yfact, int bytespp)
 	if (sdl_init_libsdl(drv))
 		return GFX_FATAL;
 
-	if (!drv->state /* = S */)
+	if (!drv->state /* = S */) {
 		drv->state = sci_malloc(sizeof(struct _sdl_state));
-	if (!drv->state)
-		return GFX_FATAL;
+		if (!drv->state)
+			return GFX_FATAL;
+		memset(drv->state, 0, sizeof(struct _sdl_state));
+	}
 
 	if (xfact < 1 || yfact < 1 || bytespp < 1 || bytespp > 4) {
 		SDLERROR("Internal error: Attempt to open window w/ scale factors (%d,%d) and bpp=%d!\n",
@@ -248,15 +282,12 @@ sdl_init_specific(struct _gfx_driver *drv, int xfact, int yfact, int bytespp)
 		S->colors[i].g = (i & 2)? 0 : 0;
 		S->colors[i].b = (i & 4)? 0 : 0;
 	}
-	if (bytespp == 1)
-		SDL_SetColors(S->primary, S->colors, 0, 256);
+	if (bytespp == 1 && S->primary->format->palette)
+		SDL_SetPaletteColors(S->primary->format->palette, S->colors, 0, 256);
 
-	/* create an input event mask */
-	SDL_EventState(SDL_ACTIVEEVENT, SDL_IGNORE);
-	SDL_EventState(SDL_VIDEORESIZE, SDL_IGNORE);
 	SDL_EventState(SDL_KEYUP, SDL_IGNORE);
 
-	SDL_WM_SetCaption("FreeSCI", "freesci");
+	SDL_SetWindowTitle(S->window, "FreeSCI");
 
 	SDL_ShowCursor(SDL_DISABLE);
 	S->pointer_data[0] = NULL;
@@ -305,8 +336,7 @@ sdl_init_specific(struct _gfx_driver *drv, int xfact, int yfact, int bytespp)
 
 	/* create the visual buffers */
 	for (i = 0; i < 3; i++) {
-		S->visual[i] = SDL_CreateRGBSurface(SDL_SRCALPHA,
-					/* SDL_HWSURFACE | SDL_SWSURFACE, */
+		S->visual[i] = SDL_CreateRGBSurface(0,
 					xsize, ysize,
 					bytespp << 3,
 					S->primary->format->Rmask,
@@ -319,13 +349,11 @@ sdl_init_specific(struct _gfx_driver *drv, int xfact, int yfact, int bytespp)
 		}
 
 		if (ALPHASURFACE)
-		 SDL_SetAlpha(S->visual[i],SDL_SRCALPHA,SDL_ALPHA_OPAQUE);
+			SDL_SetSurfaceBlendMode(S->visual[i], SDL_BLENDMODE_BLEND);
 
 		if (SDL_FillRect(S->primary, NULL, SDL_MapRGB(S->primary->format, 0,0,0)))
 			SDLERROR("Couldn't fill backbuffer!\n");
 	}
-
-	SDL_EnableKeyRepeat(SDL_DEFAULT_REPEAT_DELAY, SDL_DEFAULT_REPEAT_INTERVAL);
 
 	drv->mode = gfx_new_mode(xfact, yfact, bytespp,
 			   S->primary->format->Rmask,
@@ -333,7 +361,8 @@ sdl_init_specific(struct _gfx_driver *drv, int xfact, int yfact, int bytespp)
 			   S->primary->format->Bmask,
 			   S->alpha_mask,
 			   red_shift, green_shift, blue_shift, alpha_shift,
-			   (bytespp == 1)? 256 : 0, 0); /*GFX_MODE_FLAG_REVERSE_ALPHA);*/
+			   (bytespp == 1)? 256 : 0,
+			   (bytespp > 1)? GFX_MODE_FLAG_REVERSE_ALPHA : 0);
 
 	return GFX_OK;
 }
@@ -341,19 +370,11 @@ sdl_init_specific(struct _gfx_driver *drv, int xfact, int yfact, int bytespp)
 static int
 sdl_init(struct _gfx_driver *drv)
 {
-	int depth = 0;
-	int i;
-
 	if (sdl_init_libsdl(drv))
 		return GFX_FATAL;
 
-	i = SDL_HWSURFACE | SDL_HWPALETTE;
-	if (flags & SCI_SDL_FULLSCREEN) {
-		i |= SDL_FULLSCREEN;
-	}
-
-	depth = SDL_VideoModeOK(640,400, 32, i);
-	if (depth && (! sdl_init_specific(drv, 2, 2, depth >> 3 )))
+	/* Always use 32-bit (4 bytes/pixel) ARGB in SDL2 */
+	if (!sdl_init_specific(drv, 2, 2, 4))
 		return GFX_OK;
 
 	DEBUGB("Failed to find visual!\n");
@@ -375,7 +396,22 @@ sdl_exit(struct _gfx_driver *drv)
 			S->visual[i] = NULL;
 		}
 
-		SDL_FreeCursor(SDL_GetCursor());
+		if (S->primary) {
+			SDL_FreeSurface(S->primary);
+			S->primary = NULL;
+		}
+		if (S->screen_texture) {
+			SDL_DestroyTexture(S->screen_texture);
+			S->screen_texture = NULL;
+		}
+		if (S->renderer) {
+			SDL_DestroyRenderer(S->renderer);
+			S->renderer = NULL;
+		}
+		if (S->window) {
+			SDL_DestroyWindow(S->window);
+			S->window = NULL;
+		}
 
 		for (i = 0; i < 2; i++)
 			if (S->pointer_data[i]) {
@@ -400,17 +436,13 @@ toggle_fullscreen(struct _gfx_driver *drv)
 	point_t dest;
 
 	flags ^= SCI_SDL_FULLSCREEN;
-	if (sdl_alloc_primary(drv, XFACT, YFACT, drv->mode->bytespp)) {
-		SDLERROR("failed to switch to full-screen mode\n");
-		/* Failed to set mode, revert to previous */
-		flags ^= SCI_SDL_FULLSCREEN;
+	SDL_SetWindowFullscreen(S->window,
+		(flags & SCI_SDL_FULLSCREEN) ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 
-		if (sdl_alloc_primary(drv, XFACT, YFACT, drv->mode->bytespp)) {
-			/* This shouldn't happen... */
-			SDLERROR("failed to revert to previous display mode\n");
-			exit(-1);
-		}
-	}
+	if (flags & SCI_SDL_FULLSCREEN)
+		drv->capabilities &= ~GFX_CAPABILITY_WINDOWED;
+	else
+		drv->capabilities |= GFX_CAPABILITY_WINDOWED;
 
 	src.x = 0;
 	src.y = 0;
@@ -639,7 +671,7 @@ sdl_register_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm)
 					 S->alpha_mask);
 
 	if (ALPHASURFACE)
-			SDL_SetAlpha(reg_surface, SDL_SRCALPHA,SDL_ALPHA_OPAQUE);
+		SDL_SetSurfaceBlendMode(reg_surface, SDL_BLENDMODE_BLEND);
 
 	pxm->internal.handle = SCI_SDL_HANDLE_NORMAL;
 
@@ -708,15 +740,12 @@ sdl_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm, int priority,
 		return GFX_OK;
 	}
 
-	temp = SDL_CreateRGBSurface(SDL_SWSURFACE, drect.w, drect.h,
+	temp = SDL_CreateRGBSurface(0, drect.w, drect.h,
 			      S->used_bytespp << 3,
 			      S->primary->format->Rmask,
 			      S->primary->format->Gmask,
 			      S->primary->format->Bmask,
 			      S->alpha_mask);
-
-	if (ALPHASURFACE)
-		SDL_SetAlpha(temp, SDL_SRCALPHA,SDL_ALPHA_OPAQUE);
 
 	if (!temp) {
 		SDLERROR("Failed to allocate SDL surface");
@@ -774,7 +803,7 @@ sdl_grab_pixmap(struct _gfx_driver *drv, rect_t src, gfx_pixmap_t *pxm,
 
 		pxm->xl = src.xl;
 		pxm->yl = src.yl;
-		temp = SDL_CreateRGBSurface(SDL_SWSURFACE, src.xl, src.yl,
+		temp = SDL_CreateRGBSurface(0, src.xl, src.yl,
 				S->used_bytespp << 3,
 				S->primary->format->Rmask,
 				S->primary->format->Gmask,
@@ -788,9 +817,6 @@ sdl_grab_pixmap(struct _gfx_driver *drv, rect_t src, gfx_pixmap_t *pxm,
 
 		if (SDL_MUSTLOCK(temp))
 			sciprintf("Warning: SDL surface for pixmap grabbing requires locking\n");
-
-		if (ALPHASURFACE)
-			SDL_SetAlpha(temp, SDL_SRCALPHA,SDL_ALPHA_OPAQUE);
 
 		srect.x = src.x;
 		srect.y = src.y;
@@ -866,7 +892,11 @@ sdl_update(struct _gfx_driver *drv, rect_t src, point_t dest, gfx_buffer_t buffe
 	case GFX_BUFFER_FRONT:
 		if (sdl_blit_surface(drv, S->visual[data_source], &srect, S->primary, &drect))
 			SDLERROR("primary surface update failed!\n");
-		SDL_UpdateRect(S->primary, drect.x, drect.y, drect.w, drect.h);
+		SDL_UpdateTexture(S->screen_texture, NULL,
+			S->primary->pixels, S->primary->pitch);
+		SDL_RenderClear(S->renderer);
+		SDL_RenderCopy(S->renderer, S->screen_texture, NULL, NULL);
+		SDL_RenderPresent(S->renderer);
 		break;
 	default:
 		GFXERROR("Invalid buffer %d in update!\n", buffer);
@@ -907,7 +937,8 @@ sdl_set_palette(struct _gfx_driver *drv, int index, byte red, byte green, byte b
 	S->colors[index].g = green;
 	S->colors[index].b = blue;
 
-	SDL_SetColors(S->primary, S->colors + index, index, 1);
+	if (S->primary->format->palette)
+		SDL_SetPaletteColors(S->primary->format->palette, S->colors + index, index, 1);
 	return GFX_OK;
 }
 
@@ -990,10 +1021,11 @@ static int sdl_set_pointer (struct _gfx_driver *drv, gfx_pixmap_t *pointer)
 /*** Event management ***/
 
 int
-sdl_map_key(gfx_driver_t *drv, SDL_keysym keysym)
+sdl_map_key(gfx_driver_t *drv, SDL_Keysym keysym)
 {
-	SDLKey skey = keysym.sym;
-	int rkey = keysym.unicode & 0x7f;
+	SDL_Keycode skey = keysym.sym;
+	/* In SDL2 there is no unicode field; use skey for ASCII printable range */
+	int rkey = (skey > 0 && skey < 128) ? skey : 0;
 
 	if ((skey >= SDLK_a) && (skey <= SDLK_z))
 		return ('a' + (skey - SDLK_a));
@@ -1022,24 +1054,24 @@ sdl_map_key(gfx_driver_t *drv, SDL_keysym keysym)
 		}
 		return SCI_K_ENTER;
 	case SDLK_KP_PERIOD: return SCI_K_DELETE;
-	case SDLK_KP0:
+	case SDLK_KP_0:
 	case SDLK_INSERT: return SCI_K_INSERT;
-	case SDLK_KP1:
+	case SDLK_KP_1:
 	case SDLK_END: return SCI_K_END;
-	case SDLK_KP2:
+	case SDLK_KP_2:
 	case SDLK_DOWN: return SCI_K_DOWN;
-	case SDLK_KP3:
+	case SDLK_KP_3:
 	case SDLK_PAGEDOWN: return SCI_K_PGDOWN;
-	case SDLK_KP4:
+	case SDLK_KP_4:
 	case SDLK_LEFT: return SCI_K_LEFT;
-	case SDLK_KP5: return SCI_K_CENTER;
-	case SDLK_KP6:
+	case SDLK_KP_5: return SCI_K_CENTER;
+	case SDLK_KP_6:
 	case SDLK_RIGHT: return SCI_K_RIGHT;
-	case SDLK_KP7:
+	case SDLK_KP_7:
 	case SDLK_HOME: return SCI_K_HOME;
-	case SDLK_KP8:
+	case SDLK_KP_8:
 	case SDLK_UP: return SCI_K_UP;
-	case SDLK_KP9:
+	case SDLK_KP_9:
 	case SDLK_PAGEUP: return SCI_K_PGUP;
 
 	case SDLK_F1: return SCI_K_F1;
@@ -1057,11 +1089,11 @@ sdl_map_key(gfx_driver_t *drv, SDL_keysym keysym)
 	case SDLK_RCTRL:
 	case SDLK_LALT:
 	case SDLK_RALT:
-	case SDLK_LMETA:
-	case SDLK_RMETA:
+	case SDLK_LGUI:
+	case SDLK_RGUI:
 	case SDLK_CAPSLOCK:
-	case SDLK_SCROLLOCK:
-	case SDLK_NUMLOCK:
+	case SDLK_SCROLLLOCK:
+	case SDLK_NUMLOCKCLEAR:
 	case SDLK_LSHIFT:
 	case SDLK_RSHIFT:  return 0;
 
@@ -1088,9 +1120,6 @@ sdl_map_key(gfx_driver_t *drv, SDL_keysym keysym)
 	case SDLK_GREATER: return rkey;
 	case SDLK_SPACE: return ' ';
 
-#ifdef MACOSX
-	case SDLK_WORLD_0:
-#endif
 	case SDLK_BACKQUOTE:
 		if (keysym.mod & KMOD_CTRL)
 			return '`';
@@ -1153,8 +1182,18 @@ sdl_fetch_event(gfx_driver_t *drv, sci_event_t *sci_event)
 			sci_event->type = SCI_EVT_QUIT;
 			return;
 			break;
-		case SDL_VIDEOEXPOSE:
-			break;
+		case SDL_WINDOWEVENT:
+			break; /* window resize/expose handled by renderer */
+		case SDL_AUDIODEVICEADDED:
+		case SDL_AUDIODEVICEREMOVED:
+		case SDL_DROPFILE:
+		case SDL_DROPTEXT:
+		case SDL_DROPBEGIN:
+		case SDL_DROPCOMPLETE:
+		case SDL_FINGERDOWN:
+		case SDL_FINGERUP:
+		case SDL_FINGERMOTION:
+			break; /* SDL2-only events, not relevant to FreeSCI */
 		default:
 			SDLERROR("Received unhandled SDL event %04x\n", event.type);
 		}
@@ -1185,7 +1224,7 @@ sdl_usec_sleep(struct _gfx_driver *drv, long usecs)
 
 	SDL_PumpEvents();
 	while (SDL_PeepEvents(&event, 1, SDL_GETEVENT,
-	    SDL_EVENTMASK(SDL_MOUSEMOTION)) == 1) {
+	    SDL_MOUSEMOTION, SDL_MOUSEMOTION) == 1) {
 		drv->pointer_x = event.motion.x;
 		drv->pointer_y = event.motion.y;
 	}

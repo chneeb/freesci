@@ -1,0 +1,25 @@
+add_library(sciengine STATIC
+    savegame.c
+    kernel.c
+    kscripts.c
+    klists.c
+    scriptconsole.c
+    kfile.c
+    kgraphics.c
+    kmath.c
+    kevent.c
+    kstring.c
+    kmenu.c
+    kmovement.c
+    kpathing.c
+    ksound.c
+    vm.c
+    game.c
+    scriptdebug.c
+    said.c
+    grammar.c
+    seg_manager.c
+    sys_strings.c
+    gc.c
+    message.c
+)
