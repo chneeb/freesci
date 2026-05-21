@@ -32,9 +32,15 @@
 
 #cmakedefine SCI_PLATFORM_DESKTOP 1
 #cmakedefine SCI_PLATFORM_PICO 1
+#cmakedefine HAVE_PICO 1
 
 #define SIZEOF_SHORT @SIZEOF_SHORT@
 #define SIZEOF_INT   @SIZEOF_INT@
 #define SIZEOF_LONG  @SIZEOF_LONG@
 
 #define WANT_CONSOLE 1
+
+/* Pico / newlib fallback — PATH_MAX not defined by arm-none-eabi limits.h */
+#ifndef PATH_MAX
+#  define PATH_MAX 256
+#endif

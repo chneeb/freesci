@@ -59,6 +59,10 @@ extern gfx_driver_t gfx_driver_dd;
 extern gfx_driver_t gfx_driver_sdl;
 #  endif
 
+#  ifdef HAVE_PICO
+extern gfx_driver_t gfx_driver_pico;
+#  endif
+
 #  ifdef HAVE_DIRECTFB
 extern gfx_driver_t gfx_driver_dfb;
 #  endif
@@ -77,6 +81,9 @@ static gfx_driver_t *gfx_drivers[] = {
 #  endif
 #  ifdef HAVE_SDL
 	&gfx_driver_sdl,
+#  endif
+#  ifdef HAVE_PICO
+	&gfx_driver_pico,
 #  endif
 #  ifdef HAVE_DIRECTX
 	&gfx_driver_dx,

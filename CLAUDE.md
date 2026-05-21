@@ -20,7 +20,53 @@ Requires: `libsdl2-dev`
 
 ## Platform variable
 
-`-DPLATFORM=desktop` (default) builds with SDL2. `-DPLATFORM=pico` stubs in a pico-sdk path for a future Raspberry Pi Pico port (not yet functional).
+`-DPLATFORM=desktop` (default) builds with SDL2.  
+`-DPLATFORM=pico` targets PicoCalc (RP2350 + ILI9488 TFT + I2C keyboard).
+
+### Pico build
+
+```bash
+cmake -B build-pico \
+  -DPLATFORM=pico \
+  -DPICO_SDK_PATH=~/pico-sdk \
+  -DPICO_BOARD=pico2 \
+  -DPICOCALC_HW_PATH=~/Source/PicoCalc/Code/picocalc_helloworld
+cmake --build build-pico -j$(nproc)
+# Flash build-pico/src/freesci.uf2 to the PicoCalc
+```
+
+Requires: `pico-sdk`, PicoCalc hardware library (`i2ckbd` + `lcdspi`), FatFS SD SPI driver.
+
+### Pico architecture
+
+| File | Purpose |
+|------|---------|
+| `src/gfx/drivers/pico_driver.c` | GFX driver: 8bpp palette → ILI9488 SPI push |
+| `src/platform/pico/pico_main.c` | Entry point: HW init → SD chooser → FreeSCI |
+| `src/platform/pico/pico_time.c` | `sci_gettime()` via `time_us_64()` |
+| `src/platform/pico/pico_io.c` | POSIX `_open/_read/_write/_lseek/_close` over FatFS |
+| `src/platform/pico/pico_sdcard.c` | SD init + `show_dir_chooser()` scanning `0:/freesci/` |
+| `src/platform/pico/audio/pwm_synth.c` | PWM audio (from tiny_agi) |
+
+### Pico driver design
+- `gfx_driver_pico` uses 8bpp palette mode (bytespp=1, xfact=1, yfact=1)
+- `visual[0..2]`: three 320×200 uint8_t buffers (64KB each, 192KB total)
+- On `GFX_BUFFER_FRONT` update: only the dirty rect is pushed to ILI9488 via `define_region_spi` + `hw_send_spi`
+- Keyboard events come from `kbd_read()` (I2C); mapped to `sci_event_t` in an 8-entry ring buffer
+- No mouse support (PicoCalc has no pointing device)
+- `src/main.c:main()` is renamed `freesci_main()` under `HAVE_PICO`; `pico_main.c` provides the real entry
+
+### SD card game selection
+Games must be in subdirectories under `0:/freesci/` on the SD card (e.g. `0:/freesci/sq3/`).
+The chooser scans that directory, presents a scrollable list via the ILI9488 display,
+and navigates with the I2C keyboard (UP/DOWN/ENTER/ESC). Behaviour is identical to tiny_agi's
+`show_dir_chooser()` — only the root path changed from `0:/agi` to `0:/freesci`.
+
+### Sound on Pico (TODO)
+Sound is currently disabled (`--no-sound` in `pico_main.c`). To enable:
+- Wire FreeSCI's OPL2 softsynth (fmopl.c) output into a PCM callback feeding `pwm_synth`
+- Add a Pico PCM device driver under `src/sfx/pcm_device/pico_pwm.c`
+- Remove `--no-sound` from `pico_main.c`'s argv
 
 ## Key CMake decisions
 
