@@ -221,11 +221,13 @@ kDoSound_SCI0(state_t *s, int funct_nr, int argc, reg_t *argv)
 	case _K_SCI0_SOUND_INIT_HANDLE:
 		if (obj.segment) {
 			sciprintf("Initializing song number %d\n", GET_SEL32V(obj, number));
-			SCRIPT_ASSERT_ZERO(sfx_add_song(&s->sound,
-							build_iterator(s, number,
-								       SCI_SONG_ITERATOR_TYPE_SCI0,
-								       handle),
-							0, handle, number));
+			if (!(s->sound.flags & SFX_STATE_FLAG_NOSOUND)) {
+				SCRIPT_ASSERT_ZERO(sfx_add_song(&s->sound,
+								build_iterator(s, number,
+									       SCI_SONG_ITERATOR_TYPE_SCI0,
+									       handle),
+								0, handle, number));
+			}
 			PUT_SEL32V(obj, state, _K_SOUND_STATUS_INITIALIZED);
 			PUT_SEL32(obj, handle, obj); /* ``sound handle'': we use the object address */
 		}

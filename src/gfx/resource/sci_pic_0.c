@@ -101,6 +101,49 @@ gfx_pixmap_color_t gfx_sci0_image_colors[SCI0_MAX_PALETTE+1][GFX_SCI0_IMAGE_COLO
 #undef C3
 #undef C4
 
+#ifdef HAVE_PICO
+#include "psram_alloc.h"
+
+/* Streaming 512-byte PSRAM read cache used during SCI0 pic decode.
+   Lets us keep res->data in PSRAM and stream it in while decoding. */
+#define PICO_PICDEC_CACHE 512
+typedef struct {
+    uint32_t addr;
+    int      size;
+    byte     buf[PICO_PICDEC_CACHE];
+    int      base;
+} pico_picdec_cache_t;
+
+static pico_picdec_cache_t *_pdc;
+
+static void _pdc_fill(int pos) {
+    _pdc->base = pos;
+    int n = _pdc->size - pos;
+    if (n > PICO_PICDEC_CACHE) n = PICO_PICDEC_CACHE;
+    psram_load(_pdc->addr + pos, _pdc->buf, n);
+}
+static inline byte        _pdc_rb (int pos) {
+    if (pos >= _pdc->size) return 0xff; /* past end → PIC_OP_TERMINATE, exits inner loops */
+    if (pos < _pdc->base || pos >= _pdc->base + PICO_PICDEC_CACHE) _pdc_fill(pos);
+    return _pdc->buf[pos - _pdc->base];
+}
+static inline signed char _pdc_rbs(int pos) { return (signed char)_pdc_rb(pos); }
+static inline int         _pdc_ru16(int pos) {
+    if (pos < _pdc->base || pos + 1 >= _pdc->base + PICO_PICDEC_CACHE) _pdc_fill(pos);
+    return (int)_pdc->buf[pos - _pdc->base] | ((int)_pdc->buf[pos + 1 - _pdc->base] << 8);
+}
+
+static pico_picdec_cache_t _pdc_inst;
+
+void pico_picdec_cache_begin(uint32_t addr, int size) {
+    _pdc_inst.addr = addr;
+    _pdc_inst.size = size;
+    _pdc_inst.base = -(PICO_PICDEC_CACHE + 1);
+    _pdc = &_pdc_inst;
+}
+void pico_picdec_cache_end(void) { _pdc = NULL; }
+#endif /* HAVE_PICO */
+
 gfx_pixmap_color_t gfx_sci0_pic_colors[GFX_SCI0_PIC_COLORS_NR]; /* Initialized during initialization */
 
 static int _gfxr_pic0_colors_initialized = 0;
@@ -150,6 +193,14 @@ gfxr_init_pic(gfx_mode_t *mode, int ID, int sci1)
 
 	pic->mode = mode;
 
+#ifdef HAVE_PICO
+	/* Defer all 64KB index_data allocations to gfxr_interpreter_calculate_pic
+	   so they can be interleaved with the decode to stay within 208KB peak. */
+	pic->control_map  = gfx_new_pixmap(320, 200, ID, 2, 0);
+	pic->priority_map = gfx_new_pixmap(mode->xfact * 320, mode->yfact * 200, ID, 1, 0);
+	pic->visual_map   = gfx_new_pixmap(320 * mode->xfact, 200 * mode->yfact, ID, 0, 0);
+	pic->aux_map = NULL;
+#else
 	pic->control_map = gfx_pixmap_alloc_index_data(gfx_new_pixmap(320, 200, ID, 2, 0));
 
 	pic->priority_map = gfx_pixmap_alloc_index_data(gfx_new_pixmap(mode->xfact * 320, mode->yfact * 200,
@@ -158,6 +209,9 @@ gfxr_init_pic(gfx_mode_t *mode, int ID, int sci1)
 
 	pic->visual_map = gfx_pixmap_alloc_index_data(gfx_new_pixmap(320 * mode->xfact,
 								     200 * mode->yfact, ID, 0, 0));
+	pic->aux_map = (byte*)sci_malloc(GFXR_AUX_MAP_SIZE);
+#endif
+
 	pic->visual_map->colors = gfx_sci0_pic_colors;
 	pic->visual_map->colors_nr = GFX_SCI0_PIC_COLORS_NR;
 	pic->visual_map->color_key = GFX_PIXMAP_COLOR_KEY_NONE;
@@ -196,14 +250,24 @@ gfxr_init_pic(gfx_mode_t *mode, int ID, int sci1)
 void
 gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
 {
-	memset(pic->visual_map->index_data, 0x00, (320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact));
-	memset(pic->visual_map->index_data + (320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact),
-	       0xff, pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size)); /* white */
-	memset(pic->priority_map->index_data + (320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact),
-	       0x0, pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size));
-	memset(pic->priority_map->index_data, 0x0a, sci_titlebar_size * (pic->mode->yfact * 320 * pic->mode->xfact));
-	memset(pic->control_map->index_data, 0, GFXR_AUX_MAP_SIZE);
-	memset(pic->aux_map, 0, GFXR_AUX_MAP_SIZE);
+	if (pic->visual_map->index_data) {
+		memset(pic->visual_map->index_data, 0x00,
+		       320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact);
+		memset(pic->visual_map->index_data
+		       + 320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact,
+		       0xff, pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size));
+	}
+	if (pic->priority_map->index_data) {
+		memset(pic->priority_map->index_data
+		       + 320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact,
+		       0x0, pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size));
+		memset(pic->priority_map->index_data, 0x0a,
+		       sci_titlebar_size * pic->mode->yfact * 320 * pic->mode->xfact);
+	}
+	if (pic->control_map->index_data)
+		memset(pic->control_map->index_data, 0, GFXR_AUX_MAP_SIZE);
+	if (pic->aux_map)
+		memset(pic->aux_map, 0, GFXR_AUX_MAP_SIZE);
 }
 
 
@@ -237,7 +301,9 @@ _gfxr_auxbuf_line_draw(gfxr_pic_t *pic, rect_t line, int color, int color2, int 
 	int dx, dy, incrE, incrNE, d, finalx, finaly;
 	int x = line.x;
 	int y = line.y + sci_titlebar_size;
-	unsigned char *buffer = pic->aux_map;
+	unsigned char *buffer;
+	if (!pic->aux_map) return;
+	buffer = pic->aux_map;
 	int linewidth = 320;
 
 	dx = line.xl;
@@ -285,7 +351,9 @@ _gfxr_auxbuf_line_clear(gfxr_pic_t *pic, rect_t line, int color, int sci_titleba
 	int dx, dy, incrE, incrNE, d, finalx, finaly;
 	int x = line.x;
 	int y = line.y + sci_titlebar_size;
-	unsigned char *buffer = pic->aux_map;
+	unsigned char *buffer;
+	if (!pic->aux_map) return;
+	buffer = pic->aux_map;
 	int linewidth = 320;
 	int color2 = color;
 
@@ -591,6 +659,7 @@ _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
 {
 	int xx = 0, yy = rad_y;
 	int i, x_i, y_i;
+	if (!buffer) return;
 	int xr = 2 * rad_x * rad_x;
 	int yr = 2 * rad_y * rad_y;
 
@@ -656,6 +725,7 @@ static inline void
 _gfxr_auxplot_brush(gfxr_pic_t *pic, byte *buffer, int yoffset, int offset, int plot,
 		    int color, gfx_brush_mode_t brush_mode, int randseed)
 {
+	if (!buffer) return;
 	/* yoffset 63680, offset 320, plot 1, color 34, brush_mode 0, randseed 432)*/
 	/* Auxplot: Used by plot_aux_pattern to plot to visual and priority */
 	int xc, yc;
@@ -802,10 +872,10 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 
 		if (random == PLOT_AUX_PATTERN_NO_RANDOM) {
 
-			if (mask & map_nr)
+			if ((mask & map_nr) && map->index_data)
 				memset(map->index_data + yoffset + offset + x, control, width);
 
-			if (map_nr == GFX_MASK_CONTROL)
+			if (map_nr == GFX_MASK_CONTROL && pic->aux_map)
 				for (j = x; j < x + width; j++)
 					pic->aux_map[yoffset + offset + j] |= mask;
 
@@ -813,10 +883,10 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 			for (j = 0; j < height; j++) {
 				if (random_data[random_index >> 3] & (0x80 >> (random_index & 7))) {
 					/* The 'seemingly' random decision */
-					if (mask & GFX_MASK_CONTROL)
+					if ((mask & GFX_MASK_CONTROL) && pic->control_map->index_data)
 						pic->control_map->index_data[yoffset + x + offset + j] = control;
 
-					pic->aux_map[yoffset + x + offset + j] |= mask;
+					if (pic->aux_map) pic->aux_map[yoffset + x + offset + j] |= mask;
 
 					if (mask & GFX_MASK_VISUAL)
 						_gfxr_auxplot_brush(pic, pic->visual_map->index_data,
@@ -1374,6 +1444,31 @@ gfxr_draw_cel1(int id, int loop, int cel, int mirrored, byte *resource, int size
 extern void
 _gfx_crossblit_simple(byte *dest, byte *src, int dest_line_width, int src_line_width, int xl, int yl, int bpp);
 
+/* Byte/word accessors: use PSRAM streaming cache when _pdc is set, direct otherwise. */
+#ifdef HAVE_PICO
+#define _RB(p)   (_pdc ? _pdc_rb(p)   : *(resource + (p)))
+#define _RBS(p)  (_pdc ? _pdc_rbs(p)  : *((signed char *)resource + (p)))
+#define _RU16(p) (_pdc ? _pdc_ru16(p) : getUInt16(resource + (p)))
+#undef  GET_ABS_COORDS
+#define GET_ABS_COORDS(x, y) \
+  temp = _RB(pos++); x = _RB(pos++); y = _RB(pos++); \
+  x |= (temp & 0xf0) << 4; y |= (temp & 0x0f) << 8;
+#undef  GET_REL_COORDS
+#define GET_REL_COORDS(x, y) \
+  temp = _RB(pos++); \
+  if (temp & 0x80) x -= ((temp >> 4) & 0x7); else x += (temp >> 4); \
+  if (temp & 0x08) y -= (temp & 0x7);         else y += (temp & 0x7);
+#undef  GET_MEDREL_COORDS
+#define GET_MEDREL_COORDS(oldx, oldy) \
+  temp = _RB(pos++); \
+  if (temp & 0x80) y = oldy - (temp & 0x7f); else y = oldy + temp; \
+  x = oldx + _RBS(pos++);
+#else
+#define _RB(p)   (*(resource + (p)))
+#define _RBS(p)  (*((signed char *)resource + (p)))
+#define _RU16(p) (getUInt16(resource + (p)))
+#endif
+
 void
 gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 		byte *resource, gfxr_pic0_params_t *style, int resid, int sci1,
@@ -1427,7 +1522,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 	/* Main loop */
 	while (pos < size) {
-		op = *(resource + pos++);
+		op = _RB(pos++);
 
 		switch (op) {
 
@@ -1435,7 +1530,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 			p0printf("Set color @%d\n", pos);
 
 			if (!sci1) {
-				pal = *(resource + pos++);
+				pal = _RB(pos++);
 				index = pal % GFXR_PIC0_PALETTE_SIZE;
 				pal /= GFXR_PIC0_PALETTE_SIZE;
 
@@ -1447,7 +1542,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 				}
 
 				color = palette[pal][index];
-			} else color = *(resource + pos++);
+			} else color = _RB(pos++);
 			p0printf("  color <- %02x [%d/%d]\n", color, pal, index);
 			drawenable |= GFX_MASK_VISUAL;
 			goto end_op_loop;
@@ -1463,12 +1558,12 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 			p0printf("Set priority @%d\n", pos);
 
 			if (!sci1) {
-				pal = *(resource + pos++);
+				pal = _RB(pos++);
 				index = pal % GFXR_PIC0_PALETTE_SIZE;
 				pal /= GFXR_PIC0_PALETTE_SIZE; /* Ignore pal */
 				
 				priority = priority_table[index];
-			} else priority = *(resource + pos++);
+			} else priority = _RB(pos++);
 
 			p0printf("  priority <- %d [%d/%d]\n", priority, pal, index);
 			drawenable |= GFX_MASK_PRIORITY;
@@ -1484,7 +1579,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 		case PIC_OP_SHORT_PATTERNS:
 			p0printf("Short patterns @%d\n", pos);
 			if (pattern_code & PATTERN_FLAG_USE_PATTERN) {
-				pattern_nr = ((*(resource + pos++)) >> 1) & 0x7f;
+				pattern_nr = (_RB(pos++) >> 1) & 0x7f;
 				p0printf("  pattern_nr <- %d\n", pattern_nr);
 			}
 
@@ -1493,9 +1588,9 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 			_gfxr_draw_pattern(pic, x, y, color, priority, control, drawenable, pattern_code,
 					   pattern_size, pattern_nr, style->brush_mode, sci_titlebar_size);
 
-			while (*(resource + pos) < PIC_OP_FIRST) {
+			while (_RB(pos) < PIC_OP_FIRST) {
 				if (pattern_code & PATTERN_FLAG_USE_PATTERN) {
-					pattern_nr = ((*(resource + pos++)) >> 1) & 0x7f;
+					pattern_nr = (_RB(pos++) >> 1) & 0x7f;
 					p0printf("  pattern_nr <- %d\n", pattern_nr);
 				}
 
@@ -1510,7 +1605,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 		case PIC_OP_MEDIUM_LINES:
 			p0printf("Medium lines @%d\n", pos);
 			GET_ABS_COORDS(oldx, oldy);
-			while (*(resource + pos) < PIC_OP_FIRST) {
+			while (_RB(pos) < PIC_OP_FIRST) {
 #if 0
 				fprintf(stderr,"Medium-line: [%04x] from %d,%d, data %02x %02x (dx=%d)", pos, oldx, oldy,
 					0xff & resource[pos], 0xff & resource[pos+1], *((signed char *) resource + pos + 1));
@@ -1529,7 +1624,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 		case PIC_OP_LONG_LINES:
 			p0printf("Long lines @%d\n", pos);
 			GET_ABS_COORDS(oldx, oldy);
-			while (*(resource + pos) < PIC_OP_FIRST) {
+			while (_RB(pos) < PIC_OP_FIRST) {
 				GET_ABS_COORDS(x,y);
 				_gfxr_draw_line(pic, oldx, oldy, x, y, color, priority, control, drawenable, line_mode, 
 						PIC_OP_LONG_LINES, sci_titlebar_size);
@@ -1542,7 +1637,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 			p0printf("Short lines @%d\n", pos);
 			GET_ABS_COORDS(oldx, oldy);
 			x = oldx; y = oldy;
-			while (*(resource + pos) < PIC_OP_FIRST) {
+			while (_RB(pos) < PIC_OP_FIRST) {
 				GET_REL_COORDS(x,y);
 				_gfxr_draw_line(pic, oldx, oldy, x, y, color, priority, control, drawenable, line_mode, 
 						PIC_OP_SHORT_LINES, sci_titlebar_size);
@@ -1553,7 +1648,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 		case PIC_OP_FILL:
 			p0printf("Fill @%d\n", pos);
-			while (*(resource + pos) < PIC_OP_FIRST) {
+			while (_RB(pos) < PIC_OP_FIRST) {
 				/*fprintf(stderr,"####################\n"); */
 				GET_ABS_COORDS(x, y);
 				p0printf("Abs coords %d,%d\n", x, y);
@@ -1616,16 +1711,16 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 		case PIC_OP_SET_PATTERN:
 			p0printf("Set pattern @%d\n", pos);
-			pattern_code = (*(resource + pos++));
+			pattern_code = _RB(pos++);
 			pattern_size = pattern_code & 0x07;
 			goto end_op_loop;
 
 
 		case PIC_OP_ABSOLUTE_PATTERN:
 			p0printf("Absolute pattern @%d\n", pos);
-			while (*(resource + pos) < PIC_OP_FIRST) {
+			while (_RB(pos) < PIC_OP_FIRST) {
 				if (pattern_code & PATTERN_FLAG_USE_PATTERN) {
-					pattern_nr = ((*(resource + pos++)) >> 1) & 0x7f;
+					pattern_nr = (_RB(pos++) >> 1) & 0x7f;
 					p0printf("  pattern_nr <- %d\n", pattern_nr);
 				}
 
@@ -1639,7 +1734,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 		case PIC_OP_SET_CONTROL:
 			p0printf("Set control @%d\n", pos);
-			control = (*(resource + pos++)) & 0xf;
+			control = _RB(pos++) & 0xf;
 			drawenable |= GFX_MASK_CONTROL;
 			goto end_op_loop;
 
@@ -1653,7 +1748,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 		case PIC_OP_MEDIUM_PATTERNS:
 			p0printf("Medium patterns @%d\n", pos);
 			if (pattern_code & PATTERN_FLAG_USE_PATTERN) {
-				pattern_nr = ((*(resource + pos++)) >> 1) & 0x7f;
+				pattern_nr = (_RB(pos++) >> 1) & 0x7f;
 				p0printf("  pattern_nr <- %d\n", pattern_nr);
 			}
 
@@ -1663,9 +1758,9 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 					   pattern_size, pattern_nr, style->brush_mode, sci_titlebar_size);
 
 			x = oldx; y = oldy;
-			while (*(resource + pos) < PIC_OP_FIRST) {
+			while (_RB(pos) < PIC_OP_FIRST) {
 				if (pattern_code & PATTERN_FLAG_USE_PATTERN) {
-					pattern_nr = ((*(resource + pos++)) >> 1) & 0x7f;
+					pattern_nr = (_RB(pos++) >> 1) & 0x7f;
 					p0printf("  pattern_nr <- %d\n", pattern_nr);
 				}
 
@@ -1678,7 +1773,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 
 		case PIC_OP_OPX:
-			opx = *(resource + pos++);
+			opx = _RB(pos++);
 			p0printf("OPX: ");
 
 			if (sci1) opx += SCI1_OP_OFFSET; /* See comment at the definition of SCI1_OP_OFFSET. */
@@ -1691,8 +1786,8 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 			case PIC_SCI0_OPX_SET_PALETTE_ENTRIES:
 				p0printf("Set palette entry @%d\n", pos);
-				while (*(resource + pos) < PIC_OP_FIRST) {
-					index = *(resource + pos++);
+				while (_RB(pos) < PIC_OP_FIRST) {
+					index = _RB(pos++);
 					pal = index / GFXR_PIC0_PALETTE_SIZE;
 					index %= GFXR_PIC0_PALETTE_SIZE;
 
@@ -1700,14 +1795,14 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 						GFXERROR("Attempt to write to invalid palette %d\n", pal);
 						return;
 					}
-					palette[pal][index] = *(resource + pos++);
+					palette[pal][index] = _RB(pos++);
 				}
 				goto end_op_loop;
 
 
 			case PIC_SCI0_OPX_SET_PALETTE:
 				p0printf("Set palette @%d\n", pos);
-				pal = *(resource + pos++);
+				pal = _RB(pos++);
 				if (pal >= GFXR_PIC0_NUM_PALETTES) {
 					GFXERROR("Attempt to write to invalid palette %d\n", pal);
 					return;
@@ -1715,7 +1810,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 				p0printf("  palette[%d] <- (", pal);
 				for (index = 0; index < GFXR_PIC0_PALETTE_SIZE; index++) {
-					palette[pal][index] = *(resource + pos++);
+					palette[pal][index] = _RB(pos++);
 					if (index > 0)
 						p0printf(",");
 					if (!(index & 0x7))
@@ -1773,11 +1868,25 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 					0, 0, 0, 0, 0, 0, 0, 0, 16, 0);
 
 				GET_ABS_COORDS(posx, posy);
-				bytesize = (*(resource + pos))+(*(resource + pos + 1) << 8);
+				bytesize = _RU16(pos);
 				p0printf("(%d, %d)\n", posx, posy);
 				pos += 2;
-				if (!sci1 && !nodraw) 
-					view = gfxr_draw_cel0(-1,-1,-1, resource + pos, bytesize, NULL, 0); 
+#ifdef HAVE_PICO
+				if (_pdc) {
+					byte *_vd = (byte *)sci_malloc(bytesize);
+					if (_vd) {
+						psram_load(_pdc->addr + pos, _vd, bytesize);
+						if (!sci1 && !nodraw)
+							view = gfxr_draw_cel0(-1,-1,-1, _vd, bytesize, NULL, 0);
+						else
+							view = gfxr_draw_cel1(-1,-1,-1, 0, _vd, bytesize, NULL,
+							                      static_pal_nr == GFX_SCI1_AMIGA_COLORS_NR);
+						free(_vd);
+					} else view = NULL;
+				} else
+#endif
+				if (!sci1 && !nodraw)
+					view = gfxr_draw_cel0(-1,-1,-1, resource + pos, bytesize, NULL, 0);
 				else
 					view = gfxr_draw_cel1(-1,-1,-1, 0, resource + pos, bytesize, NULL,
 							      static_pal_nr == GFX_SCI1_AMIGA_COLORS_NR);
@@ -1819,18 +1928,20 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 				gfx_xlate_pixmap(view, mode, GFX_XLATE_FILTER_NONE);
 
-				if (flags & DRAWPIC01_FLAG_OVERLAID_PIC)
-					view_transparentize(view, pic->visual_map->index_data, 
-							    posx, sci_titlebar_size+posy, 
-							    view->index_xl, view->index_yl);
+				if (pic->visual_map->index_data) {
+					if (flags & DRAWPIC01_FLAG_OVERLAID_PIC)
+						view_transparentize(view, pic->visual_map->index_data,
+								    posx, sci_titlebar_size+posy,
+								    view->index_xl, view->index_yl);
 
-				_gfx_crossblit_simple(pic->visual_map->index_data+(sci_titlebar_size*320)+
-						      posy*320+posx,
-						      view->index_data,
-						      pic->visual_map->index_xl, view->index_xl,
-						      view->index_xl,
-						      view->index_yl,
-						      1);
+					_gfx_crossblit_simple(pic->visual_map->index_data+(sci_titlebar_size*320)+
+							      posy*320+posx,
+							      view->index_data,
+							      pic->visual_map->index_xl, view->index_xl,
+							      view->index_xl,
+							      view->index_yl,
+							      1);
+				}
 
 				gfx_free_mode(mode);
 				gfx_free_pixmap(NULL, view);
@@ -1857,7 +1968,7 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 				pri_table[15] = 190;
 
 				for (i = 1; i < 15; i++)
-					pri_table[i] = resource[pos++];
+					pri_table[i] = _RB(pos++);
 			}
 				goto end_op_loop;
 
@@ -1936,22 +2047,24 @@ gfxr_draw_pic11(gfxr_pic_t *pic, int flags, int default_palette, int size,
 		
 		gfx_xlate_pixmap(view, mode, GFX_XLATE_FILTER_NONE);
 		
-		if (flags & DRAWPIC01_FLAG_OVERLAID_PIC)
-			view_transparentize(view, pic->visual_map->index_data, 
-					    0, 0, 
-					    view->index_xl, view->index_yl);
-		
-		/* Hack to prevent overflowing the visual map buffer.
-		   Yes, this does happen otherwise. */
-		if (view->index_yl + sci_titlebar_size > 200)
-			sci_titlebar_size = 0;
+		if (pic->visual_map->index_data) {
+			if (flags & DRAWPIC01_FLAG_OVERLAID_PIC)
+				view_transparentize(view, pic->visual_map->index_data,
+						    0, 0,
+						    view->index_xl, view->index_yl);
 
-		_gfx_crossblit_simple(pic->visual_map->index_data+sci_titlebar_size*view->index_xl,
-				      view->index_data,
-				      pic->visual_map->index_xl, view->index_xl,
-				      view->index_xl,
-				      view->index_yl,
-				      1);
+			/* Hack to prevent overflowing the visual map buffer.
+			   Yes, this does happen otherwise. */
+			if (view->index_yl + sci_titlebar_size > 200)
+				sci_titlebar_size = 0;
+
+			_gfx_crossblit_simple(pic->visual_map->index_data+sci_titlebar_size*view->index_xl,
+					      view->index_data,
+					      pic->visual_map->index_xl, view->index_xl,
+					      view->index_xl,
+					      view->index_yl,
+					      1);
+		}
 	} else 
 	{
 		GFXWARN("No view was contained in SCI1.1 pic resource");

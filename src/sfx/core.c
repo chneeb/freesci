@@ -699,6 +699,12 @@ sfx_add_song(sfx_state_t *self, song_iterator_t *it, int priority, song_handle_t
 #ifdef DEBUG_SONG_API
 	fprintf(stderr, "[sfx-core] Adding song: %08lx at %d, it=%p\n", handle, priority, it);
 #endif
+
+	if (self->flags & SFX_STATE_FLAG_NOSOUND) {
+		if (it) songit_free(it);
+		return 0;
+	}
+
 	if (!it) {
 		fprintf(stderr, "[SFX] Attempt to add empty song with handle %08lx\n", handle);
 		return -1;

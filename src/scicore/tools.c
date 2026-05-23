@@ -207,6 +207,11 @@ _SCIGNUkdebug(const char *funcname, state_t *s, const char *file, int line, int 
 	va_list xargs;
 	int error = ((area == SCIkWARNING_NR) || (area == SCIkERROR_NR));
 
+#ifdef HAVE_PICO
+	/* Suppress warnings on Pico to keep UART uncluttered; keep errors. */
+	if (area == SCIkWARNING_NR) return;
+#endif
+
 	if (error || (s->debug_mode & (1 << area))) { /* Is debugging enabled for this area? */
 
 		_SCIkprintf(stderr, "FSCI: ");
@@ -262,11 +267,13 @@ void sci_gettime(long *seconds, long *useconds)
 	*seconds = tm/1000;
 	*useconds = (tm%1000)*1000;
 }
+#elif defined(HAVE_PICO)
+/* sci_gettime and sci_get_current_time defined in src/platform/pico/pico_time.c */
 #else
 #  error "You need to provide a microsecond resolution sci_gettime implementation for your platform!"
 #endif
 
-
+#ifndef HAVE_PICO
 void
 sci_get_current_time(GTimeVal *val)
 {
@@ -275,6 +282,7 @@ sci_get_current_time(GTimeVal *val)
 	val->tv_sec = foo;
 	val->tv_usec = bar;
 }
+#endif /* !HAVE_PICO */
 
 
 /************* Directory entities *************/
@@ -498,6 +506,8 @@ sci_get_homedir(void)
 	return NULL;
 #elif defined(__amigaos4__)
 	return "/PROGDIR/";
+#elif defined(HAVE_PICO)
+	return NULL;   /* no home dir on Pico; saves go in the game directory */
 #else
 #  error Please add a $HOME policy for your platform!
 #endif

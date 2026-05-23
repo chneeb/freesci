@@ -29,6 +29,26 @@
 #include <gfx_operations.h>
 
 #include <ctype.h>
+#ifdef HAVE_PICO
+#include "psram_alloc.h"
+#include <malloc.h>
+#include <sciresource.h>
+#include <pico/stdlib.h>
+
+/* Filled by gfxr_interpreter_calculate_pic pass 2; consumed in gfxop_new_pic */
+byte *g_pico_decode_priority_buf = NULL;
+
+/* Reserved right after pico_free_visual to prevent small allocs from
+   fragmenting the freed visual[0] block before sci_resmgr.c needs it. */
+byte *g_pico_decode_visual_buf = NULL;
+
+/* Declared in pico_driver.c */
+extern void pico_free_visual(gfx_driver_t *drv);
+extern void pico_alloc_visual(gfx_driver_t *drv);
+extern void pico_connect_engine_priority(gfx_pixmap_t *priority_map);
+extern void pico_render_background(gfx_driver_t *drv);
+extern void pico_setup_sci0_palette(gfx_driver_t *drv);
+#endif
 
 #define PRECISE_PRIORITY_MAP /* Duplicate all operations on the local priority map as appropriate */
 
@@ -179,14 +199,23 @@ _gfxop_grab_pixmap(gfx_state_t *state, gfx_pixmap_t **pxmp, int x, int y,
 		*pxmp = gfx_new_pixmap(unscaled_xl, unscaled_yl, GFX_RESID_NONE, 0, 0);
 	else
 		if (xl * yl > (*pxmp)->xl * (*pxmp)->yl) {
+#ifdef HAVE_PICO
+			if ((*pxmp)->data) {
+				gfx_pixmap_free_data(*pxmp);
+				(*pxmp)->data = NULL;
+			}
+#else
 			gfx_pixmap_free_data(*pxmp);
 			(*pxmp)->data = NULL;
+#endif
 		}
 
 	if (!(*pxmp)->data) {
 		(*pxmp)->index_xl = unscaled_xl + 1;
 		(*pxmp)->index_yl = unscaled_yl + 1;
+#ifndef HAVE_PICO
 		gfx_pixmap_alloc_data(*pxmp, state->driver->mode);
+#endif
 	}
 	return state->driver->grab_pixmap(state->driver, *zone, *pxmp,
 					  priority? GFX_MASK_PRIORITY : GFX_MASK_VISUAL);
@@ -293,11 +322,11 @@ _gfxop_draw_pixmap(gfx_driver_t *driver, gfx_pixmap_t *pxm, int priority, int co
 		point_t original_pos = gfx_point(dest.x / driver->mode->xfact,
 						     dest.y / driver->mode->yfact);
 
-		if (control >= 0)
+		if (control >= 0 && control_map)
 			_gfxop_draw_control(control_map, pxm, control, original_pos);
 
 #ifdef PRECISE_PRIORITY_MAP
-		if (priority >= 0)
+		if (priority >= 0 && priority_map->index_data)
 			_gfxop_draw_priority(priority_map, pxm, priority, original_pos);
 #endif
 	}
@@ -629,9 +658,25 @@ _gfxop_init_common(gfx_state_t *state, gfx_options_t *options, void *misc_payloa
 	state->mouse_pointer = state->mouse_pointer_bg = NULL;
 	state->mouse_pointer_visible = 0;
 
-	init_aux_pixmap(&(state->control_map));
+#ifdef HAVE_PICO
+	/* Pico: allocate the pixmap struct but NOT index_data — defer that 64KB
+	   allocation to gfxop_new_pic pass 2.  index_data stays NULL until the
+	   first room is drawn; all write sites are already null-guarded.
+	   Also skip control_map (null-guarded) and alias static_priority_map. */
+	{
+		gfx_pixmap_t *pm = gfx_new_pixmap(320, 200, GFX_RESID_NONE, 0, 0);
+		pm->flags |= GFX_PIXMAP_FLAG_EXTERNAL_PALETTE;
+		pm->colors_nr = DEFAULT_COLORS_NR;
+		pm->colors = default_colors;
+		state->priority_map = pm;
+	}
+	state->control_map = NULL;
+	state->static_priority_map = state->priority_map;
+#else
 	init_aux_pixmap(&(state->priority_map));
+	init_aux_pixmap(&(state->control_map));
 	init_aux_pixmap(&(state->static_priority_map));
+#endif
 
 	state->options = options;
 	state->mouse_pointer_in_hw = 0;
@@ -709,10 +754,15 @@ gfxop_exit(gfx_state_t *state)
 		state->priority_map = NULL;
 	}
 
+#ifdef HAVE_PICO
+	/* static_priority_map is aliased to priority_map on Pico — already freed above */
+	state->static_priority_map = NULL;
+#else
 	if (state->static_priority_map) {
 		gfx_free_pixmap(state->driver, state->static_priority_map);
 		state->static_priority_map = NULL;
 	}
+#endif
 
 	if (state->mouse_pointer_bg) {
 		gfx_free_pixmap(state->driver, state->mouse_pointer_bg);
@@ -735,7 +785,14 @@ static int
 _gfxop_scan_one_bitmask(gfx_pixmap_t *pixmap, rect_t zone)
 {
 	int retval = 0;
-	int pixmap_xscale = pixmap->index_xl / 320;
+	int pixmap_xscale;
+
+#ifdef HAVE_PICO
+	if (!pixmap || !pixmap->index_data)
+		return 0;
+#endif
+
+	pixmap_xscale = pixmap->index_xl / 320;
 	int pixmap_yscale = pixmap->index_yl / 200;
 	int line_width = pixmap_yscale * pixmap->index_xl;
 	int startindex = (line_width * zone.y) + (zone.x * pixmap_xscale);
@@ -1026,7 +1083,7 @@ point_clip(point_t *start, point_t *end, rect_t clip, int xfact, int yfact)
 static void
 draw_line_to_control_map(gfx_state_t *state, point_t start, point_t end, gfx_color_t color)
 {
-	if (color.mask & GFX_MASK_CONTROL)
+	if ((color.mask & GFX_MASK_CONTROL) && state->control_map)
 		if (!point_clip(&start, &end, state->clip_zone_unscaled, 0, 0))
 			gfx_draw_line_pixmap_i(state->control_map, start, end, color.control);
 }
@@ -1273,7 +1330,7 @@ gfxop_draw_box(gfx_state_t *state, rect_t box, gfx_color_t color1, gfx_color_t c
 
 	_gfxop_add_dirty(state, box);
 
-	if (color1.mask & GFX_MASK_CONTROL) {
+	if ((color1.mask & GFX_MASK_CONTROL) && state->control_map) {
 		/* Write control block, clipped by 320x200 */
 		memcpy(&new_box, &box, sizeof(rect_t));
 		_gfxop_clip(&new_box, gfx_rect(0, 0, 320, 200));
@@ -1683,9 +1740,20 @@ gfxop_set_pointer_view(gfx_state_t *state, int nr, int loop, int cel, point_t  *
 	gfx_pixmap_t *new_pointer = NULL;
 
 	BASIC_CHECKS(GFX_FATAL);
+#ifdef HAVE_PICO
+	printf("[ptr] set_pointer_view(%d, %d, %d) start\n", nr, loop, cel); stdio_flush();
+#endif
 
 	new_pointer = _gfxr_get_cel(state, nr, &real_loop, &real_cel,
 				    0); /* FIXME: For now, don't palettize pointers */
+#ifdef HAVE_PICO
+	printf("[ptr] _gfxr_get_cel(%d) returned %p xl=%d yl=%d psram=%d\n",
+	       nr, (void *)new_pointer,
+	       new_pointer ? new_pointer->xl : -1,
+	       new_pointer ? new_pointer->yl : -1,
+	       new_pointer ? new_pointer->psram_valid : -1);
+	stdio_flush();
+#endif
 
 	if (hotspot)
 	{
@@ -1696,13 +1764,21 @@ gfxop_set_pointer_view(gfx_state_t *state, int nr, int loop, int cel, point_t  *
 	if (!new_pointer) {
 		GFXWARN("Attempt to set invalid pointer #%d\n", nr);
 		return GFX_ERROR;
-	} else 
+	} else
 	{
 		if (real_loop != loop || real_cel != cel) {
 			GFXDEBUG("Changed loop/cel from %d/%d to %d/%d in view %d\n",
 				 loop, cel, real_loop, real_cel, nr);
 		}
+#ifdef HAVE_PICO
+		{
+			int r = _gfxop_set_pointer(state, new_pointer);
+			printf("[ptr] _gfxop_set_pointer(%d) -> %d\n", nr, r); stdio_flush();
+			return r;
+		}
+#else
 		return _gfxop_set_pointer(state, new_pointer);
+#endif
 	}
 }
 
@@ -2107,7 +2183,43 @@ gfxop_get_pic_metainfo(gfx_state_t *state)
 int
 gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 {
+	int retval;
 	BASIC_CHECKS(GFX_FATAL);
+
+#ifdef HAVE_PICO
+	/* Free all cached pics and reset PSRAM before decoding the new room. */
+	gfxr_free_all_pics(state->driver, state->resstate);
+
+	/* Evict old room's raw pic resource data from LRU (61KB).
+	   state->pic_nr is still the old room number at this point. */
+	{
+		resource_mgr_t *resmgr = (resource_mgr_t *)state->resstate->misc_payload;
+		resource_t *old_res = scir_find_resource(resmgr, sci_pic, state->pic_nr, 0);
+		scir_evict_resource_data(resmgr, old_res);
+	}
+
+	/* Free visual[0] (64KB) and priority_map->index_data to make room for decode. */
+	pico_free_visual(state->driver);
+	if (state->priority_map && state->priority_map->index_data) {
+		free(state->priority_map->index_data);
+		state->priority_map->index_data = NULL;
+	}
+
+	/* Pin the freed visual[0] block before resource-manager overhead can
+	   fragment it — any small alloc between here and sci_resmgr.c's Pass 1
+	   would carve into the only 64KB block and make malloc(64000) fail. */
+	g_pico_decode_visual_buf = malloc(GFXR_AUX_MAP_SIZE);
+	if (!g_pico_decode_visual_buf) {
+		GFXERROR("Failed to reserve visual decode buffer\n");
+		pico_alloc_visual(state->driver);
+		return GFX_FATAL;
+	}
+
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] gfxop_new_pic(%d): free=%d arena=%d used=%d\n",
+	         nr, _mi.fordblks, _mi.arena, _mi.uordblks);
+	  stdio_flush(); }
+#endif
 
 	gfxr_tag_resources(state->resstate);
 	state->tag_mode = 1;
@@ -2131,12 +2243,55 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		}
 
 		state->pic = state->pic_unscaled = NULL;
+#ifdef HAVE_PICO
+		if (g_pico_decode_visual_buf) { free(g_pico_decode_visual_buf); g_pico_decode_visual_buf = NULL; }
+#endif
 		return GFX_ERROR;
 	}
 
 	state->pic_nr = nr;
 
-	return _gfxop_set_pic(state);
+	retval = _gfxop_set_pic(state);
+
+#ifdef HAVE_PICO
+	/* Wire the decoded priority buffer into state->priority_map.
+	   _gfxop_set_pic's gfx_copy_pixmap_box_i was a no-op (pic's priority NULL),
+	   so priority_map->index_data is still NULL — assign it now. */
+	if (g_pico_decode_priority_buf) {
+		state->priority_map->index_data = g_pico_decode_priority_buf;
+		/* static_priority_map is aliased to priority_map on Pico */
+		g_pico_decode_priority_buf = NULL;
+	}
+	pico_connect_engine_priority(state->priority_map);
+
+	/* Move priority buffer to PSRAM, freeing 64KB SRAM for visual[0]. */
+	{
+		gfx_pixmap_t *pm = state->priority_map;
+		if (pm && pm->index_data) {
+			size_t sz = (size_t)(pm->index_xl * pm->index_yl);
+			pm->psram_addr  = psram_alloc(sz);
+			pm->psram_valid = 1;
+			psram_store(pm->psram_addr, pm->index_data, sz);
+			free(pm->index_data);
+			pm->index_data = NULL;
+		}
+		{ struct mallinfo _mi = mallinfo();
+		  printf("[ops] after pri-psram(%s): free=%d\n",
+		         (pm && !pm->index_data) ? "freed" : "skip", _mi.fordblks);
+		  stdio_flush(); }
+	}
+
+	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors.
+	   Must happen before pico_render_background calls flush_region. */
+	pico_setup_sci0_palette(state->driver);
+
+	/* Allocate visual[0] now (the freed 64KB block is available) and render
+	   the background from PSRAM so the room art appears immediately. */
+	pico_alloc_visual(state->driver);
+	pico_render_background(state->driver);
+#endif
+
+	return retval;
 }
 
 

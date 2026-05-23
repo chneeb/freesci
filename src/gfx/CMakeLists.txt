@@ -31,3 +31,7 @@ add_library(scigfx STATIC
     $<TARGET_OBJECTS:alpha_mvi_32>
     $<TARGET_OBJECTS:alpha_mvi_32p>
 )
+
+if(PLATFORM STREQUAL "pico")
+    target_link_libraries(scigfx PRIVATE scipicoplatform)
+endif()

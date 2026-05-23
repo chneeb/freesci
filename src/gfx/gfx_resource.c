@@ -181,7 +181,18 @@ gfxr_endianness_adjust(gfx_pixmap_t *pixmap, gfx_mode_t *mode)
         int bytespp;
         byte *data;
 
-        if (!pixmap || !pixmap->data || !mode) {
+        if (!pixmap || !mode) {
+                GFXERROR("gfxr_endianness_adjust(): Invoked with invalid values\n");
+		BREAKPOINT();
+                return NULL;
+        }
+
+#ifdef HAVE_PICO
+        if (!pixmap->data)
+                return pixmap;
+#endif
+
+        if (!pixmap->data) {
                 GFXERROR("gfxr_endianness_adjust(): Invoked with invalid values\n");
 		BREAKPOINT();
                 return NULL;
@@ -380,6 +391,25 @@ gfx_xlate_pixmap(gfx_pixmap_t *pxm, gfx_mode_t *mode, gfx_xlate_filter_t filter)
 	}
 
 
+#ifdef HAVE_PICO
+	/* On Pico the driver blits index_data directly via pico_blit_indexed.
+	   Skip translation for: large maps (>16384 bytes) OR any cel whose
+	   index_data was already offloaded to PSRAM (psram_valid=1, index_data=NULL).
+	   In both cases pxm->data stays NULL so pico_draw_pixmap uses the
+	   pico_blit_indexed path, which reads PSRAM row-by-row.
+	   xl/yl must still be set, since pointer drawing and bounds checks read them. */
+	if (mode->bytespp == 1 && (pxm->index_xl * pxm->index_yl > 16384 || pxm->psram_valid)) {
+		if (pxm->flags & GFX_PIXMAP_FLAG_SCALED_INDEX) {
+			pxm->xl = pxm->index_xl;
+			pxm->yl = pxm->index_yl;
+		} else {
+			pxm->xl = pxm->index_xl * mode->xfact;
+			pxm->yl = pxm->index_yl * mode->yfact;
+		}
+		return;
+	}
+#endif
+
 	if (!pxm->data) {
 		pxm->data = (byte*)sci_malloc(mode->xfact * mode->yfact * pxm->index_xl * pxm->index_yl * mode->bytespp + 1);
 		/* +1: Eases coying on BE machines in 24 bpp packed mode */
@@ -429,6 +459,9 @@ gfxr_free_pic(gfx_driver_t *driver, gfxr_pic_t *pic)
 	if (pic->undithered_buffer)
 		free(pic->undithered_buffer);
 	pic->undithered_buffer = 0;
+	if (pic->aux_map)
+		free(pic->aux_map);
+	pic->aux_map = NULL;
 	free(pic);
 }
 

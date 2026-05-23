@@ -382,6 +382,9 @@ has_kernel_function(state_t *s, const char *kname)
 {
 	int i = 0;
 
+#ifdef HAVE_PICO
+	if (!s->kernel_names) return 0;
+#endif
 	while (s->kernel_names[i])
 	{
 		if (!strcmp(s->kernel_names[i], kname))
@@ -716,8 +719,12 @@ kstub(state_t *s, int funct_nr, int argc, reg_t *argv)
 {
 	int i;
 
+#ifdef HAVE_PICO
+	SCIkwarn(SCIkWARNING, "Unimplemented syscall: [%x](", funct_nr);
+#else
 	SCIkwarn(SCIkWARNING, "Unimplemented syscall: %s[%x](",
 		 s->kernel_names[funct_nr], funct_nr);
+#endif
 
 	for (i = 0; i < argc; i++) {
 		sciprintf(PREG, PRINT_REG(argv[i]));

@@ -3,6 +3,11 @@
 #   fatfs/   — FatFS + SD SPI driver
 #   hw/      — i2ckbd + lcdspi (PicoCalc hardware drivers)
 
+set(PSRAM_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/psram/psram_spi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/psram_alloc.c
+)
+
 set(FATFS_SOURCES
     ${FATFS_DIR}/ff15/source/ff.c
     ${FATFS_DIR}/ff15/source/ffunicode.c
@@ -30,14 +35,29 @@ add_library(scipicoplatform STATIC
     kbd_input.c
     hw_config.c
     audio/pwm_synth.c
+    ${PSRAM_SOURCES}
     ${FATFS_SOURCES}
     ${HW_SOURCES}
 )
 
-target_compile_definitions(scipicoplatform PUBLIC HAVE_PICO=1)
+pico_generate_pio_header(scipicoplatform
+    ${CMAKE_CURRENT_SOURCE_DIR}/psram/psram_spi.pio
+)
+
+target_compile_definitions(scipicoplatform PUBLIC
+    HAVE_PICO=1
+    PSRAM_PIN_CS=20
+    PSRAM_PIN_SCK=21
+    PSRAM_PIN_MOSI=2
+    PSRAM_PIN_MISO=3
+    PSRAM_MUTEX=1
+    PICO_DEBUG_MALLOC=1
+    PICO_DEBUG_MALLOC_LOW_WATER=0x20080000
+)
 
 target_include_directories(scipicoplatform PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}           # pico_sdcard.h, kbd_input.h, etc.
+    ${CMAKE_CURRENT_SOURCE_DIR}           # pico_sdcard.h, kbd_input.h, psram_alloc.h, etc.
+    ${CMAKE_CURRENT_SOURCE_DIR}/psram     # psram_spi.h
     ${CMAKE_CURRENT_SOURCE_DIR}/audio     # pwm_synth.h
     ${PICOCALC_HW_DIR}/i2ckbd             # i2ckbd.h
     ${PICOCALC_HW_DIR}/lcdspi             # lcdspi.h
@@ -58,4 +78,5 @@ target_link_libraries(scipicoplatform PUBLIC
     hardware_timer
     hardware_dma
     hardware_irq
+    hardware_pio
 )

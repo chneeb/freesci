@@ -34,6 +34,22 @@
 ***************************************************************************/
 
 #include <sci_memory.h>
+#ifdef HAVE_PICO
+#include <malloc.h>
+#include <stdio.h>
+extern void stdio_flush(void);
+/* Binary-search for the largest contiguous allocatable block. */
+static size_t pico_max_alloc(void) {
+    size_t lo = 0, hi = 512*1024, best = 0;
+    while (lo + 64 <= hi) {
+        size_t mid = (lo + hi) / 2;
+        void *p = malloc(mid);
+        if (p) { free(p); best = mid; lo = mid + 1; }
+        else   { hi = mid - 1; }
+    }
+    return best;
+}
+#endif
 
 /*#define POISON_MEMORY*/
 
@@ -60,7 +76,20 @@ _SCI_MALLOC(size_t size, const char *file, int line, const char *funct)
 #ifdef MALLOC_DEBUG
 	INFO_MEMORY("_SCI_MALLOC()", size, file, line, funct);
 #endif
+#ifdef HAVE_PICO
+	res = malloc(size);
+	if (!res) {
+		struct mallinfo _mi = mallinfo();
+		size_t maxblk = pico_max_alloc();
+		fprintf(stderr, "[oom] malloc(%lu) failed: fordblks=%d arena=%d maxblk=%lu\n",
+		        (unsigned long)size, _mi.fordblks, _mi.arena, (unsigned long)maxblk);
+		stdio_flush();
+		/* Fall through to ALLOC_MEM which will panic */
+	}
+	ALLOC_MEM((res = res), size, file, line, funct)
+#else
 	ALLOC_MEM((res = malloc(size)), size, file, line, funct)
+#endif
 #ifdef POISON_MEMORY
 	{
 		memset(res, 0xa5, size);

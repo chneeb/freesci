@@ -30,6 +30,10 @@
 
 #include <sci_memory.h>
 #include <sciresource.h>
+#ifdef HAVE_PICO
+#include <malloc.h>
+#include <stdio.h>
+#endif
 
 /* #define _SCI_DECOMPRESS_DEBUG */
 
@@ -299,6 +303,14 @@ int decompress0(resource_t *result, int resh, int sci_version)
 		return SCI_ERROR_EMPTY_OBJECT;
 	}
 
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  extern void stdio_flush(void);
+	  printf("[dcmp] type=%d nr=%d clen=%d rsize=%d fordblks=%d\n",
+	         result->type, result->number,
+	         (int)compressedLength, (int)result->size, _mi.fordblks);
+	  stdio_flush(); }
+#endif
 	buffer = (guint8*)sci_malloc(compressedLength);
 	result->data = (unsigned char*)sci_malloc(result->size);
 

@@ -411,6 +411,7 @@ char** vocabulary_get_knames(resource_mgr_t *resmgr, int* count)
 void vocabulary_free_knames(char** names)
 {
 	int i	= 0;
+	if (!names) return;
 	while(names[i])
 	{
 		free(names[i]);

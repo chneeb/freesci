@@ -117,7 +117,9 @@ script_find_selector(state_t *s, const char *selectorname)
     if (strcmp(selectorname, s->selector_names[i]) == 0)
         return i;
 
+#ifndef HAVE_PICO
   sciprintf("Warning: Could not map '%s' to any selector!\n", selectorname);
+#endif
   return -1;
 }
 

@@ -1953,6 +1953,9 @@ script_instantiate_sci0(state_t *s, int script_nr)
 		** number of locals we need; these are then allocated and zeroed.  */
 
 		sm_mcpy_in_out( &s->seg_manager, 0, script->data, script->size, reg.segment, SEG_ID);
+#ifdef HAVE_PICO
+		scir_evict_resource_data(s->resmgr, script);
+#endif
 		magic_pos_adder = 2;  /* Step over the funny prefix */
 
 		if (locals_nr)
@@ -1961,6 +1964,9 @@ script_instantiate_sci0(state_t *s, int script_nr)
 
 	} else {
 		sm_mcpy_in_out( &s->seg_manager, 0, script->data, script->size, reg.segment, SEG_ID);
+#ifdef HAVE_PICO
+		scir_evict_resource_data(s->resmgr, script);
+#endif
 		magic_pos_adder = 0;
 	}
 

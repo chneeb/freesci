@@ -276,8 +276,15 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 	int original_drawenable = drawenable; /* Backup, since we need the unmodified value
 					      ** for filling the aux and control map  */
 
+#ifdef HAVE_PICO
+	/* Strip masks for NULL index_data buffers to avoid crashes. */
+	if (!pic->visual_map->index_data)   { drawenable &= ~GFX_MASK_VISUAL;   original_drawenable &= ~GFX_MASK_VISUAL; }
+	if (!pic->priority_map->index_data) { drawenable &= ~GFX_MASK_PRIORITY; original_drawenable &= ~GFX_MASK_PRIORITY; }
+	if (!pic->control_map->index_data)  { drawenable &= ~GFX_MASK_CONTROL;  original_drawenable &= ~GFX_MASK_CONTROL; }
+#endif
+
 	/* Restrict drawenable not to restrict itself to zero */
-	if (pic->control_map->index_data[y_200 * 320 + x_320] != 0)
+	if (pic->control_map->index_data && pic->control_map->index_data[y_200 * 320 + x_320] != 0)
 		drawenable &= ~GFX_MASK_CONTROL;
 
 	if (color == 0xff)

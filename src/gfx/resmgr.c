@@ -32,6 +32,11 @@
 #include <gfx_driver.h>
 #include <gfx_resmgr.h>
 #include <gfx_state_internal.h>
+#ifdef HAVE_PICO
+#include "psram_alloc.h"
+#include <stdio.h>
+#include <pico/stdlib.h>
+#endif
 
 #undef TIME_PICDRAWING
 
@@ -212,6 +217,23 @@ gfxr_tag_resources(gfx_resstate_t *state)
 {
 	(state->tag_lock_counter)++;
 }
+
+
+#ifdef HAVE_PICO
+void
+gfxr_free_all_pics(gfx_driver_t *driver, gfx_resstate_t *state)
+{
+	struct param_struct params;
+	sbtree_t *tree = state->resource_trees[GFX_RESOURCE_TYPE_PIC];
+	if (tree) {
+		params.args[0] = GFX_RESOURCE_TYPE_PIC;
+		params.driver = driver;
+		sbtree_foreach(tree, (void *) &params, gfxr_sbtree_free_func);
+		/* Keep tree alive so gfxr_get_pic can create new entries after this call */
+	}
+	psram_reset();
+}
+#endif
 
 
 
@@ -535,6 +557,9 @@ gfxr_get_view(gfx_resstate_t *state, int nr, int *loop, int *cel, int palette)
 
 	if (!res || res->mode != hash) {
 		view = gfxr_interpreter_get_view(state, nr, state->misc_payload, palette);
+#ifdef HAVE_PICO
+		printf("[resmgr] get_view(%d) returned view=%p\n", nr, (void *)view); stdio_flush();
+#endif
 
 		if (!view)
 			return NULL;
@@ -601,6 +626,11 @@ gfxr_get_view(gfx_resstate_t *state, int nr, int *loop, int *cel, int palette)
 		gfx_get_res_config(state->options, cel_data);
 		gfx_xlate_pixmap(cel_data, state->driver->mode, state->options->view_xlate_filter);
                 gfxr_endianness_adjust(cel_data, state->driver->mode);
+#ifdef HAVE_PICO
+		printf("[resmgr] xlate v=%d l=%d c=%d xl=%d yl=%d psram=%d\n",
+		       nr, *loop, *cel, cel_data->xl, cel_data->yl, cel_data->psram_valid);
+		stdio_flush();
+#endif
         }
 
 	return view;

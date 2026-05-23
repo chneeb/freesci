@@ -95,6 +95,7 @@ gfx_draw_line_buffer(byte *buffer, int linewidth, int pixelwidth, point_t start,
 void
 gfx_draw_line_pixmap_i(gfx_pixmap_t *pxm, point_t start, point_t end, int color)
 {
+	if (!pxm->index_data) return;
 	gfx_draw_line_buffer(pxm->index_data, pxm->index_xl, 1, start, end, color);
 }
 
@@ -120,6 +121,7 @@ gfx_draw_box_buffer(byte *buffer, int linewidth, rect_t zone, int color)
 void
 gfx_draw_box_pixmap_i(gfx_pixmap_t *pxm, rect_t box, int color)
 {
+  if (!pxm->index_data) return;
   gfx_clip_box_basic(&box, pxm->index_xl - 1, pxm->index_yl - 1);
 
   gfx_draw_box_buffer(pxm->index_data, pxm->index_xl, box, color);

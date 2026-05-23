@@ -44,6 +44,9 @@
 #include <versions.h>
 #include <kernel.h>
 #include "kernel_types.h"
+#ifdef HAVE_PICO
+#  include <malloc.h>
+#endif
 
 /* Structures and data from vm.c: */
 extern calls_struct_t *send_calls;
@@ -58,8 +61,35 @@ _init_vocabulary(state_t *s) /* initialize vocabulary and related resources */
 	s->parser_lastmatch_word = SAID_NO_MATCH;
 	s->parser_rules = NULL;
 
-	sciprintf("Initializing vocabulary\n");	
-	
+	sciprintf("Initializing vocabulary\n");
+
+#ifdef HAVE_PICO
+	/* On Pico, skip the text parser vocab and selector name strings to save ~80KB.
+	   The game is still fully playable via keyboard shortcuts. */
+	s->parser_words    = NULL;
+	s->parser_rules    = NULL;
+	s->parser_suffices = NULL;
+	s->parser_branches = NULL;
+	sciprintf("Pico: parser vocabulary skipped to save RAM.\n");
+
+	s->opcodes = vocabulary_get_opcodes(s->resmgr);
+
+	/* selector_names are needed for script_map_selectors; free them after mapping on Pico */
+	if (!(s->selector_names = vocabulary_get_snames(s->resmgr, NULL, s->version))) {
+		sciprintf("_init_vocabulary(): Could not retreive selector names (vocab.997)!\n");
+		return 1;
+	}
+	for (s->selector_names_nr = 0; s->selector_names[s->selector_names_nr]; s->selector_names_nr++);
+
+	script_map_selectors(s, &(s->selector_map));
+
+	/* Free selector names on Pico — only needed for the mapping above */
+	vocabulary_free_snames(s->selector_names);
+	s->selector_names    = NULL;
+	s->selector_names_nr = 0;
+
+	return 0;
+#else
 	if ((s->resmgr->sci_version < SCI_VERSION_01_VGA)&&(s->parser_words = vocab_get_words(s->resmgr, &(s->parser_words_nr)))) {
 		s->parser_suffices = vocab_get_suffices(s->resmgr, &(s->parser_suffices_nr));
 		if ((s->parser_branches = vocab_get_branches(s->resmgr, &(s->parser_branches_nr))))
@@ -86,6 +116,7 @@ _init_vocabulary(state_t *s) /* initialize vocabulary and related resources */
 	/* Maps a few special selectors for later use */
 
 	return 0;
+#endif
 }
 
 extern int _allocd_rules;
@@ -420,6 +451,12 @@ create_class_table_sci0(state_t *s)
 
 	s->classtable = (class_t*)sci_calloc(sizeof(class_t), s->classtable_size);
 
+#ifdef HAVE_PICO
+	/* Force immediate eviction after each script: keeps only 1 script in LRU
+	   at a time, cutting sbrk growth from ~127KB down to ~1x max_script_size. */
+	{ int _saved_max = s->resmgr->max_memory;
+	  s->resmgr->max_memory = 1;
+#endif
 	for (scriptnr = 0; scriptnr < 1000; scriptnr++) {
 		int objtype = 0;
 		resource_t *script = scir_find_resource(s->resmgr, sci_script,
@@ -487,6 +524,10 @@ create_class_table_sci0(state_t *s)
 
 		}
 	}
+#ifdef HAVE_PICO
+	s->resmgr->max_memory = _saved_max;
+	} /* close block opened around the loop */
+#endif
 	scir_unlock_resource(s->resmgr, vocab996, sci_vocab, 996);
 	vocab996 = NULL;
 	return 0;
@@ -510,13 +551,28 @@ script_init_engine(state_t *s, sci_version_t version)
 		s->version_lock_flag = 1; /* Lock version */
 	}
 
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] script_init start: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
+#endif
+
+#ifndef HAVE_PICO
+	/* Skip on Pico: iterates up to 1000 scripts via LRU cache, growing sbrk by
+	   ~118KB that is never reclaimed, making GFX buffer allocation impossible.
+	   SCI_VERSION_DEFAULT_SCI0 (0.000.685) is correct for all supported Pico games. */
 	script_detect_versions(s);
+#endif
 
         if (s->version >= SCI_VERSION(1,001,000))
-		result = create_class_table_sci11(s); 
+		result = create_class_table_sci11(s);
 	else
 		result = create_class_table_sci0(s);
-	
+
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] after class_table: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
+#endif
+
 	sm_init(&s->seg_manager, s->version >= SCI_VERSION(1,001,000));
 	s->gc_countdown = GC_INTERVAL - 1;
 
@@ -527,6 +583,11 @@ script_init_engine(state_t *s, sci_version_t version)
 	}
 
 	s->script_000_segment = script_get_segment(s, 0, SCRIPT_GET_LOCK);
+
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] after script_000_lock: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
+#endif
 
 	if (s->script_000_segment <= 0) {
 		sciprintf("Failed to instantiate script.000\n");
@@ -556,7 +617,19 @@ script_init_engine(state_t *s, sci_version_t version)
 	script_map_kernel(s);
 	/* Maps the kernel functions */
 
+#ifdef HAVE_PICO
+	vocabulary_free_knames(s->kernel_names);
+	s->kernel_names = NULL;
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] after knames+kernel: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
+#endif
+
 	if (_init_vocabulary(s)) return 1;
+
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] after vocab: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
+#endif
 	if (s->selector_map.cantBeHere != -1)
 		version_require_later_than(s, SCI_VERSION_FTU_INVERSE_CANBEHERE);
 
@@ -677,6 +750,11 @@ game_init(state_t *s)
 		return 1;
 	}
 
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] after script_instantiate(0): free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
+#endif
+
 	s->parser_valid = 0; /* Invalidate parser */
 	s->parser_event = NULL_REG; /* Invalidate parser event */
 
@@ -688,6 +766,11 @@ game_init(state_t *s)
 	if (!send_calls_allocated)
 		send_calls = (calls_struct_t*)sci_calloc(sizeof(calls_struct_t), send_calls_allocated = 16);
 
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] before _reset_graphics_input: free=%d arena=%d used=%d\n",
+	         _mi.fordblks, _mi.arena, _mi.uordblks); }
+#endif
 	if (s->gfx_state && _reset_graphics_input(s))
 		return 1;
 

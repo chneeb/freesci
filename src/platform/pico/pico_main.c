@@ -7,6 +7,10 @@
 #include "kbd_input.h"
 #include "audio/pwm_synth.h"
 #include "lcdspi.h"
+#include "psram_alloc.h"
+#include "psram/psram_spi.h"
+
+extern psram_spi_inst_t g_psram;
 #include <stdio.h>
 #include <string.h>
 #include <malloc.h>
@@ -46,6 +50,27 @@ int main(void)
     /* PWM audio on GPIO 26/27 (PicoCalc standard) */
     pwm_synth_init(26);
     MEMPRINT("after pwm_init");
+
+    /* PSRAM on PIO1 (CS=20, SCK=21, MOSI=2, MISO=3) */
+    g_psram = psram_spi_init_clkdiv(pio1, -1, 1.0f, true);
+    MEMPRINT("after psram_init");
+
+    /* PSRAM smoke test: write a pattern and read it back */
+    {
+        static const uint8_t wr[8] = {0xDE,0xAD,0xBE,0xEF,0x01,0x23,0x45,0x67};
+        uint8_t rd[8] = {0};
+        psram_store(0, wr, 8);
+        psram_load(0, rd, 8);
+        if (memcmp(wr, rd, 8) == 0) {
+            printf("[psram] OK\n");
+        } else {
+            printf("[psram] FAIL: got %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                   rd[0],rd[1],rd[2],rd[3],rd[4],rd[5],rd[6],rd[7]);
+            lcd_clear();
+            lcd_print_string("PSRAM test FAILED!\nCheck SPI wiring.");
+            while (1) tight_loop_contents();
+        }
+    }
 
     while (1) {
         char game_dir[64];

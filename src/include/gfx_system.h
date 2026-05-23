@@ -337,6 +337,11 @@ typedef struct { /* gfx_pixmap_t: Pixel map */
 		void *info; /* initialized to NULL */
 	} internal;
 
+#ifdef HAVE_PICO
+	uint32_t psram_addr;  /* PSRAM byte address of index_data when offloaded */
+	uint8_t  psram_valid; /* 1 when psram_addr holds live PSRAM data for index_data */
+#endif
+
 } gfx_pixmap_t;
 
 

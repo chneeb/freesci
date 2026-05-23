@@ -45,7 +45,11 @@
 #  define class class_
 #endif /* __cplusplus */
 
-#define VM_STACK_SIZE 0x1000
+#ifdef HAVE_PICO
+#  define VM_STACK_SIZE 0x400  /* 1KB entries = 4KB on Pico (vs 16KB default) */
+#else
+#  define VM_STACK_SIZE 0x1000
+#endif
 /* Number of bytes to be allocated for the stack */
 
 #define SCRIPT_MAX_EXEC_STACK 256

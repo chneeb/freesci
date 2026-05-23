@@ -145,6 +145,14 @@ gfxr_free_tagged_resources(gfx_driver_t *driver, gfx_resstate_t *state);
 */
 
 
+#ifdef HAVE_PICO
+void
+gfxr_free_all_pics(gfx_driver_t *driver, gfx_resstate_t *state);
+/* Frees all cached pic resources and resets PSRAM allocator.
+** Called before loading a new room on Pico to ensure no two pics coexist in SRAM.
+*/
+#endif
+
 gfxr_pic_t *
 gfxr_get_pic(gfx_resstate_t *state, int nr, int maps, int flags,
 	     int default_palette, int scaled);

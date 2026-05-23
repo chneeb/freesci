@@ -7,3 +7,7 @@ add_library(scigfxresources STATIC
     sci_pal_1.c
     sci_view_1.c
 )
+
+if(PLATFORM STREQUAL "pico")
+    target_link_libraries(scigfxresources PRIVATE scipicoplatform)
+endif()

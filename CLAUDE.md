@@ -28,9 +28,8 @@ Requires: `libsdl2-dev`
 ```bash
 cmake -B build-pico \
   -DPLATFORM=pico \
-  -DPICO_SDK_PATH=~/pico-sdk \
-  -DPICO_BOARD=pico2 \
-  -DPICOCALC_HW_PATH=~/Source/PicoCalc/Code/picocalc_helloworld
+  -DPICO_SDK_PATH=~/Source/pico-sdk \
+  -DPICO_BOARD=pico2
 cmake --build build-pico -j$(nproc)
 # Flash build-pico/src/freesci.uf2 to the PicoCalc
 ```
@@ -42,19 +41,68 @@ Requires: `pico-sdk`, PicoCalc hardware library (`i2ckbd` + `lcdspi`), FatFS SD 
 | File | Purpose |
 |------|---------|
 | `src/gfx/drivers/pico_driver.c` | GFX driver: 8bpp palette → ILI9488 SPI push |
-| `src/platform/pico/pico_main.c` | Entry point: HW init → SD chooser → FreeSCI |
+| `src/platform/pico/pico_main.c` | Entry point: HW init → PSRAM init → SD chooser → FreeSCI |
 | `src/platform/pico/pico_time.c` | `sci_gettime()` via `time_us_64()` |
 | `src/platform/pico/pico_io.c` | POSIX `_open/_read/_write/_lseek/_close` over FatFS |
 | `src/platform/pico/pico_sdcard.c` | SD init + `show_dir_chooser()` scanning `0:/freesci/` |
 | `src/platform/pico/audio/pwm_synth.c` | PWM audio (from tiny_agi) |
+| `src/platform/pico/psram/psram_spi.{c,h,pio}` | Ian Scott's rp2040-psram PIO SPI driver (vendored) |
+| `src/platform/pico/psram_alloc.{h,c}` | PSRAM bump allocator (`psram_alloc/reset/store/load`) |
 
 ### Pico driver design
 - `gfx_driver_pico` uses 8bpp palette mode (bytespp=1, xfact=1, yfact=1)
-- `visual[0..2]`: three 320×200 uint8_t buffers (64KB each, 192KB total)
+- `visual[0]`: one 320×200 uint8_t buffer (64KB) — back and front combined
 - On `GFX_BUFFER_FRONT` update: only the dirty rect is pushed to ILI9488 via `define_region_spi` + `hw_send_spi`
 - Keyboard events come from `kbd_read()` (I2C); mapped to `sci_event_t` in an 8-entry ring buffer
 - No mouse support (PicoCalc has no pointing device)
 - `src/main.c:main()` is renamed `freesci_main()` under `HAVE_PICO`; `pico_main.c` provides the real entry
+
+### PSRAM — hardware
+
+The PicoCalc has 8MB PSRAM on PIO1 (not memory-mapped). Access is ~4MB/s via DMA.
+
+| Signal | GPIO |
+|--------|------|
+| CS     | 20   |
+| SCK    | 21   |
+| MOSI   | 2    |
+| MISO   | 3    |
+
+Init: `g_psram = psram_spi_init_clkdiv(pio1, -1, 1.0f, true)` in `pico_main.c`.  
+A smoke test (write 8 bytes, read back) runs on boot; prints `[psram] OK` or halts with a display message.
+
+### PSRAM — memory strategy
+
+RP2350 heap is ~388KB. The SCI0 pic decoder peaks at ~320KB for one room (4×64KB maps + 64KB struct).
+PSRAM is used to offload inactive bitmap data after decode, freeing SRAM for the VM.
+
+**Implemented (on master):**
+
+| What | Where | Saves |
+|------|-------|-------|
+| Ordering fix: free old room's pics before decoding new room | `gfxop_new_pic` → `gfxr_free_all_pics()` | 192KB peak |
+| `visual_map->index_data` → PSRAM after decode | `sci_resmgr.c` end of `gfxr_interpreter_calculate_pic` | 64KB SRAM |
+| `priority_map->index_data` → PSRAM after `_gfxop_set_pic` | `gfxop_new_pic` in `operations.c` | 64KB SRAM |
+| `control_map->index_data` freed after decode | same | 64KB SRAM |
+| `undithered_buffer` freed after decode | same | 64KB SRAM |
+| `state->control_map = NULL` (null-guarded everywhere) | `_gfxop_init_common` | 64KB SRAM |
+| `state->static_priority_map` aliased to `priority_map` | `_gfxop_init_common` | 64KB SRAM |
+
+`pico_blit_indexed` reads `visual_map` row-by-row from PSRAM when `pxm->psram_valid == 1`.  
+`gfx_pixmap_t` has `psram_addr` + `psram_valid` fields under `#ifdef HAVE_PICO`.
+
+**Still OOM — critical missing piece:**  
+`gfxr_pic_t::aux_map` is a 64KB array **embedded in the struct** (`gfx_resource.h:82`), so
+`sci_malloc(sizeof(gfxr_pic_t))` alone allocates 64KB. Peak during decode is still ~448KB > 388KB.
+Fix: change `byte aux_map[64000]` → `byte *aux_map`, allocate within `gfxr_draw_pic01`, free on return.
+This change is already on the `pico-mem-opts` branch and must be cherry-picked to master.
+
+**Remaining PSRAM candidates (not yet implemented), in priority order:**
+
+1. **`aux_map` pointer fix** — must land first; without it room transitions still OOM
+2. **Skip `control_map->index_data` allocation** in `gfxr_alloc_pic` (not just free after decode) — saves 64KB peak
+3. **View `index_data` → PSRAM** — `pico_blit_indexed` already handles it; extend to view decode in `gfxr_draw_view0` — saves ~30–80KB of sprite data that turns over every room
+4. **Resource data (scripts) → PSRAM** — ~100–200KB, requires a read cache in the VM; largest headroom gain, most invasive
 
 ### SD card game selection
 Games must be in subdirectories under `0:/freesci/` on the SD card (e.g. `0:/freesci/sq3/`).

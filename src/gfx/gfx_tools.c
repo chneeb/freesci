@@ -27,6 +27,10 @@
 
 #include <sci_memory.h>
 #include <gfx_tools.h>
+#ifdef HAVE_PICO
+#include <malloc.h>
+#include <stdio.h>
+#endif
 
 /* set optimisations for Win32: */
 #ifdef _WIN32
@@ -109,6 +113,11 @@ gfx_copy_pixmap_box_i(gfx_pixmap_t *dest, gfx_pixmap_t *src, rect_t box)
 	int width, height;
 	int offset;
 
+#ifdef HAVE_PICO
+	if (!dest || !src || !dest->index_data || !src->index_data)
+		return;
+#endif
+
 	if ((dest->index_xl != src->index_xl) || (dest->index_yl != src->index_yl))
 		return;
 
@@ -165,11 +174,22 @@ gfx_new_pixmap(int xl, int yl, int resid, int loop, int cel)
 	pxm->index_xl = xl;
 	pxm->index_yl = yl;
 
+	pxm->xl = 0;
+	pxm->yl = 0;
+	pxm->xoffset = 0;
+	pxm->yoffset = 0;
+	pxm->colors_nr = 0;
+
 	pxm->ID = resid;
 	pxm->loop = loop;
 	pxm->cel = cel;
 
 	pxm->index_data = NULL;
+
+#ifdef HAVE_PICO
+	pxm->psram_addr  = 0;
+	pxm->psram_valid = 0;
+#endif
 
 	pxm->flags = 0;
 
@@ -236,6 +256,13 @@ gfx_pixmap_alloc_index_data(gfx_pixmap_t *pixmap)
 	if (!size)
 		size = 1;
 
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  extern void stdio_flush(void);
+	  printf("[pxm] alloc_idx: xl=%d yl=%d size=%d fordblks=%d\n",
+	         pixmap->index_xl, pixmap->index_yl, size, _mi.fordblks);
+	  stdio_flush(); }
+#endif
 	pixmap->index_data = (byte*)sci_malloc(size);
 
 	memset(pixmap->index_data, 0, size);

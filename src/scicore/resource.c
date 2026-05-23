@@ -912,7 +912,11 @@ scir_find_resource(resource_mgr_t *mgr, int type, int number, int lock)
 			_scir_add_to_lru(mgr, retval);
 	}
 
-	_scir_free_old_resources(mgr, retval->status == SCI_STATUS_ALLOCATED);
+	/* Protect the just-added resource from immediate self-eviction.
+	   After _scir_add_to_lru the status is ENQUEUED, not ALLOCATED, so we
+	   check ENQUEUED here.  LOCKED resources are never in the LRU list, so
+	   passing 0 for them is harmless. */
+	_scir_free_old_resources(mgr, retval->status == SCI_STATUS_ENQUEUED);
 
 	if (retval->data)
 		return retval;
@@ -922,6 +926,32 @@ scir_find_resource(resource_mgr_t *mgr, int type, int number, int lock)
 		return NULL;
 	}
 }
+
+#ifdef HAVE_PICO
+void
+scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res)
+{
+	if (!res || !res->data)
+		return;
+	if (res->status == SCI_STATUS_ENQUEUED)
+		_scir_remove_from_lru(mgr, res);
+	sci_free(res->data);
+	res->data = NULL;
+	res->status = SCI_STATUS_NOMALLOC;
+}
+
+void
+scir_free_all_lru(resource_mgr_t *mgr)
+{
+	while (mgr->lru_last) {
+		resource_t *goner = mgr->lru_last;
+		_scir_remove_from_lru(mgr, goner); /* sets status = ALLOCATED */
+		sci_free(goner->data);
+		goner->data = NULL;
+		goner->status = SCI_STATUS_NOMALLOC;
+	}
+}
+#endif
 
 void
 scir_unlock_resource(resource_mgr_t *mgr, resource_t *res, int resnum, int restype)

@@ -13,6 +13,7 @@
 #ifdef HAVE_PICO
 
 #include <gfx_tools.h>
+#include <gfx_resource.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -21,6 +22,7 @@
 #include "hardware/spi.h"
 #include "lcdspi.h"
 #include "kbd_input.h"
+#include "psram_alloc.h"
 
 /* define_region_spi is in lcdspi.c but not declared in lcdspi.h */
 extern void define_region_spi(int xstart, int ystart, int xend, int yend, int rw);
@@ -39,6 +41,7 @@ struct _pico_state {
     uint8_t        *visual[1];       /* [0]=back/front (drawing+display) */
     /* priority buffer removed — uses engine's priority_map via s_shared_priority */
     uint8_t         palette[256][3]; /* R,G,B for each colour index */
+    gfx_pixmap_t   *static_bg;       /* current room's visual_map (PSRAM-backed) */
 
     /* keyboard event ring buffer */
     sci_event_t     evbuf[EVT_BUF_SIZE];
@@ -51,6 +54,32 @@ static gfx_pixmap_t *s_shared_priority = NULL;
 void pico_connect_engine_priority(gfx_pixmap_t *priority_map)
 {
     s_shared_priority = priority_map;
+}
+
+void pico_free_visual(gfx_driver_t *drv)
+{
+    struct _pico_state *ps = (struct _pico_state *)drv->state;
+    if (ps && ps->visual[0]) {
+        sci_free(ps->visual[0]);
+        ps->visual[0] = NULL;
+    }
+}
+
+void pico_alloc_visual(gfx_driver_t *drv)
+{
+    struct _pico_state *ps = (struct _pico_state *)drv->state;
+    if (ps && !ps->visual[0]) {
+        ps->visual[0] = (uint8_t *)sci_malloc(PICO_XSIZE * PICO_YSIZE);
+        if (ps->visual[0])
+            memset(ps->visual[0], 0, PICO_XSIZE * PICO_YSIZE);
+    }
+}
+
+/* Ensure visual[0] is allocated; returns 1 on success, 0 on OOM. */
+static int pico_ensure_visual(gfx_driver_t *drv)
+{
+    pico_alloc_visual(drv);
+    return ((struct _pico_state *)drv->state)->visual[0] != NULL;
 }
 
 #define S  ((struct _pico_state *)(drv->state))
@@ -118,8 +147,15 @@ static void poll_keyboard(struct _gfx_driver *drv)
     int key = kbd_read();
     if (key <= 0) return;
 
+    printf("[kbd] raw=0x%02x\n", key); stdio_flush();
+
     int sci_key = pico_map_key(key);
-    if (!sci_key) return;
+    if (!sci_key) {
+        printf("[kbd] unmapped\n"); stdio_flush();
+        return;
+    }
+
+    printf("[kbd] sci_key=%d\n", sci_key); stdio_flush();
 
     sci_event_t ev;
     ev.type      = SCI_EVT_KEYBOARD;
@@ -135,6 +171,7 @@ static void poll_keyboard(struct _gfx_driver *drv)
 static void flush_region(struct _pico_state *ps,
                           int x, int y, int w, int h)
 {
+    if (!ps->visual[0]) return; /* not yet allocated — nothing to display */
     define_region_spi(x, y + TFT_Y_OFFSET,
                       x + w - 1, y + TFT_Y_OFFSET + h - 1, 1);
 
@@ -210,11 +247,23 @@ static int pico_init_specific(struct _gfx_driver *drv,
     return GFX_OK;
 }
 
+static void pico_clear_screen_black(void)
+{
+    static uint8_t black[PICO_XSIZE * 3];
+    memset(black, 0, sizeof(black));
+    define_region_spi(0, 0, PICO_XSIZE - 1, 319, 1);
+    for (int row = 0; row < 320; row++)
+        hw_send_spi(black, PICO_XSIZE * 3);
+    spi_finish(spi1);
+    lcd_spi_raise_cs();
+}
+
 static int pico_init(struct _gfx_driver *drv)
 {
     lcd_init();
     spi_set_baudrate(spi1, 50000000);
     kbd_input_init();
+    pico_clear_screen_black();
     return pico_init_specific(drv, 1, 1, 1);
 }
 
@@ -227,6 +276,19 @@ static void pico_exit(struct _gfx_driver *drv)
     s_shared_priority = NULL;
     sci_free(drv->state);
     drv->state = NULL;
+}
+
+/* Called from gfxop_new_pic after gfxr_get_pic populates gfx_sci0_pic_colors[].
+   Fills ps->palette[0..255] so flush_region produces correct RGB output. */
+void pico_setup_sci0_palette(gfx_driver_t *drv)
+{
+    struct _pico_state *ps = (struct _pico_state *)drv->state;
+    if (!ps) return;
+    for (int i = 0; i < GFX_SCI0_PIC_COLORS_NR; i++) {
+        ps->palette[i][0] = gfx_sci0_pic_colors[i].r;
+        ps->palette[i][1] = gfx_sci0_pic_colors[i].g;
+        ps->palette[i][2] = gfx_sci0_pic_colors[i].b;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -277,6 +339,7 @@ static int pico_draw_line(struct _gfx_driver *drv,
     int yfact = xfact;
 
     if (color.mask & GFX_MASK_VISUAL) {
+        if (!pico_ensure_visual(drv)) return GFX_ERROR;
         uint8_t c = pico_map_color(drv, color);
         int xc, yc;
         for (xc = 0; xc < xfact; xc++)
@@ -298,6 +361,7 @@ static int pico_draw_filled_rect(struct _gfx_driver *drv, rect_t rect,
     (void)color2; (void)shade_mode;
 
     if (color1.mask & GFX_MASK_VISUAL) {
+        if (!pico_ensure_visual(drv)) return GFX_ERROR;
         uint8_t c = pico_map_color(drv, color1);
         for (int row = rect.y; row < rect.y + rect.yl; row++)
             memset(S->visual[0] + row * PICO_XSIZE + rect.x, c, rect.xl);
@@ -313,6 +377,8 @@ static int pico_draw_filled_rect(struct _gfx_driver *drv, rect_t rect,
 /* Used when pxm->data is NULL (skipped in gfx_xlate_pixmap for Pico) */
 /* ------------------------------------------------------------------ */
 
+static uint8_t s_psram_row[PICO_XSIZE]; /* scratch row for PSRAM reads */
+
 static void
 pico_blit_indexed(gfx_pixmap_t *pxm, int priority,
                   rect_t src, rect_t dest,
@@ -324,17 +390,34 @@ pico_blit_indexed(gfx_pixmap_t *pxm, int priority,
     int xl = src.xl, yl = src.yl;
     byte color_key = pxm->color_key;
     int has_alpha = (color_key != GFX_PIXMAP_COLOR_KEY_NONE);
+    int use_psram = (!pxm->index_data && pxm->psram_valid);
 
-    /* Pre-build lookup: local index → global palette index */
+    /* Pre-build lookup: local color index → palette slot in ps->palette[].
+       global_index is always -1 in SCI0 (never allocated via gfx_alloc_color),
+       so we derive the mapping from colors_nr instead:
+       - 256 colors (background pic): palette slot == color index (identity)
+       - 16 colors (view cels): slot i*17 is the pure-EGA entry for color i,
+         because gfx_sci0_pic_colors[i*17] = INTERCOL(ega[i], ega[i]) = ega[i] */
     uint8_t lut[256];
-    for (int i = 0; i < pxm->colors_nr; i++)
-        lut[i] = (uint8_t)pxm->colors[i].global_index;
+    if (pxm->colors_nr == GFX_SCI0_PIC_COLORS_NR) {
+        for (int i = 0; i < 256; i++) lut[i] = (uint8_t)i;
+    } else {
+        for (int i = 0; i < pxm->colors_nr; i++)
+            lut[i] = (uint8_t)(i * 17);
+    }
 
-    byte *row_src = pxm->index_data + src.y * pxm->index_xl + src.x;
     uint8_t *row_dst = destbuf;
     uint8_t *row_pri = pri_buf;
 
     for (int y = 0; y < yl; y++) {
+        const byte *row_src;
+        if (use_psram) {
+            uint32_t row_offset = (uint32_t)((src.y + y) * pxm->index_xl);
+            psram_load(pxm->psram_addr + row_offset, s_psram_row, (size_t)pxm->index_xl);
+            row_src = s_psram_row + src.x;
+        } else {
+            row_src = pxm->index_data + (src.y + y) * pxm->index_xl + src.x;
+        }
         for (int x = 0; x < xl; x++) {
             byte idx = row_src[x];
             if (!has_alpha || idx != color_key) {
@@ -343,10 +426,24 @@ pico_blit_indexed(gfx_pixmap_t *pxm, int priority,
                     row_pri[x] = (uint8_t)priority;
             }
         }
-        row_src += pxm->index_xl;
         row_dst += dest_stride;
         if (row_pri) row_pri += pri_stride;
     }
+}
+
+/* Blit the full background from PSRAM into visual[0].
+   Called from gfxop_new_pic after visual[0] is allocated.
+   Does NOT flush to the display — the engine's first gfxop_update call does that. */
+void pico_render_background(gfx_driver_t *drv)
+{
+    struct _pico_state *ps = (struct _pico_state *)drv->state;
+    if (!ps || !ps->visual[0] || !ps->static_bg) return;
+    gfx_pixmap_t *bg = ps->static_bg;
+    rect_t full = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
+    rect_t dst  = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
+    pico_blit_indexed(bg, -1, full, dst, ps->visual[0], PICO_XSIZE, NULL, 0);
+    /* Push the freshly decoded background to the display immediately. */
+    flush_region(ps, 0, 0, PICO_XSIZE, PICO_YSIZE);
 }
 
 /* ------------------------------------------------------------------ */
@@ -362,12 +459,15 @@ static int pico_register_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm)
 static int pico_unregister_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm)
 {
     (void)drv;
-    if (pxm->internal.handle == PICO_HANDLE_GRABBED && pxm->data) {
-        /* data was allocated by grab_pixmap; engine doesn't know to free it */
-        sci_free(pxm->data);
+    if (pxm->internal.handle == PICO_HANDLE_GRABBED) {
+        if (!pxm->internal.info && pxm->data) {
+            /* SRAM grab: data was allocated by grab_pixmap */
+            sci_free(pxm->data);
+        }
+        /* PSRAM grab (internal.info != NULL): bump-allocated, reclaimed on psram_reset */
         pxm->data = NULL;
+        pxm->internal.info = NULL;
     }
-    pxm->internal.info = NULL;
     return GFX_OK;
 }
 
@@ -377,16 +477,25 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
 {
     int bufnr = 0;  /* single visual buffer serves back and static */
 
+    if (!pico_ensure_visual(drv)) return GFX_ERROR;
+
     if (dest.xl != src.xl || dest.yl != src.yl) {
         fprintf(stderr, "pico_driver: scaling not supported (%dx%d)->(%dx%d)\n",
                 src.xl, src.yl, dest.xl, dest.yl);
         return GFX_ERROR;
     }
 
-    /* Grabbed pixmap: restore saved region directly.
-       Large grabs are silently skipped (pxm->data == NULL). */
+    /* Grabbed pixmap: restore saved region. */
     if (pxm->internal.handle == PICO_HANDLE_GRABBED) {
-        if (pxm->data) {
+        if (pxm->internal.info) {
+            /* PSRAM grab: restore row-by-row from PSRAM */
+            uint32_t addr = (uint32_t)(uintptr_t)pxm->data;
+            for (int row = 0; row < dest.yl; row++)
+                psram_load(addr + (uint32_t)(row * pxm->xl),
+                           S->visual[bufnr] + (dest.y + row) * PICO_XSIZE + dest.x,
+                           (size_t)pxm->xl);
+        } else if (pxm->data) {
+            /* SRAM grab */
             for (int row = 0; row < dest.yl; row++)
                 memcpy(S->visual[bufnr] + (dest.y + row) * PICO_XSIZE + dest.x,
                        pxm->data + row * pxm->xl, pxm->xl);
@@ -399,13 +508,15 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
        direct indexed blit that translates index_data+colors on-the-fly. */
     uint8_t *destptr = S->visual[bufnr] + dest.y * PICO_XSIZE + dest.x;
     if (!pxm->data) {
-        uint8_t *priptr = s_shared_priority ? (s_shared_priority->index_data
-                                               + dest.y * s_shared_priority->index_xl + dest.x)
-                                            : NULL;
-        int pri_stride = s_shared_priority ? s_shared_priority->index_xl : 0;
+        uint8_t *pridata = (s_shared_priority && s_shared_priority->index_data)
+                           ? s_shared_priority->index_data : NULL;
+        uint8_t *priptr = pridata
+                          ? (pridata + dest.y * s_shared_priority->index_xl + dest.x)
+                          : NULL;
+        int pri_stride = pridata ? s_shared_priority->index_xl : 0;
         pico_blit_indexed(pxm, priority, src, dest, destptr, PICO_XSIZE,
                           priptr, pri_stride);
-    } else if (s_shared_priority) {
+    } else if (s_shared_priority && s_shared_priority->index_data) {
         gfx_crossblit_pixmap(drv->mode, pxm, priority, src, dest,
                               destptr, PICO_XSIZE,
                               s_shared_priority->index_data,
@@ -423,7 +534,7 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
 static int pico_grab_pixmap(struct _gfx_driver *drv, rect_t src,
                              gfx_pixmap_t *pxm, gfx_map_mask_t map)
 {
-    (void)drv;
+    if (!S->visual[0]) return GFX_OK; /* nothing drawn yet — grab returns empty */
 
     if (src.x < 0 || src.y < 0) {
         fprintf(stderr, "pico_driver: grab from invalid coords (%d,%d)\n",
@@ -440,18 +551,28 @@ static int pico_grab_pixmap(struct _gfx_driver *drv, rect_t src,
         pxm->flags |= GFX_PIXMAP_FLAG_INSTALLED |
                       GFX_PIXMAP_FLAG_EXTERNAL_PALETTE |
                       GFX_PIXMAP_FLAG_PALETTE_SET;
-        if ((size_t)src.xl * src.yl > 16384) {
-            /* Too large to afford — skip save, restore will be a no-op */
-            return GFX_OK;
+        size_t sz = (size_t)src.xl * src.yl;
+        if (sz > 4096) {
+            /* Large grab: save row-by-row into PSRAM to avoid SRAM pressure.
+               PSRAM address is bump-allocated and reclaimed on psram_reset(). */
+            uint32_t addr = psram_alloc(sz);
+            for (int row = 0; row < src.yl; row++)
+                psram_store(addr + (uint32_t)(row * src.xl),
+                            S->visual[0] + (src.y + row) * PICO_XSIZE + src.x,
+                            src.xl);
+            pxm->data = (uint8_t *)(uintptr_t)addr;
+            pxm->internal.info = (void *)(uintptr_t)1;
+        } else {
+            /* Small grab: SRAM */
+            if (!pxm->data) {
+                pxm->data = (uint8_t *)sci_malloc(sz);
+                if (!pxm->data) return GFX_FATAL;
+            }
+            for (int row = 0; row < src.yl; row++)
+                memcpy(pxm->data + row * src.xl,
+                       S->visual[0] + (src.y + row) * PICO_XSIZE + src.x,
+                       src.xl);
         }
-        if (!pxm->data) {
-            pxm->data = (uint8_t *)sci_malloc(src.xl * src.yl);
-            if (!pxm->data) return GFX_FATAL;
-        }
-        for (int row = 0; row < src.yl; row++)
-            memcpy(pxm->data + row * src.xl,
-                   S->visual[0] + (src.y + row) * PICO_XSIZE + src.x,
-                   src.xl);
         return GFX_OK;
     }
     case GFX_MASK_PRIORITY:
@@ -472,7 +593,14 @@ static int pico_update(struct _gfx_driver *drv,
 {
     switch (buffer) {
     case GFX_BUFFER_BACK:
-        /* No static buffer: background restoration is a no-op. */
+        /* Restore background from PSRAM into visual[0] for this dirty region. */
+        if (S->static_bg && S->visual[0]) {
+            uint8_t *destptr = S->visual[0] + dest.y * PICO_XSIZE + dest.x;
+            rect_t bgsrc = gfx_rect(src.x, src.y, src.xl, src.yl);
+            rect_t bgdst = gfx_rect(0, 0, src.xl, src.yl);
+            pico_blit_indexed(S->static_bg, -1, bgsrc, bgdst,
+                              destptr, PICO_XSIZE, NULL, 0);
+        }
         break;
 
     case GFX_BUFFER_FRONT:
@@ -490,9 +618,8 @@ static int pico_update(struct _gfx_driver *drv,
 static int pico_set_static_buffer(struct _gfx_driver *drv,
                                    gfx_pixmap_t *pic, gfx_pixmap_t *priority)
 {
-    (void)drv; (void)pic; (void)priority;
-    /* No static buffer: background is not saved; dialogs leave transient
-       artifacts that clear on the next full scene redraw. */
+    (void)priority;
+    S->static_bg = pic;  /* save for BUFFER_BACK restoration */
     return GFX_OK;
 }
 
@@ -503,10 +630,14 @@ static int pico_set_static_buffer(struct _gfx_driver *drv,
 static int pico_set_palette(struct _gfx_driver *drv,
                              int index, byte red, byte green, byte blue)
 {
-    if (index < 0 || index > 255) {
-        fprintf(stderr, "pico_driver: invalid palette index %d\n", index);
+    /* global_index is always -1 in SCI0 (gfx_alloc_color never called).
+       _gfxop_install_pixmap calls this for each color; silently succeeding
+       lets it set GFX_PIXMAP_FLAG_PALETTE_SET without flooding UART with
+       GFXWARN messages.  Palette is managed by pico_setup_sci0_palette(). */
+    if (index < 0)
+        return GFX_OK;
+    if (index > 255)
         return GFX_ERROR;
-    }
     S->palette[index][0] = red;
     S->palette[index][1] = green;
     S->palette[index][2] = blue;
@@ -529,12 +660,20 @@ static int pico_set_pointer(struct _gfx_driver *drv, gfx_pixmap_t *pointer)
 
 static sci_event_t pico_get_event(struct _gfx_driver *drv)
 {
+    static int s_evt_count = 0;
+    if (++s_evt_count % 20 == 0) {
+        printf("[evt] get_event calls: %d\n", s_evt_count); stdio_flush();
+    }
     poll_keyboard(drv);
     return pop_event(S);
 }
 
 static int pico_usec_sleep(struct _gfx_driver *drv, long usecs)
 {
+    static int s_slp_count = 0;
+    if (++s_slp_count % 100 == 0) {
+        printf("[slp] sleep_count=%d\n", s_slp_count); stdio_flush();
+    }
     poll_keyboard(drv);
     sleep_us((uint64_t)(usecs > 10000 ? 10000 : usecs));
     return GFX_OK;

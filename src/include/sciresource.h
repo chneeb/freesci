@@ -280,6 +280,20 @@ scir_find_resource(resource_mgr_t *mgr, int type, int number, int lock);
 ** they are unlocked explicitly (by scir_unlock_resource).
 */
 
+#ifdef HAVE_PICO
+void
+scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res);
+/* Frees res->data immediately (removes from LRU if enqueued).
+** Used on Pico after the segment manager has copied the data to its own buffer. */
+
+void
+scir_free_all_lru(resource_mgr_t *mgr);
+/* Evicts every ENQUEUED resource from the LRU, freeing their data.
+** Safe because ENQUEUED resources are not actively referenced; they can be
+** reloaded on demand.  Called on Pico before large decode allocations to
+** reclaim SRAM from cached scripts/views/sounds. */
+#endif
+
 void
 scir_unlock_resource(resource_mgr_t *mgr, resource_t *res, int restype, int resnum);
 /* Unlocks a previously locked resource

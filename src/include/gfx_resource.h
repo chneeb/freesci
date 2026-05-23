@@ -79,7 +79,7 @@ typedef struct {
 	gfx_pixmap_t *priority_map;
 	gfx_pixmap_t *control_map;
 
-	byte aux_map[GFXR_AUX_MAP_SIZE];
+	byte *aux_map;
 
 /* Auxiliary map details:
 ** Bit 0: Vis

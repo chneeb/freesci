@@ -41,6 +41,9 @@
 #ifdef HAVE_FORK
 #  include <sys/wait.h>
 #endif
+#ifdef HAVE_PICO
+#  include <malloc.h>
+#endif
 
 #if defined(HAVE_SDL) && defined(MACOSX)
 #  include <SDL.h>
@@ -985,8 +988,12 @@ detect_versions(sci_version_t *version, int *res_version, cl_options_t *options,
 		sciprintf("Using resource version %d\n", *res_version);
 }
 
+#ifdef HAVE_PICO
+int freesci_main(int argc, char **argv)
+#else
 int
 main(int argc, char** argv)
+#endif
 {
 	config_entry_t *active_conf = NULL;	/* Active configuration used */
 	config_entry_t *confs = {0};	/* Configuration read from config file (if it exists) */
@@ -1127,6 +1134,12 @@ main(int argc, char** argv)
 	sciprintf("FreeSCI, version "VERSION"\n");
 
 	gamestate = (state_t *) sci_calloc(sizeof(state_t), 1);
+
+#ifdef HAVE_PICO
+	{ struct mallinfo _mi = mallinfo();
+	  printf("[mem] sizeof(state_t)=%u after_alloc: free=%d used=%d\n",
+	         (unsigned)sizeof(state_t), _mi.fordblks, _mi.uordblks); }
+#endif
 
 	if (init_gamestate(gamestate, resmgr, version))
 		return 1;
