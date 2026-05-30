@@ -228,18 +228,39 @@ kDoSound_SCI0(state_t *s, int funct_nr, int argc, reg_t *argv)
 									       handle),
 								0, handle, number));
 			}
+			/* Always set state=INITIALIZED so scripts that gate PLAY behind
+			   "init succeeded" still proceed. On NOSOUND, also set signal=-1
+			   so any "is it finished" poll terminates the wait. */
 			PUT_SEL32V(obj, state, _K_SOUND_STATUS_INITIALIZED);
+			if (s->sound.flags & SFX_STATE_FLAG_NOSOUND) {
+				PUT_SEL32V(obj, signal, -1);
+#ifdef HAVE_PICO
+				printf("[snd] INIT song=%d NOSOUND -> state=INITIALIZED signal=-1\n",
+				       GET_SEL32V(obj, number));
+				stdio_flush();
+#endif
+			}
 			PUT_SEL32(obj, handle, obj); /* ``sound handle'': we use the object address */
 		}
 		break;
 
 	case _K_SCI0_SOUND_PLAY_HANDLE:
 		if (obj.segment) {
-			sfx_song_set_status(&s->sound,
-					    handle, SOUND_STATUS_PLAYING);
-			sfx_song_set_loops(&s->sound,
-					   handle, GET_SEL32V(obj, loop));
-			PUT_SEL32V(obj, state, _K_SOUND_STATUS_PLAYING);
+			if (!(s->sound.flags & SFX_STATE_FLAG_NOSOUND)) {
+				sfx_song_set_status(&s->sound,
+						    handle, SOUND_STATUS_PLAYING);
+				sfx_song_set_loops(&s->sound,
+						   handle, GET_SEL32V(obj, loop));
+				PUT_SEL32V(obj, state, _K_SOUND_STATUS_PLAYING);
+			} else {
+				/* NOSOUND: keep the song "finished" so wait loops exit. */
+				PUT_SEL32V(obj, state, _K_SOUND_STATUS_STOPPED);
+				PUT_SEL32V(obj, signal, -1);
+#ifdef HAVE_PICO
+				printf("[snd] PLAY NOSOUND -> state=STOPPED signal=-1\n");
+				stdio_flush();
+#endif
+			}
 		}
 		break;
 

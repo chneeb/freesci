@@ -2843,6 +2843,17 @@ animate_do_animation(state_t *s, int funct_nr, int argc, reg_t *argv)
 	char checkers[32 * 19];
 	gfx_pixmap_t *newscreen = gfxop_grab_pixmap(s->gfx_state, gfx_rect(0, 10, 320, 190));
 
+#ifdef HAVE_PICO
+	printf("[anim] do_animation: gran=%d delay=%ld pic_animate=%d newscreen=%p old_screen=%p\n",
+	       s->animation_granularity, (long)s->animation_delay, s->pic_animate,
+	       (void *)newscreen, (void *)s->old_screen);
+	stdio_flush();
+#endif
+
+	if (!granularity0)
+		granularity0 = 1;
+	if (!granularity1)
+		granularity1 = 1;
 	if (!granularity2)
 		granularity2 = 1;
 	if (!granularity3)
@@ -2856,7 +2867,13 @@ animate_do_animation(state_t *s, int funct_nr, int argc, reg_t *argv)
 	}
 
 	GFX_ASSERT(gfxop_draw_pixmap(s->gfx_state, s->old_screen, gfx_rect(0, 0, 320, 190), gfx_point(0, 10)));
+#ifdef HAVE_PICO
+	printf("[anim] drew old_screen\n"); stdio_flush();
+#endif
 	gfxop_update_box(s->gfx_state, gfx_rect(0, 0, 320, 200));
+#ifdef HAVE_PICO
+	printf("[anim] update_box done, entering switch (pic_animate=%d)\n", s->pic_animate); stdio_flush();
+#endif
 
 	/*SCIkdebug(SCIkGRAPHICS, "Animating pic opening type %x\n", s->pic_animate);*/
 
@@ -3037,6 +3054,9 @@ animate_do_animation(state_t *s, int funct_nr, int argc, reg_t *argv)
 			int height = real_i * 3;
 			int width = real_i * 5;
 
+#ifdef HAVE_PICO
+			printf("[anim] BORDER_OPEN_F i=%d (gran3=%d)\n", i, granularity3); stdio_flush();
+#endif
 			GRAPH_UPDATE_BOX(s, width, 10 + height,
 					 width_l, 190 - 2*height);
 			gfxop_update(s->gfx_state);

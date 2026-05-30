@@ -485,20 +485,26 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
         return GFX_ERROR;
     }
 
-    /* Grabbed pixmap: restore saved region. */
+    /* Grabbed pixmap: restore saved region.
+       Honor the src sub-rect: the grab is pxm->xl wide, but the caller may
+       request only a (src.x,src.y,dest.xl,dest.yl) slice of it (e.g. the pic
+       open-animation draws narrow vertical/horizontal strips). Copying the
+       full pxm->xl per row at dest.x would over-read PSRAM ~64x and clobber
+       neighbouring columns. */
     if (pxm->internal.handle == PICO_HANDLE_GRABBED) {
+        int copy_w = dest.xl;  /* == src.xl (no scaling on Pico) */
         if (pxm->internal.info) {
             /* PSRAM grab: restore row-by-row from PSRAM */
             uint32_t addr = (uint32_t)(uintptr_t)pxm->data;
             for (int row = 0; row < dest.yl; row++)
-                psram_load(addr + (uint32_t)(row * pxm->xl),
+                psram_load(addr + (uint32_t)((src.y + row) * pxm->xl + src.x),
                            S->visual[bufnr] + (dest.y + row) * PICO_XSIZE + dest.x,
-                           (size_t)pxm->xl);
+                           (size_t)copy_w);
         } else if (pxm->data) {
             /* SRAM grab */
             for (int row = 0; row < dest.yl; row++)
                 memcpy(S->visual[bufnr] + (dest.y + row) * PICO_XSIZE + dest.x,
-                       pxm->data + row * pxm->xl, pxm->xl);
+                       pxm->data + (src.y + row) * pxm->xl + src.x, copy_w);
         }
         return GFX_OK;
     }
@@ -660,20 +666,12 @@ static int pico_set_pointer(struct _gfx_driver *drv, gfx_pixmap_t *pointer)
 
 static sci_event_t pico_get_event(struct _gfx_driver *drv)
 {
-    static int s_evt_count = 0;
-    if (++s_evt_count % 20 == 0) {
-        printf("[evt] get_event calls: %d\n", s_evt_count); stdio_flush();
-    }
     poll_keyboard(drv);
     return pop_event(S);
 }
 
 static int pico_usec_sleep(struct _gfx_driver *drv, long usecs)
 {
-    static int s_slp_count = 0;
-    if (++s_slp_count % 100 == 0) {
-        printf("[slp] sleep_count=%d\n", s_slp_count); stdio_flush();
-    }
     poll_keyboard(drv);
     sleep_us((uint64_t)(usecs > 10000 ? 10000 : usecs));
     return GFX_OK;
@@ -690,7 +688,12 @@ gfx_driver_t gfx_driver_pico = {
     SCI_GFX_DRIVER_VERSION,
     NULL, /* mode */
     0, 0, /* pointer_x, pointer_y */
-    GFX_CAPABILITY_FINE_LINES, /* no mouse, no pixmap registry */
+    GFX_CAPABILITY_FINE_LINES | GFX_CAPABILITY_PIXMAP_REGISTRY,
+    /* no mouse. Registry cap is required so gfx_free_pixmap() calls
+       pico_unregister_pixmap(), which clears pxm->data for grabbed pixmaps.
+       Grabbed PSRAM pixmaps store a PSRAM bump address (not a heap pointer)
+       in pxm->data; without unregister, the generic free() would free() that
+       bogus pointer and corrupt the heap. */
     0,   /* debug_flags */
     pico_set_parameter,
     pico_init_specific,

@@ -1740,20 +1740,9 @@ gfxop_set_pointer_view(gfx_state_t *state, int nr, int loop, int cel, point_t  *
 	gfx_pixmap_t *new_pointer = NULL;
 
 	BASIC_CHECKS(GFX_FATAL);
-#ifdef HAVE_PICO
-	printf("[ptr] set_pointer_view(%d, %d, %d) start\n", nr, loop, cel); stdio_flush();
-#endif
 
 	new_pointer = _gfxr_get_cel(state, nr, &real_loop, &real_cel,
 				    0); /* FIXME: For now, don't palettize pointers */
-#ifdef HAVE_PICO
-	printf("[ptr] _gfxr_get_cel(%d) returned %p xl=%d yl=%d psram=%d\n",
-	       nr, (void *)new_pointer,
-	       new_pointer ? new_pointer->xl : -1,
-	       new_pointer ? new_pointer->yl : -1,
-	       new_pointer ? new_pointer->psram_valid : -1);
-	stdio_flush();
-#endif
 
 	if (hotspot)
 	{
@@ -1770,15 +1759,7 @@ gfxop_set_pointer_view(gfx_state_t *state, int nr, int loop, int cel, point_t  *
 			GFXDEBUG("Changed loop/cel from %d/%d to %d/%d in view %d\n",
 				 loop, cel, real_loop, real_cel, nr);
 		}
-#ifdef HAVE_PICO
-		{
-			int r = _gfxop_set_pointer(state, new_pointer);
-			printf("[ptr] _gfxop_set_pointer(%d) -> %d\n", nr, r); stdio_flush();
-			return r;
-		}
-#else
 		return _gfxop_set_pointer(state, new_pointer);
-#endif
 	}
 }
 

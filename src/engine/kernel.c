@@ -132,6 +132,7 @@ reg_t kDisplay(struct _state *s, int funct_nr, int argc, reg_t *argv);
 reg_t kGraph(struct _state *s, int funct_nr, int argc, reg_t *argv);
 reg_t kFormat(struct _state *s, int funct_nr, int argc, reg_t *argv);
 reg_t kDoSound(struct _state *s, int funct_nr, int argc, reg_t *argv);
+reg_t kProfiler(struct _state *s, int funct_nr, int argc, reg_t *argv);
 reg_t kAddMenu(struct _state *s, int funct_nr, int argc, reg_t *argv);
 reg_t kSetMenu(struct _state *s, int funct_nr, int argc, reg_t *argv);
 reg_t kGetMenu(struct _state *s, int funct_nr, int argc, reg_t *argv);
@@ -290,7 +291,7 @@ sci_kernel_function_t kfunct_mappers[] = {
 /*5b*/	NOFUN("ShowFree"),
 /*5c*/	DEFUN("MemoryInfo", kMemoryInfo, "i"),
 /*5d*/	NOFUN("StackUsage"),
-/*5e*/	NOFUN("Profiler"),
+/*5e*/	DEFUN("Profiler", kProfiler, ""),
 /*5f*/	DEFUN("GetMenu", kGetMenu, "i."),
 /*60*/	DEFUN("SetMenu", kSetMenu, "i.*"),
 /*61*/	DEFUN("GetSaveFiles", kGetSaveFiles, "rrr"),
@@ -471,6 +472,18 @@ kHaveMouse(state_t *s, int funct_nr, int argc, reg_t *argv)
 
 	return make_reg (0, (s->have_mouse_flag
 		  && gfxop_have_mouse(s->gfx_state))? -1 : 0);
+}
+
+/* kProfiler - returns a free-running tick counter. SCI's SpeedTest script (777
+   in SQ3) calls this twice around a known-cost loop to calibrate animation
+   speed; the difference must be non-zero and monotonic. Returns a wrap-around
+   16-bit count derived from sci_get_current_time (millisecond resolution). */
+reg_t
+kProfiler(state_t *s, int funct_nr, int argc, reg_t *argv)
+{
+	GTimeVal t;
+	sci_get_current_time(&t);
+	return make_reg(0, (int)((t.tv_sec * 1000 + t.tv_usec / 1000) & 0xffff));
 }
 
 

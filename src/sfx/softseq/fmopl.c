@@ -186,8 +186,9 @@ static int *VIB_TABLE;
 
 /* envelope output curve table */
 /* attack + decay + OFF */
-//static int ENV_CURVE[2*EG_ENT+1];
-static int ENV_CURVE[2 * 4096 + 1];   // to keep it static ...
+/* Heap-allocated in OPLOpenTable() so NOSOUND builds (Pico) don't waste 32KB BSS.
+   Sized 2*EG_ENT+1 ints once EG_ENT is known via OPLBuildTables(). */
+static int *ENV_CURVE = NULL;
 
 /* multiple table */
 #define ML(a) (int)(a * 2)
@@ -623,6 +624,13 @@ static int OPLOpenTable(void) {
 		free(AMS_TABLE);
 		return 0;
 	}
+	if((ENV_CURVE = (int *)malloc((2 * EG_ENT + 1) * sizeof(int))) == NULL) {
+		free(TL_TABLE);
+		free(SIN_TABLE);
+		free(AMS_TABLE);
+		free(VIB_TABLE);
+		return 0;
+	}
 	/* make total level table */
 	for (t = 0; t < EG_ENT - 1 ; t++){
 		rate = ((1 << TL_BITS) - 1) / pow(10.0, EG_STEP * t / 20);	/* dB -> voltage */
@@ -685,6 +693,8 @@ static void OPLCloseTable(void) {
 	free(SIN_TABLE);
 	free(AMS_TABLE);
 	free(VIB_TABLE);
+	free(ENV_CURVE);
+	ENV_CURVE = NULL;
 }
 
 /* CSM Key Controll */
