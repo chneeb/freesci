@@ -788,8 +788,29 @@ _gfxop_scan_one_bitmask(gfx_pixmap_t *pixmap, rect_t zone)
 	int pixmap_xscale;
 
 #ifdef HAVE_PICO
-	if (!pixmap || !pixmap->index_data)
+	if (!pixmap)
 		return 0;
+	/* On Pico the priority and control maps are offloaded to PSRAM after
+	   decode (index_data freed).  Read just the clipped query zone back
+	   row-by-row and scan it; index_xl is 320 (no scaling on Pico). */
+	if (!pixmap->index_data) {
+		if (!pixmap->psram_valid)
+			return 0;
+		if (_gfxop_clip(&zone, gfx_rect(0, 0, pixmap->index_xl, pixmap->index_yl)))
+			return 0;
+		{
+			uint8_t rowbuf[320];
+			int y, x;
+			for (y = 0; y < zone.yl; y++) {
+				uint32_t addr = pixmap->psram_addr
+					+ (uint32_t)((zone.y + y) * pixmap->index_xl + zone.x);
+				psram_load(addr, rowbuf, (size_t)zone.xl);
+				for (x = 0; x < zone.xl; x++)
+					retval |= (1 << (rowbuf[x] & 0xf));
+			}
+		}
+		return retval;
+	}
 #endif
 
 	pixmap_xscale = pixmap->index_xl / 320;
@@ -832,7 +853,13 @@ gfxop_scan_bitmask(gfx_state_t *state, rect_t area, gfx_map_mask_t map)
 	if (map & GFX_MASK_PRIORITY)
 		retval |= _gfxop_scan_one_bitmask(state->priority_map, area);
 	if (map & GFX_MASK_CONTROL)
+#ifdef HAVE_PICO
+		/* state->control_map is NULL on Pico; the decoded control data lives
+		   on the pic's own control_map (offloaded to PSRAM). */
+		retval |= _gfxop_scan_one_bitmask(pic->control_map, area);
+#else
 		retval |= _gfxop_scan_one_bitmask(state->control_map, area);
+#endif
 
 	return retval;
 }
@@ -2493,6 +2520,15 @@ gfxop_draw_text(gfx_state_t *state, gfx_text_handle_t *handle, rect_t zone)
 		return GFX_OK;
 	}
 
+#ifdef HAVE_PICO
+	{ extern void stdio_flush(void);
+	  printf("[dtxt] enter lines_nr=%d zone=(%d,%d %dx%d) clip=(%d,%d %dx%d)\n",
+	         handle->lines_nr, zone.x, zone.y, zone.xl, zone.yl,
+	         state->clip_zone.x, state->clip_zone.y,
+	         state->clip_zone.xl, state->clip_zone.yl);
+	  stdio_flush(); }
+#endif
+
 	_gfxop_scale_rect(&zone, state->driver->mode);
 
 	line_height = handle->line_height * state->driver->mode->yfact;
@@ -2522,8 +2558,22 @@ gfxop_draw_text(gfx_state_t *state, gfx_text_handle_t *handle, rect_t zone)
 		gfx_pixmap_t *pxm = handle->text_pixmaps[i];
 
 		if (!pxm->data) {
+#ifndef HAVE_PICO
 			gfx_xlate_pixmap(pxm, state->driver->mode, state->options->text_xlate_filter);
 			gfxr_endianness_adjust(pxm, state->driver->mode); /* FIXME: resmgr layer! */
+#else
+			/* On Pico: leave data NULL so pico_draw_pixmap routes the text
+			   pixmap through pico_blit_indexed (index_data + nearest_pal),
+			   the same indexed path used for pics/views. gfx_xlate_pixmap
+			   would map text colors via global_index (always -1 in SCI0),
+			   producing invisible text.
+			   But gfx_xlate_pixmap is also what sets pxm->xl/yl from the
+			   index dims (via gfx_pixmap_alloc_data); skipping it leaves the
+			   pixmap 0x0, so _gfxop_clip discards every text line before it
+			   reaches the driver. Set the output dims here. */
+			pxm->xl = pxm->index_xl * state->driver->mode->xfact;
+			pxm->yl = pxm->index_yl * state->driver->mode->yfact;
+#endif
 		}
 		if (!pxm) {
 			GFXERROR("Could not find text pixmap %d/%d\n", i, handle->lines_nr);
@@ -2554,6 +2604,14 @@ gfxop_draw_text(gfx_state_t *state, gfx_text_handle_t *handle, rect_t zone)
 		pos.yl = pxm->yl;
 
 		_gfxop_add_dirty(state, pos);
+
+#ifdef HAVE_PICO
+		{ extern void stdio_flush(void);
+		  printf("[dtxt] line %d pos=(%d,%d %dx%d) data=%p cnr=%d\n",
+		         i, pos.x, pos.y, pos.xl, pos.yl,
+		         (void*)pxm->data, pxm->colors_nr);
+		  stdio_flush(); }
+#endif
 
 		_gfxop_draw_pixmap(state->driver, pxm, handle->priority, handle->control,
 				   gfx_rect(0, 0, pxm->xl, pxm->yl), pos, state->clip_zone, 0,

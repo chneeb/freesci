@@ -142,8 +142,21 @@ static sci_event_t pop_event(struct _pico_state *ps)
 }
 
 /* Poll the I2C keyboard once; push a sci_event_t if a mapped key arrived. */
+/* read_i2c_kbd() blocks ~16ms (i2c write, sleep_ms(16), i2c read), so a single
+   poll already paces one frame at ~60Hz. Throttle to at most one real read per
+   frame-time so multiple callers in one cycle (e.g. several front-buffer dirty
+   rects) don't stack 16ms blocks. This is the tiny_agi model: one blocking
+   keyboard read per visible cycle doubles as the frame pacer. */
+#define KBD_POLL_INTERVAL_US 16000
+
 static void poll_keyboard(struct _gfx_driver *drv)
 {
+    static uint64_t last_kbd_us = 0;
+    uint64_t now = time_us_64();
+    if (now - last_kbd_us < KBD_POLL_INTERVAL_US)
+        return;
+    last_kbd_us = now;
+
     int key = kbd_read();
     if (key <= 0) return;
 
@@ -379,8 +392,23 @@ static int pico_draw_filled_rect(struct _gfx_driver *drv, rect_t rect,
 
 static uint8_t s_psram_row[PICO_XSIZE]; /* scratch row for PSRAM reads */
 
+/* Map an RGB triple to the closest entry in the Pico palette. */
+static uint8_t
+nearest_pal(struct _pico_state *ps, int r, int g, int b)
+{
+    int best = 0, best_d = 0x7fffffff;
+    for (int i = 0; i < 256; i++) {
+        int dr = r - ps->palette[i][0];
+        int dg = g - ps->palette[i][1];
+        int db = b - ps->palette[i][2];
+        int d = dr * dr + dg * dg + db * db;
+        if (d < best_d) { best_d = d; best = i; if (!d) break; }
+    }
+    return (uint8_t)best;
+}
+
 static void
-pico_blit_indexed(gfx_pixmap_t *pxm, int priority,
+pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                   rect_t src, rect_t dest,
                   uint8_t *destbuf,    /* already homed to (dest.x, dest.y) */
                   int dest_stride,
@@ -393,17 +421,18 @@ pico_blit_indexed(gfx_pixmap_t *pxm, int priority,
     int use_psram = (!pxm->index_data && pxm->psram_valid);
 
     /* Pre-build lookup: local color index → palette slot in ps->palette[].
-       global_index is always -1 in SCI0 (never allocated via gfx_alloc_color),
-       so we derive the mapping from colors_nr instead:
        - 256 colors (background pic): palette slot == color index (identity)
-       - 16 colors (view cels): slot i*17 is the pure-EGA entry for color i,
-         because gfx_sci0_pic_colors[i*17] = INTERCOL(ega[i], ega[i]) = ega[i] */
+       - otherwise (view cels, text): match each local color's RGB to the
+         nearest palette entry. For EGA view cels this resolves to slot i*17
+         (pure EGA i); for text it resolves to the real requested color
+         instead of mis-assuming local index i == EGA color i. */
     uint8_t lut[256];
     if (pxm->colors_nr == GFX_SCI0_PIC_COLORS_NR) {
         for (int i = 0; i < 256; i++) lut[i] = (uint8_t)i;
     } else {
         for (int i = 0; i < pxm->colors_nr; i++)
-            lut[i] = (uint8_t)(i * 17);
+            lut[i] = nearest_pal(ps, pxm->colors[i].r,
+                                 pxm->colors[i].g, pxm->colors[i].b);
     }
 
     uint8_t *row_dst = destbuf;
@@ -441,7 +470,7 @@ void pico_render_background(gfx_driver_t *drv)
     gfx_pixmap_t *bg = ps->static_bg;
     rect_t full = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
     rect_t dst  = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
-    pico_blit_indexed(bg, -1, full, dst, ps->visual[0], PICO_XSIZE, NULL, 0);
+    pico_blit_indexed(ps, bg, -1, full, dst, ps->visual[0], PICO_XSIZE, NULL, 0);
     /* Push the freshly decoded background to the display immediately. */
     flush_region(ps, 0, 0, PICO_XSIZE, PICO_YSIZE);
 }
@@ -513,6 +542,20 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
        If pxm->data is NULL (gfx_xlate_pixmap skipped on Pico), use the
        direct indexed blit that translates index_data+colors on-the-fly. */
     uint8_t *destptr = S->visual[bufnr] + dest.y * PICO_XSIZE + dest.x;
+#ifdef HAVE_PICO
+    if (pxm->colors_nr <= 4 && pxm->index_data && !pxm->data) {
+        printf("[txt] dest=(%d,%d %dx%d) buf=%d cnr=%d ckey=%d c0=(%d,%d,%d)->np%d c1=(%d,%d,%d)->np%d\n",
+               dest.x, dest.y, dest.xl, dest.yl, (int)buffer,
+               pxm->colors_nr, pxm->color_key,
+               pxm->colors[0].r, pxm->colors[0].g, pxm->colors[0].b,
+               nearest_pal(S, pxm->colors[0].r, pxm->colors[0].g, pxm->colors[0].b),
+               pxm->colors_nr > 1 ? pxm->colors[1].r : -1,
+               pxm->colors_nr > 1 ? pxm->colors[1].g : -1,
+               pxm->colors_nr > 1 ? pxm->colors[1].b : -1,
+               pxm->colors_nr > 1 ? nearest_pal(S, pxm->colors[1].r, pxm->colors[1].g, pxm->colors[1].b) : -1);
+        stdio_flush();
+    }
+#endif
     if (!pxm->data) {
         uint8_t *pridata = (s_shared_priority && s_shared_priority->index_data)
                            ? s_shared_priority->index_data : NULL;
@@ -520,7 +563,7 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
                           ? (pridata + dest.y * s_shared_priority->index_xl + dest.x)
                           : NULL;
         int pri_stride = pridata ? s_shared_priority->index_xl : 0;
-        pico_blit_indexed(pxm, priority, src, dest, destptr, PICO_XSIZE,
+        pico_blit_indexed(S, pxm, priority, src, dest, destptr, PICO_XSIZE,
                           priptr, pri_stride);
     } else if (s_shared_priority && s_shared_priority->index_data) {
         gfx_crossblit_pixmap(drv->mode, pxm, priority, src, dest,
@@ -604,13 +647,17 @@ static int pico_update(struct _gfx_driver *drv,
             uint8_t *destptr = S->visual[0] + dest.y * PICO_XSIZE + dest.x;
             rect_t bgsrc = gfx_rect(src.x, src.y, src.xl, src.yl);
             rect_t bgdst = gfx_rect(0, 0, src.xl, src.yl);
-            pico_blit_indexed(S->static_bg, -1, bgsrc, bgdst,
+            pico_blit_indexed(S, S->static_bg, -1, bgsrc, bgdst,
                               destptr, PICO_XSIZE, NULL, 0);
         }
         break;
 
     case GFX_BUFFER_FRONT:
         flush_region(S, dest.x, dest.y, src.xl, src.yl);
+        /* Per-frame keyboard poll + pace. Covers animation loops that never
+           call kGetEvent/kWait (e.g. the SQ3 intro), which otherwise run
+           unpaced. Throttled inside poll_keyboard to one read per frame. */
+        poll_keyboard(drv);
         break;
 
     default:
@@ -672,7 +719,10 @@ static sci_event_t pico_get_event(struct _gfx_driver *drv)
 
 static int pico_usec_sleep(struct _gfx_driver *drv, long usecs)
 {
-    poll_keyboard(drv);
+    (void)drv;
+    /* Pure sleep: keyboard polling/pacing now lives in the per-frame front
+       flush (pico_update) and pico_get_event, so gfxop_usleep() times
+       accurately instead of being floored at ~16ms by an embedded i2c read. */
     sleep_us((uint64_t)(usecs > 10000 ? 10000 : usecs));
     return GFX_OK;
 }

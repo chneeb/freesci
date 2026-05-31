@@ -303,7 +303,7 @@ int decompress0(resource_t *result, int resh, int sci_version)
 		return SCI_ERROR_EMPTY_OBJECT;
 	}
 
-#ifdef HAVE_PICO
+#if 0 /* [dcmp] probe — silenced */
 	{ struct mallinfo _mi = mallinfo();
 	  extern void stdio_flush(void);
 	  printf("[dcmp] type=%d nr=%d clen=%d rsize=%d fordblks=%d\n",

@@ -256,7 +256,7 @@ gfx_pixmap_alloc_index_data(gfx_pixmap_t *pixmap)
 	if (!size)
 		size = 1;
 
-#ifdef HAVE_PICO
+#if 0 /* [pxm] alloc_idx probe — silenced */
 	{ struct mallinfo _mi = mallinfo();
 	  extern void stdio_flush(void);
 	  printf("[pxm] alloc_idx: xl=%d yl=%d size=%d fordblks=%d\n",

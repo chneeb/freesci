@@ -74,7 +74,9 @@ _init_vocabulary(state_t *s) /* initialize vocabulary and related resources */
 
 	s->opcodes = vocabulary_get_opcodes(s->resmgr);
 
-	/* selector_names are needed for script_map_selectors; free them after mapping on Pico */
+	/* selector_names must stay resident: write_selector() bounds-checks selector
+	   ids against selector_names_nr, so freeing them (nr=0) silently drops every
+	   kernel-side PUT_SEL32 write (e.g. Bresenham dx/dy/b_di). ~2-3KB, kept. */
 	if (!(s->selector_names = vocabulary_get_snames(s->resmgr, NULL, s->version))) {
 		sciprintf("_init_vocabulary(): Could not retreive selector names (vocab.997)!\n");
 		return 1;
@@ -82,11 +84,6 @@ _init_vocabulary(state_t *s) /* initialize vocabulary and related resources */
 	for (s->selector_names_nr = 0; s->selector_names[s->selector_names_nr]; s->selector_names_nr++);
 
 	script_map_selectors(s, &(s->selector_map));
-
-	/* Free selector names on Pico — only needed for the mapping above */
-	vocabulary_free_snames(s->selector_names);
-	s->selector_names    = NULL;
-	s->selector_names_nr = 0;
 
 	return 0;
 #else
@@ -618,8 +615,10 @@ script_init_engine(state_t *s, sci_version_t version)
 	/* Maps the kernel functions */
 
 #ifdef HAVE_PICO
-	vocabulary_free_knames(s->kernel_names);
-	s->kernel_names = NULL;
+	/* Keep kernel_names resident: it is only ~114 small strings (~1.5KB) and
+	   freeing it left dangling kfunct_table[].orig_name (the "lati" garbage in
+	   kNOP) and made has_kernel_function() always return 0 (breaking MoveCursor
+	   detection). The memory saving is not worth the correctness loss. */
 	{ struct mallinfo _mi = mallinfo();
 	  printf("[mem] after knames+kernel: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
 #endif

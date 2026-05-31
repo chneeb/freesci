@@ -220,7 +220,9 @@ kDoSound_SCI0(state_t *s, int funct_nr, int argc, reg_t *argv)
 	switch (command) {
 	case _K_SCI0_SOUND_INIT_HANDLE:
 		if (obj.segment) {
+#ifndef HAVE_PICO
 			sciprintf("Initializing song number %d\n", GET_SEL32V(obj, number));
+#endif
 			if (!(s->sound.flags & SFX_STATE_FLAG_NOSOUND)) {
 				SCRIPT_ASSERT_ZERO(sfx_add_song(&s->sound,
 								build_iterator(s, number,
@@ -234,11 +236,6 @@ kDoSound_SCI0(state_t *s, int funct_nr, int argc, reg_t *argv)
 			PUT_SEL32V(obj, state, _K_SOUND_STATUS_INITIALIZED);
 			if (s->sound.flags & SFX_STATE_FLAG_NOSOUND) {
 				PUT_SEL32V(obj, signal, -1);
-#ifdef HAVE_PICO
-				printf("[snd] INIT song=%d NOSOUND -> state=INITIALIZED signal=-1\n",
-				       GET_SEL32V(obj, number));
-				stdio_flush();
-#endif
 			}
 			PUT_SEL32(obj, handle, obj); /* ``sound handle'': we use the object address */
 		}
@@ -256,10 +253,6 @@ kDoSound_SCI0(state_t *s, int funct_nr, int argc, reg_t *argv)
 				/* NOSOUND: keep the song "finished" so wait loops exit. */
 				PUT_SEL32V(obj, state, _K_SOUND_STATUS_STOPPED);
 				PUT_SEL32V(obj, signal, -1);
-#ifdef HAVE_PICO
-				printf("[snd] PLAY NOSOUND -> state=STOPPED signal=-1\n");
-				stdio_flush();
-#endif
 			}
 		}
 		break;

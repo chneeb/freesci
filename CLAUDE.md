@@ -116,6 +116,73 @@ Sound is currently disabled (`--no-sound` in `pico_main.c`). To enable:
 - Add a Pico PCM device driver under `src/sfx/pcm_device/pico_pwm.c`
 - Remove `--no-sound` from `pico_main.c`'s argv
 
+### Pico correctness fixes (do NOT re-apply the old RAM optimizations)
+
+Earlier Pico work freed several vocab tables after use to save RAM. Two of those frees
+were **wrong** and have been reverted — keep them resident:
+
+- **`selector_names` must stay resident** (`game.c` `_init_vocabulary`). `write_selector()`
+  bounds-checks selector ids against `selector_names_nr`; freeing them (nr=0) silently
+  drops *every* kernel-side `PUT_SEL32` write (e.g. Bresenham dx/dy/b_di). ~2–3KB.
+- **`kernel_names` must stay resident** (`game.c` `script_init_engine`). Freeing it left
+  dangling `kfunct_table[].orig_name` (the "lati" garbage in kNOP) and made
+  `has_kernel_function()` always return 0. ~1.5KB.
+
+- **SCI0 cursor path for SQ3** (`kgraphics.c` `kSetCursor`). SQ3 (SCI0, 0.000.685) carries
+  "MoveCursor" in its kernel table, so the `has_kernel_function(s,"MoveCursor")` heuristic
+  wrongly flips it to the SCI1.1 cursor path, which misreads SQ3's `SetCursor(view,vis,x,y)`
+  args and faults in gfxop pointer ops. Guarded out under `HAVE_PICO`.
+
+- **Text rendering on Pico** (`operations.c` `gfxop_draw_text`, `pico_driver.c`
+  `pico_blit_indexed`/`nearest_pal`). Pico leaves text `pxm->data` NULL so text routes
+  through the indexed blit path (not `gfx_xlate_pixmap`, which maps via `global_index` = -1
+  in SCI0 → invisible text). But `gfx_xlate_pixmap` is also what sets `pxm->xl/yl`, so they
+  are set manually from index dims or `_gfxop_clip` discards every line. `pico_blit_indexed`
+  uses `nearest_pal()` (RGB → closest palette slot) for non-256-color pixmaps so text gets
+  its real color instead of assuming local index == EGA color.
+
+- **Priority/control bitmask scans from PSRAM** (`operations.c` `_gfxop_scan_one_bitmask`,
+  `gfxop_scan_bitmask`). Since priority/control `index_data` is offloaded to PSRAM on Pico,
+  the clipped query zone is read back row-by-row. `state->control_map` is NULL on Pico, so
+  the scan uses the pic's own `control_map` instead.
+
+### Debugging Pico offline (disassembler + desktop repro)
+
+Two fast ways to debug Pico issues without the slow flash cycle:
+
+1. **Build FreeSCI's script disassembler** (`src/tools/scidisasm.c`) against the desktop
+   static libs and run it in a game dir to read SCI0 bytecode at the exact `off=` values
+   the on-device `[pc]`/`[kcall]` probes report:
+   ```bash
+   LIBS=$(find build -name '*.a' | tr '\n' ' ')
+   gcc -fgnu89-inline -w -DHAVE_CONFIG_H=1 -DX_DISPLAY_MISSING=1 \
+     -Isrc/include -Ibuild -I/usr/include/SDL2 -D_REENTRANT \
+     -o /tmp/scidisasm src/tools/scidisasm.c \
+     -Wl,--start-group $LIBS -Wl,--end-group -lSDL2 -lm -lz -lpthread -ldl
+   cd ~/Downloads/sq3 && /tmp/scidisasm   # disassembles all scripts (segfaults mid-batch)
+   ```
+   The stock tool segfaults partway through a full batch; to reliably get one script, patch
+   `main()` to call `disassemble_script(&d, N, 1/2)` for a single N and run each in its own
+   process. SQ3 landmarks: script 994 = `Game` (`play` @0x150, main loop 0x182–0x198),
+   script 0 = `SQ3` (`doit` @0x277, per-frame `HaveMouse` @0x294 = cursor logic, harmless),
+   script 996 = `User` (`doit` @0x4e calls `GetEvent` @0x77 only when `global_55==0`).
+
+2. **Reproduce the no-mouse path on desktop** with `--disable-mouse` (sets
+   `have_mouse_flag=0`, so `kHaveMouse` returns 0 just like Pico):
+   ```bash
+   ./build/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl --disable-mouse --run
+   ```
+
+### Open issue — SQ3 keyboard control on Pico
+SQ3 boots and reaches the first playable room, but Roger won't walk and the intro can't be
+unpaused. Verified NOT the cause: the `play`/`HaveMouse` loop (normal idle), key reads
+(`raw=0xb7 → sci_key=19712` = SCI_K_RIGHT, one event per press), the driver→engine delivery
+code (all correct), or the driver struct layout. Key clue: Return *skips* the intro (works)
+but Space can't *unpause* and Roger won't move — first event lands, later ones don't reach
+game logic. Prime suspects: `User::doit` input gating via `global_55`, or `gfxop_get_event`'s
+`event.data = (char)event.data` truncation (0x4D00→0) on mask-mismatched queued events.
+Next: probe `kGetEvent` for delivered events, and run the desktop `--disable-mouse` repro.
+
 ## Key CMake decisions
 
 - `HAVE_CONFIG_H=1` must be set as a **compiler flag** (not just inside `config.h`) because `scitypes.h` guards its include with `#ifdef HAVE_CONFIG_H` before config.h is ever included — a chicken-and-egg problem.

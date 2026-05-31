@@ -766,7 +766,11 @@ sfx_remove_song(sfx_state_t *self, song_handle_t handle)
 /* Song modifications */
 /**********************/
 
+#ifdef HAVE_PICO
+#define ASSERT_SONG(s) if (!(s)) { return; }
+#else
 #define ASSERT_SONG(s) if (!(s)) { fprintf(stderr, "Looking up song handle %08lx failed in %s, L%d\n", handle, __FILE__, __LINE__); return; }
+#endif
 
 void
 sfx_song_set_status(sfx_state_t *self, song_handle_t handle, int status)

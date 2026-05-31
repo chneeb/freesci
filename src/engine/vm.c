@@ -754,6 +754,35 @@ run_vm(state_t *s, int restoring)
 
 		old_pc_offset = xs->addr.pc.offset;
 
+#ifdef HAVE_PICO
+		/* [pc] throttled probe: print the running script PC ~4x/sec.
+		   If the VM is stuck in a pure-bytecode loop this shows the PC
+		   cycling in a tight range (and which script); if it bus-faulted
+		   even this stops printing. */
+		{
+			extern unsigned long long time_us_64(void);
+			extern void stdio_flush(void);
+			static unsigned long long _pc_last_us = 0;
+			unsigned long long _pc_now = time_us_64();
+			if (_pc_now - _pc_last_us >= 250000ULL) {
+				script_t *_scr =
+				  script_locate_by_segment(s, xs->addr.pc.segment);
+				const char *_seln =
+				  (xs->selector >= 0
+				   && xs->selector < s->selector_names_nr
+				   && s->selector_names)
+				  ? s->selector_names[xs->selector] : "?";
+				_pc_last_us = _pc_now;
+				printf("[pc] script=%d off=%x obj=%x:%x sel=%d(%s)\n",
+				       _scr ? _scr->nr : -1,
+				       xs->addr.pc.offset,
+				       xs->objp.segment, xs->objp.offset,
+				       xs->selector, _seln);
+				stdio_flush();
+			}
+		}
+#endif
+
 		if (s->execution_stack_pos_changed) {
 			script_t *scr;
 			xs = s->execution_stack + s->execution_stack_pos;
@@ -1141,61 +1170,30 @@ run_vm(state_t *s, int restoring)
 					script_debug_flag = script_error_flag = 1;
 				} else {
 #ifdef HAVE_PICO
-					/* Compact kernel-call tracer: prints the kfunct_mappers
-					   name when it changes from the previous call, collapsing
-					   runs of the same call (e.g. kWait x500).
-					   We use kfunct_mappers directly because s->kernel_names
-					   was freed on Pico to save RAM (game.c:621). */
+					/* [kcall] throttled probe: print which kernel
+					   function runs ~4x/sec so a busy-wait shows up
+					   as a repeating name in the log tail. */
 					{
-						extern sci_kernel_function_t kfunct_mappers[];
-						static int s_last_fnr = -1;
-						static int s_run_count = 0;
-						int fnr = opparams[0];
-						if (fnr != s_last_fnr) {
-							if (s_last_fnr >= 0 && s_run_count > 0) {
-								const char *prev_name =
-								    kfunct_mappers[s_last_fnr].type != KF_TERMINATOR
-								    ? kfunct_mappers[s_last_fnr].name : NULL;
-								printf("[k] %s(0x%02x) x%d\n",
-								       prev_name ? prev_name : "?",
-								       s_last_fnr, s_run_count);
-								stdio_flush();
-							}
-							s_last_fnr = fnr;
-							s_run_count = 1;
-						} else {
-							s_run_count++;
-							if (s_run_count == 200) {
-								const char *kname =
-								    kfunct_mappers[fnr].type != KF_TERMINATOR
-								    ? kfunct_mappers[fnr].name : NULL;
-								printf("[k] %s(0x%02x) x200 (still going)\n",
-								       kname ? kname : "?", fnr);
-								stdio_flush();
-								s_run_count = 0;
-								s_last_fnr = -1;
-							}
+						extern unsigned long long time_us_64(void);
+						extern void stdio_flush(void);
+						static unsigned long long _last_us = 0;
+						unsigned long long _now = time_us_64();
+						if (_now - _last_us >= 250000ULL) {
+							const char *_kn =
+							  (s->kernel_names
+							   && opparams[0] <= s->kernel_names_nr
+							   && s->kernel_names[opparams[0]])
+							  ? s->kernel_names[opparams[0]] : "?";
+							_last_us = _now;
+							printf("[kcall] %02x %s @off=%x\n",
+							       opparams[0], _kn,
+							       xs->addr.pc.offset);
+							stdio_flush();
 						}
-					}
-#endif
-#ifdef HAVE_PICO
-					{
-						extern sci_kernel_function_t kfunct_mappers[];
-						int _efnr = opparams[0];
-						const char *_en =
-						    kfunct_mappers[_efnr].type != KF_TERMINATOR
-						    ? kfunct_mappers[_efnr].name : NULL;
-						printf("[k>] enter %s(0x%02x)\n",
-						       _en ? _en : "?", _efnr);
-						stdio_flush();
 					}
 #endif
 					s->r_acc = s->kfunct_table[opparams[0]]
 						.fun(s, opparams[0], argc, xs->sp + 1);
-#ifdef HAVE_PICO
-					printf("[k<] leave 0x%02x\n", opparams[0]);
-					stdio_flush();
-#endif
 				}
 				/* Call kernel function */
 
