@@ -32,15 +32,10 @@
 #include <gfx_options.h>
 #ifdef HAVE_PICO
 #include "psram_alloc.h"
-#include <malloc.h>
-#include <stdio.h>
 #include <pico/stdlib.h>
 /* Globals in operations.c consumed here during pic decode */
 extern byte *g_pico_decode_priority_buf;
 extern byte *g_pico_decode_visual_buf;
-#define PICO_MEMPRINT(tag) do { struct mallinfo _mi = mallinfo(); \
-    printf("[resmgr] " tag ": free=%d arena=%d\n", _mi.fordblks, _mi.arena); \
-    stdio_flush(); } while(0)
 #endif
 
 int
@@ -111,10 +106,6 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 	if (!res || !res->data)
 		return GFX_ERROR;
 
-#ifdef HAVE_PICO
-	PICO_MEMPRINT("after res load");
-#endif
-
 	if (state->version >= SCI_VERSION_01_VGA) {
 		if (need_unscaled)
 		{
@@ -146,14 +137,11 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			pico_picdec_cache_begin(_ra, res->size);
 		}
 		scir_evict_resource_data(resmgr, res);
-		PICO_MEMPRINT("after pic evict");
 		scir_free_all_lru(resmgr);
-		PICO_MEMPRINT("after lru flush");
 
 		/* Pass 1: visual map.
 		   Use the buffer pre-reserved in gfxop_new_pic to avoid a malloc
 		   that would fail due to fragmentation of the freed visual[0] block. */
-		PICO_MEMPRINT("before pass1 visual");
 		scaled_pic->visual_map->index_data = g_pico_decode_visual_buf;
 		g_pico_decode_visual_buf = NULL;
 		if (!scaled_pic->visual_map->index_data) {
@@ -161,7 +149,6 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		}
 		gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
 
-		PICO_MEMPRINT("before pass1 draw");
 		gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
 				&style, res->id, 0,
 				state->static_palette, state->static_palette_entries);
@@ -176,14 +163,12 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			vmap->index_data = NULL;
 		}
 		/* Pass 2: priority map */
-		PICO_MEMPRINT("before pass2 priority");
 		gfx_pixmap_alloc_index_data(scaled_pic->priority_map);
 		if (!scaled_pic->priority_map->index_data) {
 			pico_picdec_cache_end(); return GFX_ERROR;
 		}
 		gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
 
-		PICO_MEMPRINT("before pass2 draw");
 		gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
 				&style, res->id, 0,
 				state->static_palette, state->static_palette_entries);
@@ -192,7 +177,6 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		/* Disown priority buffer — gfxop_new_pic assigns it to state->priority_map */
 		g_pico_decode_priority_buf = scaled_pic->priority_map->index_data;
 		scaled_pic->priority_map->index_data = NULL;
-		PICO_MEMPRINT("after pass2 done");
 
 #else
 		if (need_unscaled)
@@ -293,7 +277,7 @@ gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int pal
 	   row-by-row via psram_load.  Evict the raw resource data immediately
 	   so the freed 64KB block stays available for visual[0] lazy allocation. */
 	if (result) {
-		int l, total_freed = 0;
+		int l;
 		for (l = 0; l < result->loops_nr; l++) {
 			gfxr_loop_t *loop = &result->loops[l];
 			int c;
@@ -306,15 +290,10 @@ gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int pal
 					psram_store(cel->psram_addr, cel->index_data, sz);
 					free(cel->index_data);
 					cel->index_data = NULL;
-					total_freed += (int)sz;
 				}
 			}
 		}
 		scir_evict_resource_data(resmgr, res);
-		{ struct mallinfo _mi = mallinfo();
-		  printf("[view] nr=%d cels_freed=%d res_freed=%d free=%d\n",
-		         nr, total_freed, res ? (int)res->size : 0, _mi.fordblks);
-		  stdio_flush(); }
 	}
 #endif
 

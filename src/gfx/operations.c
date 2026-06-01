@@ -2222,11 +2222,6 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		pico_alloc_visual(state->driver);
 		return GFX_FATAL;
 	}
-
-	{ struct mallinfo _mi = mallinfo();
-	  printf("[mem] gfxop_new_pic(%d): free=%d arena=%d used=%d\n",
-	         nr, _mi.fordblks, _mi.arena, _mi.uordblks);
-	  stdio_flush(); }
 #endif
 
 	gfxr_tag_resources(state->resstate);
@@ -2283,10 +2278,6 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 			free(pm->index_data);
 			pm->index_data = NULL;
 		}
-		{ struct mallinfo _mi = mallinfo();
-		  printf("[ops] after pri-psram(%s): free=%d\n",
-		         (pm && !pm->index_data) ? "freed" : "skip", _mi.fordblks);
-		  stdio_flush(); }
 	}
 
 	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors.
@@ -2520,15 +2511,6 @@ gfxop_draw_text(gfx_state_t *state, gfx_text_handle_t *handle, rect_t zone)
 		return GFX_OK;
 	}
 
-#ifdef HAVE_PICO
-	{ extern void stdio_flush(void);
-	  printf("[dtxt] enter lines_nr=%d zone=(%d,%d %dx%d) clip=(%d,%d %dx%d)\n",
-	         handle->lines_nr, zone.x, zone.y, zone.xl, zone.yl,
-	         state->clip_zone.x, state->clip_zone.y,
-	         state->clip_zone.xl, state->clip_zone.yl);
-	  stdio_flush(); }
-#endif
-
 	_gfxop_scale_rect(&zone, state->driver->mode);
 
 	line_height = handle->line_height * state->driver->mode->yfact;
@@ -2604,14 +2586,6 @@ gfxop_draw_text(gfx_state_t *state, gfx_text_handle_t *handle, rect_t zone)
 		pos.yl = pxm->yl;
 
 		_gfxop_add_dirty(state, pos);
-
-#ifdef HAVE_PICO
-		{ extern void stdio_flush(void);
-		  printf("[dtxt] line %d pos=(%d,%d %dx%d) data=%p cnr=%d\n",
-		         i, pos.x, pos.y, pos.xl, pos.yl,
-		         (void*)pxm->data, pxm->colors_nr);
-		  stdio_flush(); }
-#endif
 
 		_gfxop_draw_pixmap(state->driver, pxm, handle->priority, handle->control,
 				   gfx_rect(0, 0, pxm->xl, pxm->yl), pos, state->clip_zone, 0,

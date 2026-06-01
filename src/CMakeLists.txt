@@ -8,7 +8,10 @@ if(PLATFORM STREQUAL "pico")
     add_subdirectory(platform/pico)
 
     add_executable(freesci main.c config.c)
-    target_compile_definitions(freesci PRIVATE HAVE_PICO=1)
+    # PICO_MALLOC_PANIC=0: let pico-sdk's malloc wrapper return NULL on OOM instead
+    # of panic()ing immediately, so FreeSCI's own sci_malloc can report the failing
+    # allocation site + free heap to the LCD (see pico_oom_report in pico_main.c).
+    target_compile_definitions(freesci PRIVATE HAVE_PICO=1 PICO_MALLOC_PANIC=0)
     target_include_directories(freesci PRIVATE
         ${CMAKE_SOURCE_DIR}/src/platform/pico
     )

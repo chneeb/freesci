@@ -44,9 +44,6 @@
 #include <versions.h>
 #include <kernel.h>
 #include "kernel_types.h"
-#ifdef HAVE_PICO
-#  include <malloc.h>
-#endif
 
 /* Structures and data from vm.c: */
 extern calls_struct_t *send_calls;
@@ -548,11 +545,6 @@ script_init_engine(state_t *s, sci_version_t version)
 		s->version_lock_flag = 1; /* Lock version */
 	}
 
-#ifdef HAVE_PICO
-	{ struct mallinfo _mi = mallinfo();
-	  printf("[mem] script_init start: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
-#endif
-
 #ifndef HAVE_PICO
 	/* Skip on Pico: iterates up to 1000 scripts via LRU cache, growing sbrk by
 	   ~118KB that is never reclaimed, making GFX buffer allocation impossible.
@@ -565,11 +557,6 @@ script_init_engine(state_t *s, sci_version_t version)
 	else
 		result = create_class_table_sci0(s);
 
-#ifdef HAVE_PICO
-	{ struct mallinfo _mi = mallinfo();
-	  printf("[mem] after class_table: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
-#endif
-
 	sm_init(&s->seg_manager, s->version >= SCI_VERSION(1,001,000));
 	s->gc_countdown = GC_INTERVAL - 1;
 
@@ -580,11 +567,6 @@ script_init_engine(state_t *s, sci_version_t version)
 	}
 
 	s->script_000_segment = script_get_segment(s, 0, SCRIPT_GET_LOCK);
-
-#ifdef HAVE_PICO
-	{ struct mallinfo _mi = mallinfo();
-	  printf("[mem] after script_000_lock: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
-#endif
 
 	if (s->script_000_segment <= 0) {
 		sciprintf("Failed to instantiate script.000\n");
@@ -613,22 +595,11 @@ script_init_engine(state_t *s, sci_version_t version)
 	s->kernel_names = vocabulary_get_knames(s->resmgr, &s->kernel_names_nr);
 	script_map_kernel(s);
 	/* Maps the kernel functions */
-
-#ifdef HAVE_PICO
-	/* Keep kernel_names resident: it is only ~114 small strings (~1.5KB) and
-	   freeing it left dangling kfunct_table[].orig_name (the "lati" garbage in
-	   kNOP) and made has_kernel_function() always return 0 (breaking MoveCursor
-	   detection). The memory saving is not worth the correctness loss. */
-	{ struct mallinfo _mi = mallinfo();
-	  printf("[mem] after knames+kernel: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
-#endif
+	/* kernel_names must stay resident: freeing it leaves kfunct_table[].orig_name
+	   dangling and makes has_kernel_function() always return 0. */
 
 	if (_init_vocabulary(s)) return 1;
 
-#ifdef HAVE_PICO
-	{ struct mallinfo _mi = mallinfo();
-	  printf("[mem] after vocab: free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
-#endif
 	if (s->selector_map.cantBeHere != -1)
 		version_require_later_than(s, SCI_VERSION_FTU_INVERSE_CANBEHERE);
 
@@ -749,11 +720,6 @@ game_init(state_t *s)
 		return 1;
 	}
 
-#ifdef HAVE_PICO
-	{ struct mallinfo _mi = mallinfo();
-	  printf("[mem] after script_instantiate(0): free=%d used=%d\n", _mi.fordblks, _mi.uordblks); }
-#endif
-
 	s->parser_valid = 0; /* Invalidate parser */
 	s->parser_event = NULL_REG; /* Invalidate parser event */
 
@@ -765,11 +731,6 @@ game_init(state_t *s)
 	if (!send_calls_allocated)
 		send_calls = (calls_struct_t*)sci_calloc(sizeof(calls_struct_t), send_calls_allocated = 16);
 
-#ifdef HAVE_PICO
-	{ struct mallinfo _mi = mallinfo();
-	  printf("[mem] before _reset_graphics_input: free=%d arena=%d used=%d\n",
-	         _mi.fordblks, _mi.arena, _mi.uordblks); }
-#endif
 	if (s->gfx_state && _reset_graphics_input(s))
 		return 1;
 

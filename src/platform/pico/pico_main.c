@@ -24,6 +24,115 @@ extern psram_spi_inst_t g_psram;
 /* FreeSCI's main(), renamed under HAVE_PICO */
 int freesci_main(int argc, char **argv);
 
+/* ---- HardFault diagnostics (RP2350 / Cortex-M33) ---------------------- */
+/* The RP2350 has no MMU, so a wild pointer doesn't fault at the access — but a
+   bad address into a reserved/peripheral region, an unaligned/stacking fault,
+   or a stack overflow raises a HardFault.  Without a handler the chip just goes
+   silent (the symptom we keep seeing when SQ3's ego lands).  This dumps the
+   faulting PC/LR and the M33 fault-status registers over USB serial so a crash
+   prints WHERE it died instead of vanishing.  isr_hardfault is a weak symbol in
+   the pico-sdk crt0; defining it here overrides the default spin. */
+/* Fault-context-safe hex writer: append "label=0xXXXXXXXX\n" to buf.
+   No malloc, no printf reentrancy — just manual nibble formatting so it is
+   safe to call from inside the HardFault handler. */
+static char *fault_hex(char *p, const char *label, uint32_t v)
+{
+    static const char hx[] = "0123456789abcdef";
+    while (*label) *p++ = *label++;
+    *p++ = '='; *p++ = '0'; *p++ = 'x';
+    for (int i = 28; i >= 0; i -= 4)
+        *p++ = hx[(v >> i) & 0xf];
+    *p++ = '\n';
+    return p;
+}
+
+void hardfault_handler_c(uint32_t *frame)
+{
+    volatile uint32_t *CFSR  = (volatile uint32_t *)0xE000ED28;
+    volatile uint32_t *HFSR  = (volatile uint32_t *)0xE000ED2C;
+    volatile uint32_t *MMFAR = (volatile uint32_t *)0xE000ED34;
+    volatile uint32_t *BFAR  = (volatile uint32_t *)0xE000ED38;
+
+    /* USB-CDC can't transmit from fault context (TinyUSB task is starved), so
+       the screen is the only reliable channel.  Build a short report with the
+       manual hex writer and push it to the ILI9488 over synchronous SPI. */
+    char buf[256];
+    char *p = buf;
+    *p++ = '\n';
+    p = fault_hex(p, "HardFault PC", frame[6]);
+    p = fault_hex(p, "LR  ", frame[5]);
+    p = fault_hex(p, "xPSR", frame[7]);
+    p = fault_hex(p, "CFSR", *CFSR);
+    p = fault_hex(p, "HFSR", *HFSR);
+    p = fault_hex(p, "MMFAR", *MMFAR);
+    p = fault_hex(p, "BFAR", *BFAR);
+    *p = '\0';
+
+    lcd_clear();
+    lcd_print_string(buf);
+
+    /* Also try USB (harmless; the leading \n may flush, the rest likely won't) */
+    printf("[FAULT]%s", buf);
+    stdio_flush();
+    while (1) tight_loop_contents();
+}
+
+/* Out-of-memory reporter.  PICO_MALLOC_PANIC=0 makes the pico-sdk malloc wrapper
+   return NULL on exhaustion instead of panic()ing with a message we can't see; the
+   sci_malloc/calloc/realloc wrappers (sci_memory.c) call this on a NULL result so
+   the failing allocation's size + site + remaining free heap land on the LCD, the
+   only channel that works once the heap is gone.  Same fault-safe SPI path as the
+   HardFault handler; halts afterwards. */
+void pico_oom_report(const char *what, unsigned long size,
+                     const char *file, int line, const char *funct)
+{
+    struct mallinfo mi = mallinfo();
+
+    char buf[256];
+    char *p = buf;
+    *p++ = '\n';
+    while (*what) *p++ = *what++;
+    *p++ = '\n';
+    p = fault_hex(p, "size", (uint32_t)size);
+    p = fault_hex(p, "free", (uint32_t)mi.fordblks);
+    p = fault_hex(p, "arena", (uint32_t)mi.arena);
+    p = fault_hex(p, "line", (uint32_t)line);
+    /* trailing path component of file, then funct, on their own lines */
+    {
+        const char *base = file, *q = file;
+        while (*q) { if (*q == '/') base = q + 1; q++; }
+        while (*base) *p++ = *base++;
+        *p++ = '\n';
+        while (*funct) *p++ = *funct++;
+        *p++ = '\n';
+    }
+    *p = '\0';
+
+    lcd_clear();
+    lcd_print_string(buf);
+
+    printf("[OOM]%s", buf);
+    stdio_flush();
+    while (1) tight_loop_contents();
+}
+
+void __attribute__((naked)) isr_hardfault(void)
+{
+    __asm volatile(
+        "movs r0, #4                   \n" /* EXC_RETURN bit2: which stack? */
+        "mov  r1, lr                   \n"
+        "tst  r0, r1                   \n"
+        "beq  1f                       \n"
+        "mrs  r0, psp                  \n" /* faulted in thread/PSP context */
+        "b    2f                       \n"
+        "1:                            \n"
+        "mrs  r0, msp                  \n" /* faulted in handler/MSP context */
+        "2:                            \n"
+        "ldr  r1, =hardfault_handler_c \n"
+        "bx   r1                       \n"
+    );
+}
+
 int main(void)
 {
     set_sys_clock_khz(133000, true);

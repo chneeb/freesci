@@ -27,10 +27,6 @@
 
 #include <sci_memory.h>
 #include <gfx_tools.h>
-#ifdef HAVE_PICO
-#include <malloc.h>
-#include <stdio.h>
-#endif
 
 /* set optimisations for Win32: */
 #ifdef _WIN32
@@ -256,13 +252,6 @@ gfx_pixmap_alloc_index_data(gfx_pixmap_t *pixmap)
 	if (!size)
 		size = 1;
 
-#if 0 /* [pxm] alloc_idx probe — silenced */
-	{ struct mallinfo _mi = mallinfo();
-	  extern void stdio_flush(void);
-	  printf("[pxm] alloc_idx: xl=%d yl=%d size=%d fordblks=%d\n",
-	         pixmap->index_xl, pixmap->index_yl, size, _mi.fordblks);
-	  stdio_flush(); }
-#endif
 	pixmap->index_data = (byte*)sci_malloc(size);
 
 	memset(pixmap->index_data, 0, size);

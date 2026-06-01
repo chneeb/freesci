@@ -45,11 +45,13 @@
 #  define class class_
 #endif /* __cplusplus */
 
-#ifdef HAVE_PICO
-#  define VM_STACK_SIZE 0x400  /* 1KB entries = 4KB on Pico (vs 16KB default) */
-#else
-#  define VM_STACK_SIZE 0x1000
-#endif
+/* SQ3 room 2 (Game::doit: eachElementDo(#check) over the cast → nested check()
+   sends → Animate → motionCue) shares one VM value stack across recursive
+   run_vm calls and overflows a 0x400 stack — sp passes stack_top, the PUSH
+   writes through validate_stack_addr's NULL return and traps (HardFault). The
+   desktop 0x1000 never overflows here, so it is the safe size; recover the
+   12KB elsewhere via PSRAM offloads, not by shrinking this. */
+#define VM_STACK_SIZE 0x1000
 /* Number of bytes to be allocated for the stack */
 
 #define SCRIPT_MAX_EXEC_STACK 256
@@ -439,7 +441,19 @@ extern DLLEXTERN int script_abort_flag;
 ** Set it to SCRIPT_ABORT_WITH_REPLAY to force a replay afterwards.
 */
 
+#ifdef HAVE_PICO
+/* kDisposeClone only flags clones OBJECT_FLAG_FREED; their seg-manager table
+   entries are reclaimed only when run_gc() fires, every GC_INTERVAL kernel calls.
+   The clone/node/list tables (heapmgr.h) grow by realloc and never shrink, so a
+   long collection interval lets them climb to the high-water mark of clones
+   created in that window — on SQ3 that reached ~428 clone slots (~18KB), and the
+   next realloc-grow couldn't find a contiguous block in the ~388KB heap (OOM in
+   alloc_clone_entry). Collecting far more often keeps those tables tiny. The GC
+   path is the same one the desktop runs; only the cadence changes. */
+# define GC_INTERVAL 2048	/* kernel calls between gcs (Pico: keep heap tables small) */
+#else
 #define GC_INTERVAL 32768	/* Number of kernel calls in between gcs; should be < 50000 */
+#endif
 
 extern int script_gc_interval;
 /* Initially GC_DELAY, can be set at runtime */

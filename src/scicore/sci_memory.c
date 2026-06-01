@@ -34,21 +34,12 @@
 ***************************************************************************/
 
 #include <sci_memory.h>
+
 #ifdef HAVE_PICO
-#include <malloc.h>
-#include <stdio.h>
-extern void stdio_flush(void);
-/* Binary-search for the largest contiguous allocatable block. */
-static size_t pico_max_alloc(void) {
-    size_t lo = 0, hi = 512*1024, best = 0;
-    while (lo + 64 <= hi) {
-        size_t mid = (lo + hi) / 2;
-        void *p = malloc(mid);
-        if (p) { free(p); best = mid; lo = mid + 1; }
-        else   { hi = mid - 1; }
-    }
-    return best;
-}
+/* Implemented in pico_main.c: prints the failing allocation + free heap to the
+   LCD and halts (USB serial is unreliable once memory is exhausted). */
+extern void pico_oom_report(const char *what, unsigned long size,
+			    const char *file, int line, const char *funct);
 #endif
 
 /*#define POISON_MEMORY*/
@@ -78,15 +69,7 @@ _SCI_MALLOC(size_t size, const char *file, int line, const char *funct)
 #endif
 #ifdef HAVE_PICO
 	res = malloc(size);
-	if (!res) {
-		struct mallinfo _mi = mallinfo();
-		size_t maxblk = pico_max_alloc();
-		fprintf(stderr, "[oom] malloc(%lu) failed: fordblks=%d arena=%d maxblk=%lu\n",
-		        (unsigned long)size, _mi.fordblks, _mi.arena, (unsigned long)maxblk);
-		stdio_flush();
-		/* Fall through to ALLOC_MEM which will panic */
-	}
-	ALLOC_MEM((res = res), size, file, line, funct)
+	if (res == NULL) pico_oom_report("malloc", (unsigned long)size, file, line, funct);
 #else
 	ALLOC_MEM((res = malloc(size)), size, file, line, funct)
 #endif
@@ -106,7 +89,12 @@ _SCI_CALLOC(size_t num, size_t size, const char *file, int line, const char *fun
 #ifdef MALLOC_DEBUG
 	INFO_MEMORY("_SCI_CALLOC()", size, file, line, funct);
 #endif
+#ifdef HAVE_PICO
+	res = calloc(num, size);
+	if (res == NULL) pico_oom_report("calloc", (unsigned long)(num * size), file, line, funct);
+#else
 	ALLOC_MEM((res = calloc(num, size)), num * size, file, line, funct)
+#endif
 	return res;
 }
 
@@ -118,7 +106,12 @@ _SCI_REALLOC(void *ptr, size_t size, const char *file, int line, const char *fun
 #ifdef MALLOC_DEBUG
 	INFO_MEMORY("_SCI_REALLOC()", size, file, line, funct);
 #endif
+#ifdef HAVE_PICO
+	res = realloc(ptr, size);
+	if (res == NULL) pico_oom_report("realloc", (unsigned long)size, file, line, funct);
+#else
 	ALLOC_MEM((res = realloc(ptr, size)), size, file, line, funct)
+#endif
 	return res;
 }
 

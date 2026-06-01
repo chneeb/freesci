@@ -146,6 +146,28 @@ were **wrong** and have been reverted — keep them resident:
   the clipped query zone is read back row-by-row. `state->control_map` is NULL on Pico, so
   the scan uses the pic's own `control_map` instead.
 
+- **VM value stack must stay full-size** (`vm.h` `VM_STACK_SIZE 0x1000`). It was once shrunk
+  to `0x400` on Pico to save SRAM; SQ3 room 2 (`Game::doit` → `eachElementDo(#check)` over the
+  cast → nested `check()` sends → `Animate` → `motionCue`) shares one value stack across
+  recursive `run_vm` and overflowed 1024 entries → `validate_stack_addr` NULL → PUSH trap →
+  HardFault. Keep it at 0x1000; recover the 12KB via PSRAM, not by shrinking this.
+
+- **GC runs far more often on Pico** (`vm.h` `GC_INTERVAL 2048`, desktop 32768). `kDisposeClone`
+  only flags clones `OBJECT_FLAG_FREED`; their seg-manager table entries are reclaimed only by
+  `run_gc()`. The clone/node/list tables (`heapmgr.h`) grow by realloc and **never shrink**, so
+  a long interval let SQ3's clone table climb to ~428 slots (~18KB) until a realloc-grow could
+  not find a contiguous block in the ~388KB heap → OOM in `alloc_clone_entry` (`seg_manager.c`).
+  Same GC code the desktop runs; only the cadence changed. If gameplay stutters from GC, raise
+  it; if it OOMs again under heavy animation, lower it. Single tunable knob.
+
+- **OOM self-report to LCD** (`sci_memory.c` + `pico_main.c` `pico_oom_report`). The freesci
+  target sets `PICO_MALLOC_PANIC=0` (`src/CMakeLists.txt`) so pico-sdk's malloc wrapper returns
+  NULL on exhaustion instead of panic()ing with a USB-only message. `sci_malloc/calloc/realloc`
+  then call `pico_oom_report`, which prints the failing allocation's size, free heap
+  (`mallinfo.fordblks`), arena, source line, file basename, and function to the LCD (fault-safe
+  SPI, same channel as the HardFault handler) and halts. This is what pinpointed the clone-table
+  OOM above. Keep it — it makes any future OOM legible instead of a blind panic.
+
 ### Debugging Pico offline (disassembler + desktop repro)
 
 Two fast ways to debug Pico issues without the slow flash cycle:
@@ -173,15 +195,30 @@ Two fast ways to debug Pico issues without the slow flash cycle:
    ./build/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl --disable-mouse --run
    ```
 
-### Open issue — SQ3 keyboard control on Pico
-SQ3 boots and reaches the first playable room, but Roger won't walk and the intro can't be
-unpaused. Verified NOT the cause: the `play`/`HaveMouse` loop (normal idle), key reads
-(`raw=0xb7 → sci_key=19712` = SCI_K_RIGHT, one event per press), the driver→engine delivery
-code (all correct), or the driver struct layout. Key clue: Return *skips* the intro (works)
-but Space can't *unpause* and Roger won't move — first event lands, later ones don't reach
-game logic. Prime suspects: `User::doit` input gating via `global_55`, or `gfxop_get_event`'s
-`event.data = (char)event.data` truncation (0x4D00→0) on mask-mismatched queued events.
-Next: probe `kGetEvent` for delivered events, and run the desktop `--disable-mouse` repro.
+### RESOLVED — SQ3 plays on Pico (keyboard control + room-2 freeze)
+SQ3 boots, reaches the first playable room, Roger walks, and gameplay runs without crashes.
+The old "Roger won't walk / freeze on landing in room 2" was **never an input bug** — it was the
+undersized VM value stack (`VM_STACK_SIZE 0x400`, see correctness fixes above). A second crash
+(panic while walking / on text input) was the **clone-table OOM** fixed by `GC_INTERVAL 2048`.
+
+### Open issues on Pico (current)
+
+1. **No text parser — "look around" etc. do nothing.** `_init_vocabulary` (`game.c`, under
+   `HAVE_PICO`) deliberately NULLs `parser_words`/`parser_rules`/`parser_suffices`/`parser_branches`
+   to save ~80KB, so `kParse` tokenizes against an empty vocab and no command is understood. This
+   is a RAM trade-off, not a load failure. To restore the parser, actually load the vocab and
+   offload it to PSRAM (it is read-only after build, so a PSRAM-resident vocab with a small read
+   path is viable — see PSRAM candidate list). Until then SQ3 is keyboard-shortcut only.
+
+2. **Garbage rectangle instead of Roger during shadow/priority redraws.** Walking Roger through a
+   shadow region (which alters his sprite via the priority/shadow path) intermittently blits a
+   rectangle of changing memory garbage where the view should be. The shifting contents mean an
+   uninitialized/stale buffer is being drawn — prime suspects: a dynamic-view pixmap whose
+   `index_data` was offloaded/freed to PSRAM but re-blit from a stale/invalid `psram_addr`, or a
+   view buffer sized from wrong `xl/yl` (cf. the manual text-dimension fix). Start in
+   `pico_blit_indexed` (`pico_driver.c`) and the view decode path (`gfxr_draw_view0` /
+   `gfxop_draw_cel`), checking `psram_valid`/`psram_addr` and the pixmap dimensions on the
+   shadowed-cel path. Not yet diagnosed.
 
 ## Key CMake decisions
 

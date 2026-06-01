@@ -160,15 +160,9 @@ static void poll_keyboard(struct _gfx_driver *drv)
     int key = kbd_read();
     if (key <= 0) return;
 
-    printf("[kbd] raw=0x%02x\n", key); stdio_flush();
-
     int sci_key = pico_map_key(key);
-    if (!sci_key) {
-        printf("[kbd] unmapped\n"); stdio_flush();
+    if (!sci_key)
         return;
-    }
-
-    printf("[kbd] sci_key=%d\n", sci_key); stdio_flush();
 
     sci_event_t ev;
     ev.type      = SCI_EVT_KEYBOARD;
@@ -420,6 +414,17 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
     int has_alpha = (color_key != GFX_PIXMAP_COLOR_KEY_NONE);
     int use_psram = (!pxm->index_data && pxm->psram_valid);
 
+    /* GUARD: s_psram_row is PICO_XSIZE bytes.  A cel whose index_xl exceeds
+       that (or a bad src origin) overflows the scratch row and feeds psram_load
+       a runaway length -> blocking DMA never returns.  Skip on out-of-range
+       geometry rather than hang. */
+    if (use_psram && (pxm->index_xl <= 0 || pxm->index_xl > PICO_XSIZE
+                      || pxm->index_yl <= 0 || pxm->index_yl > PICO_YSIZE
+                      || src.x < 0 || src.y < 0
+                      || src.x + xl > pxm->index_xl
+                      || src.y + yl > pxm->index_yl))
+        return;
+
     /* Pre-build lookup: local color index → palette slot in ps->palette[].
        - 256 colors (background pic): palette slot == color index (identity)
        - otherwise (view cels, text): match each local color's RGB to the
@@ -522,6 +527,12 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
        neighbouring columns. */
     if (pxm->internal.handle == PICO_HANDLE_GRABBED) {
         int copy_w = dest.xl;  /* == src.xl (no scaling on Pico) */
+        /* GUARD: a bad grab geometry over-reads PSRAM / overruns visual[0] ->
+           hang or corruption.  Skip instead. */
+        if (copy_w <= 0 || copy_w > PICO_XSIZE
+            || dest.x < 0 || dest.x + copy_w > PICO_XSIZE
+            || dest.y < 0 || dest.y + dest.yl > PICO_YSIZE)
+            return GFX_OK;
         if (pxm->internal.info) {
             /* PSRAM grab: restore row-by-row from PSRAM */
             uint32_t addr = (uint32_t)(uintptr_t)pxm->data;
@@ -542,20 +553,6 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
        If pxm->data is NULL (gfx_xlate_pixmap skipped on Pico), use the
        direct indexed blit that translates index_data+colors on-the-fly. */
     uint8_t *destptr = S->visual[bufnr] + dest.y * PICO_XSIZE + dest.x;
-#ifdef HAVE_PICO
-    if (pxm->colors_nr <= 4 && pxm->index_data && !pxm->data) {
-        printf("[txt] dest=(%d,%d %dx%d) buf=%d cnr=%d ckey=%d c0=(%d,%d,%d)->np%d c1=(%d,%d,%d)->np%d\n",
-               dest.x, dest.y, dest.xl, dest.yl, (int)buffer,
-               pxm->colors_nr, pxm->color_key,
-               pxm->colors[0].r, pxm->colors[0].g, pxm->colors[0].b,
-               nearest_pal(S, pxm->colors[0].r, pxm->colors[0].g, pxm->colors[0].b),
-               pxm->colors_nr > 1 ? pxm->colors[1].r : -1,
-               pxm->colors_nr > 1 ? pxm->colors[1].g : -1,
-               pxm->colors_nr > 1 ? pxm->colors[1].b : -1,
-               pxm->colors_nr > 1 ? nearest_pal(S, pxm->colors[1].r, pxm->colors[1].g, pxm->colors[1].b) : -1);
-        stdio_flush();
-    }
-#endif
     if (!pxm->data) {
         uint8_t *pridata = (s_shared_priority && s_shared_priority->index_data)
                            ? s_shared_priority->index_data : NULL;
