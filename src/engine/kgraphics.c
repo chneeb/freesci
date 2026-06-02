@@ -1151,7 +1151,7 @@ kDrawPic(state_t *s, int funct_nr, int argc, reg_t *argv)
 			add_to_pic = 0;
 
 	gfxop_disable_dirty_frames(s->gfx_state);
-	
+
 	if (NULL != s->old_screen) {
 		gfxop_free_pixmap(s->gfx_state, s->old_screen);
 	}

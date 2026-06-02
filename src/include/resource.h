@@ -251,7 +251,15 @@ isblank(int foo)
 #  define new _freesci_cplusplus_workaround_new
 #endif
 
-#define SCI_MEMTEST memtest(__FILE__, __LINE__)
+#ifdef HAVE_PICO
+/* memtest() is a heap-integrity stress test (allocates escalating blocks up to
+   ~11KB just to exercise the allocator). It serves no functional purpose in the
+   save path, but on the Pico's tight heap it exhausts memory and aborts the save
+   before it can run. Compile it out here. */
+#  define SCI_MEMTEST ((void)0)
+#else
+#  define SCI_MEMTEST memtest(__FILE__, __LINE__)
+#endif
 
 /*-- queues --*/
 

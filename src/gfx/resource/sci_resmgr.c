@@ -147,19 +147,51 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		if (!scaled_pic->visual_map->index_data) {
 			pico_picdec_cache_end(); return GFX_ERROR;
 		}
+
+#ifdef PICO_DECODE_CONTROL_MAP
+		/* Pin the 32KB packed control buffer now: the resource decompress
+		   buffer is already freed (evicted to PSRAM above) and the 64KB
+		   priority hole is still pristine (priority is Pass 3), so 32KB is
+		   contiguous here.  Allocating it mid-decode (Pass 2) failed on tight
+		   rooms because fragmentation left no 32KB-contiguous block. */
+		byte *control_buf = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
+		if (!control_buf) {
+			/* OOM on the 32KB control buffer — common on restore/replay, where
+			   the heap is tighter than on first room entry.  Do NOT abort the
+			   pic decode: gfxop_new_pic would return GFX_ERROR, which kDrawPic
+			   escalates to a FATAL VM error -> HardFault.  Instead degrade to
+			   no-collision for this pic — skip Pass 2 below, leaving
+			   control_map->index_data NULL / psram_valid 0 so gfxop_scan_bitmask
+			   returns 0, exactly like -DPICO_CONTROL_MAP=OFF but per-pic and
+			   recoverable on the next decode with more free heap. */
+			GFXWARN("control map: 32KB alloc failed for pic %d — decoding "
+			        "without collision (low heap)\n", res->id);
+		}
+#endif
 		gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
 
 		gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
 				&style, res->id, 0,
 				state->static_palette, state->static_palette_entries);
 
+#ifdef PICO_DECODE_CONTROL_MAP
+		byte *reuse_aux_buf = NULL;
+#endif
 		{	/* Push visual to PSRAM; pico_blit_indexed handles psram_valid==1 */
 			gfx_pixmap_t *vmap = scaled_pic->visual_map;
 			size_t sz = (size_t)(vmap->index_xl * vmap->index_yl);
 			vmap->psram_addr  = psram_alloc(sz);
 			vmap->psram_valid = 1;
 			psram_store(vmap->psram_addr, vmap->index_data, sz);
+#ifdef PICO_DECODE_CONTROL_MAP
+			/* Reuse the 64KB visual buffer in place as the control pass's
+			   aux_map instead of free()+malloc.  The free/realloc round-trip
+			   fragments the heap: a fresh 32KB control alloc lands inside the
+			   freed 64KB hole, leaving no 64KB-contiguous block for aux_map. */
+			reuse_aux_buf = vmap->index_data;
+#else
 			free(vmap->index_data);
+#endif
 			vmap->index_data = NULL;
 		}
 #ifdef PICO_DECODE_CONTROL_MAP
@@ -175,29 +207,43 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   DISABLED by default: the extra ~128KB transient decode peak OOMs on some
 		   rooms.  Re-enable with -DPICO_CONTROL_MAP=ON once the decode budget allows
 		   (e.g. priority map also offloaded to PSRAM).  See CLAUDE.md open issues. */
-		gfx_pixmap_alloc_index_data(scaled_pic->control_map);
-		scaled_pic->aux_map = (byte*)sci_malloc(
-			scaled_pic->control_map->index_xl * scaled_pic->control_map->index_yl);
-		if (!scaled_pic->control_map->index_data || !scaled_pic->aux_map) {
-			pico_picdec_cache_end(); return GFX_ERROR;
-		}
-		gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
+		/* Nibble-pack the control map (2 px/byte, 32KB) so it + the 64KB aux_map
+		   fit during the flood fill — two 64KB buffers can't coexist near the
+		   ~388KB heap ceiling.  Skipped entirely if the control buffer OOM'd
+		   above (control_buf NULL): degrade to no-collision, don't abort. */
+		if (control_buf) {
+			scaled_pic->aux_map = reuse_aux_buf; /* the 64KB visual buffer */
+			/* Consume the control buffer pinned at the start of Pass 1;
+			   gfxr_clear_pic0 zeroes it, so no calloc needed. */
+			scaled_pic->control_map->index_data = control_buf;
+			scaled_pic->control_map->nibble_packed = 1;
 
-		gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
-				&style, res->id, 0,
-				state->static_palette, state->static_palette_entries);
+			gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
 
-		{	/* Offload control to PSRAM; gfxop_scan_bitmask reads it back row-by-row */
-			gfx_pixmap_t *cmap = scaled_pic->control_map;
-			size_t sz = (size_t)(cmap->index_xl * cmap->index_yl);
-			cmap->psram_addr  = psram_alloc(sz);
-			cmap->psram_valid = 1;
-			psram_store(cmap->psram_addr, cmap->index_data, sz);
-			free(cmap->index_data);
-			cmap->index_data = NULL;
+			gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
+					&style, res->id, 0,
+					state->static_palette, state->static_palette_entries);
+
+			{	/* Offload control to PSRAM; gfxop_scan_bitmask reads it back
+				   row-by-row.  Stored nibble-packed, so half the pixel count. */
+				gfx_pixmap_t *cmap = scaled_pic->control_map;
+				size_t npix = (size_t)(cmap->index_xl * cmap->index_yl);
+				size_t sz = (npix + 1) >> 1;
+				cmap->psram_addr  = psram_alloc(sz);
+				cmap->psram_valid = 1;
+				psram_store(cmap->psram_addr, cmap->index_data, sz);
+				free(cmap->index_data);
+				cmap->index_data = NULL;
+			}
+			free(scaled_pic->aux_map);
+			scaled_pic->aux_map = NULL;
+		} else {
+			/* Control OOM'd: free the 64KB visual buffer we earmarked as the
+			   flood-fill aux_map; control_map->index_data stays NULL so
+			   gfxop_scan_bitmask returns 0 (no collision) for this pic. */
+			free(reuse_aux_buf);
+			reuse_aux_buf = NULL;
 		}
-		free(scaled_pic->aux_map);
-		scaled_pic->aux_map = NULL;
 #endif /* PICO_DECODE_CONTROL_MAP */
 
 		/* Pass 3: priority map */

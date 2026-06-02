@@ -1105,7 +1105,16 @@ main(int argc, char** argv)
 
 	sciprintf("Loading resources...\n");
 
+#ifdef HAVE_PICO
+	/* The resmgr keeps decompressed resources in an LRU cache up to this byte
+	   budget. 256KB on the ~388KB Pico heap is far too generous: the cache becomes
+	   dead weight that starves pic decode and (especially) game restore, where
+	   reconstruct_scripts re-decompresses every script straight into this cache
+	   with no eviction. Cap it low; resources reload on demand. */
+	resmgr = scir_new_resource_manager(resource_dir, res_version, 1, 32*1024);
+#else
 	resmgr = scir_new_resource_manager(resource_dir, res_version, 1, 256*1024);
+#endif
 	
 	if (!resmgr) {
 		printf("No resources found in '%s'.\nAborting...\n",

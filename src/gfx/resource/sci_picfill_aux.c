@@ -133,6 +133,11 @@ AUXBUF_FILL_HELPER(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy,
 		if ((ytotal + xr+1) > 64000) { fprintf(stderr,"AARGH-%d\n", __LINE__); BREAKPOINT(); }
 
 		if (control)
+#ifdef HAVE_PICO
+			if (pic->control_map->nibble_packed)
+				ctl_fill(pic->control_map->index_data, ytotal + xl, xr-xl+1, control);
+			else
+#endif
 			memset(pic->control_map->index_data + ytotal + xl, control, xr-xl+1);
 
 		oldytotal = ytotal;
@@ -192,6 +197,11 @@ AUXBUF_FILL(gfxr_pic_t *pic, int x, int y, int clipmask, int control, int sci_ti
 	clipmask |= CLIPMASK_HARD_BOUND; /* Guarantee clipping */
 
 	if (control) /* Draw the same strip on the control map */
+#ifdef HAVE_PICO
+		if (pic->control_map->nibble_packed)
+			ctl_fill(pic->control_map->index_data, ytotal + xl, xr - xl + 1, control);
+		else
+#endif
 		memset(pic->control_map->index_data + ytotal + xl, control, xr - xl + 1);
 
 	if (y > sci_titlebar_size)

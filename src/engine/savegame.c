@@ -4513,6 +4513,17 @@ void load_script(state_t *s, seg_id_t seg)
 		sm_mcpy_in_out( &s->seg_manager, scr->script_size, heap->data, heap->size, seg, SEG_ID);
 		break;
 	}
+#ifdef HAVE_PICO
+	/* Mirror the live VM load path (script_instantiate in vm.c): once the
+	   decompressed resource has been copied into scr->buf, drop its cached copy
+	   immediately. Otherwise reconstruct_scripts leaves every restored script's
+	   decompression buffer resident in the resmgr cache, fragmenting the tight
+	   Pico heap so the next decompress0 can't find a contiguous block. Eviction
+	   is null-safe and the data reloads on demand. */
+	scir_evict_resource_data(s->resmgr, script);
+	if (s->version >= SCI_VERSION(1,001,000))
+		scir_evict_resource_data(s->resmgr, heap);
+#endif
 }
 
 static
@@ -4821,6 +4832,47 @@ gamestate_restore(state_t *s, char *dirname)
 
 	_reset_graphics_input(retval);
 	reconstruct_stack(retval);
+#ifdef HAVE_PICO
+	/* Free the shared resmgr's decompressed-resource cache before the heap peak:
+	   reconstruct_scripts re-decompresses every script of the restored state while
+	   the outgoing state `s` is still fully resident (it is freed only later, in
+	   _game_run after we return). On the tight Pico heap that 2x VM working set plus
+	   a full resource cache exhausts memory in decompress0. The cache reloads on
+	   demand, so flushing it here is free. */
+	scir_free_all_lru(retval->resmgr);
+
+	/* Free the OUTGOING state's large, restore-unneeded buffers before the heap
+	   peak in reconstruct_scripts. `s` is discarded after we return (game_exit +
+	   script_free_vm_memory in _game_run), and nothing between here and that
+	   teardown reads them: the rest of this function only copies scalars, adopts
+	   the shared static tables (parser/selector/kernel), and reads sys_strings (a
+	   separate segment) + the script-0 segment number; game_exit merely tears down
+	   structures without running VM code. We NULL each freed pointer; the matching
+	   _sm_deallocate cases are null-guarded (under HAVE_PICO) so the later teardown
+	   skips them cleanly.
+
+	   Two buffers matter: every script's bytecode buf (~30KB total, the 2x script
+	   working set), and the 16KB VM value stack. The stack is a single contiguous
+	   malloc, so freeing it guarantees a 16KB contiguous hole for decompress0's
+	   peak (compressed input + decompressed output, both live at once) -- which is
+	   why ~42KB of scattered free was still not enough on its own. */
+	{
+		int _si;
+		for (_si = 0; _si < s->seg_manager.heap_size; _si++) {
+			mem_obj_t *_m = s->seg_manager.heap[_si];
+			if (!_m)
+				continue;
+			if (_m->type == MEM_OBJ_SCRIPT && _m->data.script.buf) {
+				sci_free(_m->data.script.buf);
+				_m->data.script.buf = NULL;
+				_m->data.script.buf_size = 0;
+			} else if (_m->type == MEM_OBJ_STACK && _m->data.stack.entries) {
+				sci_free(_m->data.stack.entries);
+				_m->data.stack.entries = NULL;
+			}
+		}
+	}
+#endif
 	reconstruct_scripts(retval, &retval->seg_manager);
 	reconstruct_clones(retval, &retval->seg_manager);
 	retval->game_obj = s->game_obj;

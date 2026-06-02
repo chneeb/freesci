@@ -34,6 +34,62 @@
 #undef GFXR_DEBUG_PIC0 /* Enable to debug pic0 messages */
 #undef FILL_RECURSIVE_DEBUG /* Enable for verbose fill debugging */
 
+#ifdef HAVE_PICO
+/* On Pico the control map is decoded into a nibble-packed buffer (2 pixels per
+   byte) instead of one byte per pixel.  This halves the control map's decode
+   footprint from 64KB to 32KB so the control pass + aux_map (which must coexist
+   in SRAM during the flood fill) fit under the ~388KB heap.  Control colours are
+   0-15, so 4 bits/pixel is lossless.  These helpers are visible to the picfill
+   templates (#included below) which also write the control map.
+   See CLAUDE.md "Control-map collision". */
+static inline byte ctl_get(const byte *b, int i) {
+	return (i & 1) ? (b[i >> 1] >> 4) : (b[i >> 1] & 0x0f);
+}
+static inline void ctl_set(byte *b, int i, byte v) {
+	int j;
+	/* The brush/fill plot paths (_gfxr_draw_pattern) compute the index from a
+	   320x200 coordinate space with no per-pixel clip, so a brush straddling a
+	   screen edge can run past the packed control buffer (32000 bytes, half the
+	   desktop 64000).  Desktop's larger buffer + roomy heap absorbed the overhang
+	   silently; on Pico's tight heap it corrupts an adjacent allocation (wild
+	   pic->control_map -> HardFault).  Clip here, but REPORT the first OOB index
+	   so we don't mask either a benign edge overhang or a future regression. */
+	if (i < 0 || i >= 320 * 200) {
+		static int reported = 0;
+		if (!reported) {
+			reported = 1;
+			GFXWARN("ctl_set: control-map index %d out of range [0,%d) — clipped (first occurrence)\n",
+			        i, 320 * 200);
+		}
+		return;
+	}
+	j = i >> 1;
+	v &= 0x0f;
+	b[j] = (i & 1) ? ((b[j] & 0x0f) | (v << 4)) : ((b[j] & 0xf0) | v);
+}
+static inline void ctl_fill(byte *b, int i, int n, byte v) {
+	while (n-- > 0)
+		ctl_set(b, i++, v);
+}
+/* Bresenham line into the packed control buffer (replaces gfx_draw_line_pixmap_i
+   for the control map, which assumes one byte per pixel). */
+static void ctl_draw_line(byte *b, point_t s, point_t e, int color) {
+	int x0 = s.x, y0 = s.y, x1 = e.x, y1 = e.y;
+	int dx = abs(x1 - x0), dy = abs(y1 - y0);
+	int sx = (x0 < x1) ? 1 : -1, sy = (y0 < y1) ? 1 : -1;
+	int err = dx - dy, e2;
+	for (;;) {
+		if (x0 >= 0 && x0 < 320 && y0 >= 0 && y0 < 200)
+			ctl_set(b, y0 * 320 + x0, (byte) color);
+		if (x0 == x1 && y0 == y1)
+			break;
+		e2 = 2 * err;
+		if (e2 > -dy) { err -= dy; x0 += sx; }
+		if (e2 <  dx) { err += dx; y0 += sy; }
+	}
+}
+#endif
+
 #define GFXR_PIC0_PALETTE_SIZE 40
 #define GFXR_PIC0_NUM_PALETTES 4
 
@@ -265,7 +321,13 @@ gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
 		       sci_titlebar_size * pic->mode->yfact * 320 * pic->mode->xfact);
 	}
 	if (pic->control_map->index_data)
+#ifdef HAVE_PICO
+		memset(pic->control_map->index_data, 0,
+		       pic->control_map->nibble_packed
+		         ? ((GFXR_AUX_MAP_SIZE + 1) >> 1) : GFXR_AUX_MAP_SIZE);
+#else
 		memset(pic->control_map->index_data, 0, GFXR_AUX_MAP_SIZE);
+#endif
 	if (pic->aux_map)
 		memset(pic->aux_map, 0, GFXR_AUX_MAP_SIZE);
 }
@@ -873,6 +935,11 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 		if (random == PLOT_AUX_PATTERN_NO_RANDOM) {
 
 			if ((mask & map_nr) && map->index_data)
+#ifdef HAVE_PICO
+				if (map_nr == GFX_MASK_CONTROL && map->nibble_packed)
+					ctl_fill(map->index_data, yoffset + offset + x, width, control);
+				else
+#endif
 				memset(map->index_data + yoffset + offset + x, control, width);
 
 			if (map_nr == GFX_MASK_CONTROL && pic->aux_map)
@@ -884,6 +951,11 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 				if (random_data[random_index >> 3] & (0x80 >> (random_index & 7))) {
 					/* The 'seemingly' random decision */
 					if ((mask & GFX_MASK_CONTROL) && pic->control_map->index_data)
+#ifdef HAVE_PICO
+						if (pic->control_map->nibble_packed)
+							ctl_set(pic->control_map->index_data, yoffset + x + offset + j, control);
+						else
+#endif
 						pic->control_map->index_data[yoffset + x + offset + j] = control;
 
 					if (pic->aux_map) pic->aux_map[yoffset + x + offset + j] |= mask;
@@ -1090,6 +1162,12 @@ _gfxr_draw_line(gfxr_pic_t *pic, int x, int y, int ex, int ey, int color,
 	if (drawenable & GFX_MASK_CONTROL) {
 
 		p0printf(" ctl:%x", control);
+#ifdef HAVE_PICO
+		if (pic->control_map->nibble_packed)
+			ctl_draw_line(pic->control_map->index_data, gfx_point(x, y),
+			              gfx_point(x + line.xl, y + line.yl), control);
+		else
+#endif
 		gfx_draw_line_pixmap_i(pic->control_map, gfx_point(x, y), gfx_point(x + line.xl, y + line.yl), control);
 	}
 

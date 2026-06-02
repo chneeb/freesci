@@ -310,7 +310,10 @@ _sm_deallocate (seg_manager_t* self, int seg, int recursive)
 		sys_string_free_all(&(mobj->data.sys_strings));
 		break;
 	case MEM_OBJ_STACK:
-		sci_free(mobj->data.stack.entries);
+		/* On Pico, gamestate_restore may pre-free the outgoing stack to make
+		   room for the rebuild; sci_free(NULL) traps via BREAKPOINT, so guard. */
+		if (mobj->data.stack.entries)
+			sci_free(mobj->data.stack.entries);
 		mobj->data.stack.entries = NULL;
 		break;
 	case MEM_OBJ_LISTS:

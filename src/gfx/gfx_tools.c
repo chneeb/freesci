@@ -185,6 +185,7 @@ gfx_new_pixmap(int xl, int yl, int resid, int loop, int cel)
 #ifdef HAVE_PICO
 	pxm->psram_addr  = 0;
 	pxm->psram_valid = 0;
+	pxm->nibble_packed = 0;
 #endif
 
 	pxm->flags = 0;

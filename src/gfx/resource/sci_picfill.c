@@ -284,6 +284,12 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 #endif
 
 	/* Restrict drawenable not to restrict itself to zero */
+#ifdef HAVE_PICO
+	if (pic->control_map->index_data && pic->control_map->nibble_packed) {
+		if (ctl_get(pic->control_map->index_data, y_200 * 320 + x_320) != 0)
+			drawenable &= ~GFX_MASK_CONTROL;
+	} else
+#endif
 	if (pic->control_map->index_data && pic->control_map->index_data[y_200 * 320 + x_320] != 0)
 		drawenable &= ~GFX_MASK_CONTROL;
 

@@ -114,9 +114,11 @@ if(PLATFORM STREQUAL "pico")
     add_compile_definitions(HAVE_PICO=1 HAVE_FNMATCH=1 HAVE_FNMATCH_H=1)
 
     # Decode the pic control map (collision detection + control-line scripts).
-    # OFF by default: the extra ~128KB transient decode peak OOMs on some rooms.
-    # Turn ON with -DPICO_CONTROL_MAP=ON once the decode budget allows it.
-    option(PICO_CONTROL_MAP "Decode SCI control map on Pico (collision)" OFF)
+    # ON by default: needed for kCanBeHere collision (walls, control triggers).
+    # The extra ~128KB transient decode peak can OOM tight rooms; if an unvisited
+    # room OOMs, rebuild with -DPICO_CONTROL_MAP=OFF to keep playing (no collision)
+    # while the peak is shrunk (bit-pack aux_map / offload priority map). See CLAUDE.md.
+    option(PICO_CONTROL_MAP "Decode SCI control map on Pico (collision)" ON)
     if(PICO_CONTROL_MAP)
         add_compile_definitions(PICO_DECODE_CONTROL_MAP=1)
     endif()

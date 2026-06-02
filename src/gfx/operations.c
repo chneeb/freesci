@@ -798,6 +798,27 @@ _gfxop_scan_one_bitmask(gfx_pixmap_t *pixmap, rect_t zone)
 			return 0;
 		if (_gfxop_clip(&zone, gfx_rect(0, 0, pixmap->index_xl, pixmap->index_yl)))
 			return 0;
+		if (pixmap->nibble_packed) {
+			/* Control map: 2 px/byte in PSRAM.  Read the packed byte span
+			   covering the query row and unpack nibbles. */
+			uint8_t packbuf[161];
+			int y, x;
+			for (y = 0; y < zone.yl; y++) {
+				int pidx = (zone.y + y) * pixmap->index_xl + zone.x;
+				int byte0 = pidx >> 1;
+				int byteN = (pidx + zone.xl - 1) >> 1;
+				size_t nbytes = (size_t)(byteN - byte0 + 1);
+				psram_load(pixmap->psram_addr + (uint32_t)byte0,
+					   packbuf, nbytes);
+				for (x = 0; x < zone.xl; x++) {
+					int p = pidx + x;
+					uint8_t b = packbuf[(p >> 1) - byte0];
+					uint8_t v = (p & 1) ? (b >> 4) : (b & 0x0f);
+					retval |= (1 << v);
+				}
+			}
+			return retval;
+		}
 		{
 			uint8_t rowbuf[320];
 			int y, x;

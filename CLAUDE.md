@@ -102,7 +102,7 @@ This change is already on the `pico-mem-opts` branch and must be cherry-picked t
 1. **`aux_map` pointer fix** — must land first; without it room transitions still OOM
 2. **Skip `control_map->index_data` allocation** in `gfxr_alloc_pic` (not just free after decode) — saves 64KB peak
 3. **View `index_data` → PSRAM** — `pico_blit_indexed` already handles it; extend to view decode in `gfxr_draw_view0` — saves ~30–80KB of sprite data that turns over every room
-4. **Resource data (scripts) → PSRAM** — ~100–200KB, requires a read cache in the VM; largest headroom gain, most invasive
+4. ~~**Resource data (scripts) → PSRAM**~~ — RULED OUT: `script_t.buf` is hot read-write VM working memory, not offloadable to a read-only cache (see roadmap ✗)
 
 ### SD card game selection
 Games must be in subdirectories under `0:/freesci/` on the SD card (e.g. `0:/freesci/sq3/`).
@@ -145,7 +145,7 @@ were **wrong** and have been reverted — keep them resident:
   `gfxop_scan_bitmask`). Since priority/control `index_data` is offloaded to PSRAM on Pico,
   the clipped query zone is read back row-by-row. `state->control_map` is NULL on Pico, so
   the scan uses the pic's own `control_map` instead. **Caveat:** the pic's control map is only
-  decoded when built with `-DPICO_CONTROL_MAP=ON` (default OFF — see roadmap #3); otherwise
+  decoded when built with `-DPICO_CONTROL_MAP=ON` (default OFF — see roadmap #2); otherwise
   `pic->control_map->psram_valid` is 0 and the control scan returns 0 (no collision).
 
 - **VM value stack must stay full-size** (`vm.h` `VM_STACK_SIZE 0x1000`). It was once shrunk
@@ -213,35 +213,146 @@ free the VIEW tree alongside the PIC tree before `psram_reset()`, so `gfxr_get_v
 fresh. Trade-off: views re-decode per room change instead of staying cached — correct call on Pico,
 and SQ3's per-room view set is small.
 
+### FIXED (pending device retest) — restore HardFault was a control-map OOM, not corruption
+
+Enabling the control map (roadmap #2, flag now ON by default) surfaced two HardFaults. They are
+**NOT** the same root cause — an earlier guess that both were an unclipped brush overflow was wrong.
+The console log decided it:
+
+```
+Restarting with replay()
+malloc 32000 failed to allocate memory
+GFX Error: ... gfxop_new_pic() L2260: Could not retreive background pic 2!
+FSCI: ERROR in kDrawPic ... GFX subsystem fatal error ... aborting...
+[FAULT]
+```
+
+- **Restore fault (PC in `gfxop_scan_bitmask`/`_gfxop_scan_one_bitmask`, BFAR `0x02027571`) = OOM.**
+  On restore's `replay()` the heap is tighter than on first room entry, so the raw `malloc(32000)`
+  for the packed control buffer (`sci_resmgr.c:157`) returns NULL. The old NULL branch did
+  `return GFX_ERROR`; that propagates up so `gfxop_new_pic` returns `GFX_ERROR` with `state->pic`
+  NULL, and `kDrawPic` (`kgraphics.c:1180`) escalates `GFX_ERROR` to a **FATAL VM error → "aborting"
+  → HardFault**. The wild-pointer deref is the downstream cascade of the aborted/partial pic, not the
+  primary bug; the *identical* `BFAR` across attempts fits a deterministic OOM state, not random
+  corruption. ("malloc 32000 failed…" is the pico-sdk malloc wrapper under `PICO_MALLOC_PANIC=0`.)
+- **Trash-elevator fault (unaligned UsageFault, CFSR `0x01000000`, in GC reg_t hashmap) = STILL
+  OPEN.** GC is a canary (runs every 2048 allocs on Pico, walks every `reg_t`). Could be downstream
+  of heap corruption OR an independent alignment bug — not yet explained. Retest after the OOM fix.
+
+**Fix 1 — graceful control-map OOM (the real restore fix).** In `gfxr_interpreter_calculate_pic`
+(`sci_resmgr.c`), when `malloc(32000)` for `control_buf` fails, **do not abort the decode**. Emit a
+one-shot `GFXWARN` and skip Pass 2 (the control pass): leave `control_map->index_data` NULL /
+`psram_valid` 0 so `gfxop_scan_bitmask` returns 0 (no collision) for that pic — exactly like
+`-DPICO_CONTROL_MAP=OFF`, but **per-pic and recoverable** on the next decode with more free heap.
+The whole Pass-2 block is wrapped `if (control_buf) { … } else { free(reuse_aux_buf); }` (the 64KB
+visual buffer earmarked as the flood-fill aux_map is freed in the else so it doesn't leak). This is
+the documented `sci_resmgr.c:157` TODO, taken one step further: the previous note said "return
+GFX_ERROR" to stay recoverable, but `GFX_ERROR` is in fact fatal at the `kDrawPic` layer — so we
+degrade instead of erroring.
+
+**Fix 2 — defensive clip in `ctl_set` (kept, but NOT the restore cause).** `_gfxr_draw_pattern`
+computes the control index from a 320x200 space with no per-pixel clip, so an edge-straddling brush
+can exceed `[0,64000)`. Desktop tolerates it (full 64000-byte buffer + roomy heap → overhang lands in
+slack — latent, not "handled"). On Pico's nibble-packed 32000-byte buffer + tight heap it could stomp
+an adjacent allocation. `ctl_set` (`sci_pic_0.c`, the single Pico write chokepoint; `ctl_fill` calls
+it, `ctl_draw_line` already clipped) now clips out-of-range indices and emits a one-shot `GFXWARN`
+with the offending index — **diagnostic, not silent**, so it can't mask a benign edge overhang
+(~64000–64500) vs a wild value. This is retained as defense-in-depth and as a probe for the still-open
+trash-elevator fault: if that warning fires there, the OOB write is implicated; if not, look elsewhere.
+
+### OPEN — top priority — heap corruption surfacing as a GC fault ("aspb")
+
+Two HardFaults (fresh-boot after long play, and the trash-elevator path) both land **inside the GC
+`reg_t` hashmap walk** (`hashmap.c:135` `while (*node && COMP(value, (*node)->name)) node =
+&((*node)->next);`, comparator `compare_reg_t` in `reg_t_hashmap.c:33`). The second had
+**BFAR `0x62707361`**, which is ASCII `61 73 70 62` = **"aspb"** in little-endian memory order — i.e.
+a GC node's `next` pointer (a 12-byte `malloc`'d `{reg_t name; int value; node *next;}`) was overwritten
+with **string bytes**. A pointer holding lowercase ASCII means a string-writing path overflowed into,
+or wrote through a freed-then-reused, GC node. GC is only the **canary**: densest small-block allocator
++ pointer-walk, and on Pico it runs every 2048 allocs (16× more than desktop), so it trips on the
+damaged node first.
+
+- **Control map is NOT the corruptor (ruled out by static audit).** All Pico control writes go through
+  `ctl_set`/`ctl_fill`/`ctl_draw_line`, which only ever write values 0–15 and are bounds-clipped; the
+  map is read-only during gameplay. Enabling it (default ON) merely **fragments the heap** so a
+  pre-existing string-overflow/UAF now lands on a live GC node instead of in slack. Desktop's roomy
+  heap + 2× buffers absorb the same bad write silently — latent, not absent.
+- **Prime suspects:** SCI string kernels (`kFormat`/`kStrcpy`/`kStrcat`/`kString` in `kstring.c`) writing
+  past a `dynmem`/`sys_strings` buffer, or save/restore name handling. These are the engine paths that
+  write attacker-length ASCII into heap blocks.
+- **Find it with desktop ASan, not the device.** `build-asan/src/freesci` is built with
+  `-fsanitize=address -g -fno-omit-frame-pointer`. ASan traps the bad write at the instant it happens,
+  independent of heap layout, and names the writing function:
+  ```bash
+  ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
+    ./build-asan/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl --disable-mouse
+  ```
+  Play and deliberately trigger text: "look" at scenery, read signs, open inventory, ride the trash
+  elevator (its control-trigger messages). Capture the `==ERROR: AddressSanitizer: heap-buffer-overflow`
+  / `heap-use-after-free` report. The 90s intro-only ASan run was clean → the bug is on a
+  **text/string interaction path**, not the decode path.
+- **Why the Pico no-collision A/B is a weak test:** control-OFF changes heap layout (may move the
+  overflow into slack → false "fixed") *and* disables the control triggers that run the trash-elevator
+  script (→ may never execute the buggy path). Use it only to corroborate independence, never to refute.
+
+Record the root cause here once ASan pinpoints it.
+
 ### Pico roadmap (remaining work, prioritized)
 
-The unifying constraint is the **~388KB SRAM heap**. Every item below is "move read-only data to
-the 8MB PSRAM to free SRAM," and they share infrastructure — that dictates the order.
+The unifying constraint is the **~388KB SRAM heap**. The remaining items are largely independent —
+the "shared PSRAM read-cache keystone" idea below was investigated and ruled out (see ✗).
 
-1. **Resource/script data → PSRAM read cache *(keystone — do first)*.** Scripts + resources are
-   ~100–200KB resident, read-only after load — the largest headroom win, and the thing that
-   currently OOMs the control-map decode (#3). Build a generic PSRAM-backed read cache: data in
-   PSRAM, a few-KB SRAM LRU window for hot reads; route VM `script_t`/resource access through it.
-   Most invasive, but it unblocks #2 and #3.
+✗ **Resource/script data → PSRAM read cache — RULED OUT for SCI0.** This was the planned keystone,
+   but it does not fit SCI0's execution model. `script_t.buf` (`vm.h:199`) is not read-only resource
+   data — it is the VM's hot read-write working memory: bytecode is fetched per-instruction from
+   `code_buf = scr->buf` (`vm.c:776`), and the *same* buffer holds object property vars + locals that
+   the VM mutates in place via `reg_t` offsets during execution. The source resource bytes are
+   *already* freed on Pico (`sm_mcpy_in_out` then `scir_evict_resource_data`, `vm.c:1957/1968`), so
+   the steady-state cost is the live `buf`s themselves — which can't be offloaded to a read-only,
+   bursty-access PSRAM cache. Consequence: the items below are independent; there is no shared
+   read-cache infrastructure and no ordering dependency on this item.
 
-2. **Vocab loading → re-enable the text parser.** `_init_vocabulary` (`game.c`, under `HAVE_PICO`)
+1. **Vocab loading → re-enable the text parser.** `_init_vocabulary` (`game.c`, under `HAVE_PICO`)
    NULLs `parser_words`/`parser_rules`/`parser_suffices`/`parser_branches` to save ~80KB, so
-   `kParse` matches an empty vocab and "look around" etc. do nothing. Vocab is read-only after build
-   → PSRAM-resident, reusing #1's read cache (or a bursty staging buffer; parser lookups aren't
-   latency-critical). Moderate: the parser accesses these as in-SRAM pointer arrays, so it needs an
-   access shim or load-on-parse staging.
+   `kParse` matches an empty vocab and "look around" etc. do nothing. Vocab *is* genuinely read-only
+   after build → a real PSRAM candidate. Note this is **additive**: vocab is already NULL today, so
+   restoring it does not free steady-state SRAM (it spends it), and therefore does **not** unblock
+   the control-map item — keep them decoupled. Design constraint: `parser_rules`/`parser_nodes`
+   lifetime spans two kernel calls — built in `kParse` (`kstring.c`) and still read by `kSaid`
+   (`said.c:2523`) — so a "load, parse, free immediately" shim won't work; rules must survive until
+   Said runs. Two approaches: (a) load-on-demand and free-after-Said (reuses `vocab_get_words` /
+   `vocab_build_gnf`, but ~900 per-word mallocs risk fragmentation and the free-timing is fiddly), or
+   (b) PSRAM-resident packed vocab (one contiguous blob + small SRAM read path; GNF rules built into
+   a transient SRAM arena freed after Said — more work, robust). Measure first: one instrumented boot
+   for steady-state free heap, packed vocab size, and GNF build peak, then pick (a) vs (b).
 
-3. **Control-map collision → flip the flag back on.** Code is written and gated behind
-   `PICO_DECODE_CONTROL_MAP` (CMake option `-DPICO_CONTROL_MAP=ON`, default OFF). Without the
-   control map, `kCanBeHere` → `gfxop_scan_bitmask(pic->control_map)` always returns 0: ego walks
-   through blocking polygons and control triggers (SQ3's trash elevator) never fire. The decode adds
-   a ~128KB transient peak (a temporary `aux_map` for `AUXBUF_FILL`'s flood fill + the control
-   `index_data`, both freed before the priority pass), which OOMs some rooms today. No new code
-   needed — just the headroom that #1 frees, then turn the flag on and verify. (Restores only
-   *static* pic control; runtime actor-to-actor blocking writes to `state->control_map`, NULL on
-   Pico — separate, lower priority.)
+2. **Control-map collision → DONE FOR NOW (flag ON, works in visited rooms).** Code is written and
+   gated behind `PICO_DECODE_CONTROL_MAP` (CMake option `PICO_CONTROL_MAP`, **now default ON**).
+   Rebuild with `-DPICO_CONTROL_MAP=OFF` as the escape hatch if an unvisited room OOMs (you keep
+   playing, minus collision). Every room visited so far decodes without OOM. Without the control map, `kCanBeHere` → `gfxop_scan_bitmask(pic->control_map)`
+   always returns 0: ego walks through blocking polygons and control triggers (SQ3's trash elevator)
+   never fire. The decode adds a ~128KB transient peak (a temporary `aux_map` for `AUXBUF_FILL`'s flood
+   fill + the control `index_data`, both freed before the priority pass) — it OOMs only on tight rooms,
+   and none visited so far have hit it. Treated as done unless it resurfaces in an unvisited room.
+   - **Remaining peak-shrink lever (if a new room OOMs):** bit-pack `aux_map`, or offload the priority
+     map to PSRAM during decode (the other 64KB live buffer) — **not** a steady-state-SRAM problem, so
+     the vocab item does not help here.
+   - **TODO before fully parking — make the control-map OOM self-report.** The 32KB control buffer at
+     `sci_resmgr.c:157` uses **raw `malloc`**, not `sci_malloc`, so on NULL it returns `GFX_ERROR`
+     *silently* (no `pico_oom_report` LCD dump — you'd see a garbled/missing pic, maybe a `GFXERROR`
+     over serial, but no crash message). This is the allocation the control-map feature *added*, i.e.
+     the one most likely to fail first in an unvisited room, and the one that currently wouldn't
+     announce itself. **Do NOT just switch it to `sci_malloc`:** on Pico `sci_malloc` is fail-fast —
+     `pico_oom_report` halts the system, never returns NULL (`sci_memory.c:70-72`), which would turn
+     this *recoverable* `GFX_ERROR` path into a hard halt. Correct fix: keep raw `malloc`, and on the
+     NULL branch emit a clear LCD line (call `pico_oom_report` or a lighter print) **then still
+     `return GFX_ERROR`** — legible AND recoverable. (This fail-fast vs fail-soft split is exactly why
+     the engine mixes `sci_malloc` and raw `malloc`: raw `malloc` is used wherever the caller has a
+     real recovery path.)
+   - **Scope caveat:** restores only *static* pic control; runtime actor-to-actor blocking writes to
+     `state->control_map`, NULL on Pico — separate, lower priority.
 
-4. **Sound *(independent track — gated on heap headroom, not CPU)*.** The whole sound stack
+3. **Sound *(independent track — gated on heap headroom, not CPU)*.** The whole sound stack
    (`scisound`/`scisoftseq`/`scipcm`/`scimixer`) already links into the firmware but is dormant:
    `pico_main.c` passes `-q` → `SFX_STATE_FLAG_NOSOUND`. PWM output already runs (`pwm_synth_init(26)`
    at boot: 8-bit mono, 22 kHz PWM on GPIO 26/27); what's missing is feeding *PCM* into it instead
@@ -251,7 +362,8 @@ the 8MB PSRAM to free SRAM," and they share infrastructure — that dictates the
    - **RAM is the gate.** Static `.bss` already costs ~34 KB (mostly `fmopl.c`'s `ENV_CURVE`,
      present even under NOSOUND). Dynamic synth cost by profile: HQ stereo ~165 KB (**won't fit**),
      LQ mono default tables ~70 KB, LQ mono + shrunk tables (`EG_ENT=128`, `SIN_ENT=512`, drop the
-     stereo OPL, dynamic `ENV_CURVE`) ~40 KB. Need ≥~80 KB free before enabling — i.e. do #1 first.
+     stereo OPL, dynamic `ENV_CURVE`) ~40 KB. Need ≥~80 KB free before enabling — gated purely on
+     measured steady-state headroom (no longer blocked on the ruled-out script cache).
    - **Five deliverables:** (A) `src/sfx/pcm_device/pico_pwm.c` implementing `sfx_pcm_device_t` +
      ring buffer, downconverting the mixer's 16-bit samples to 8-bit; (B) rewrite `pwm_synth.c`'s
      IRQ to pop the PCM ring (also frees ~44 KB flash by dropping `pwm_strings.h`); (C)
@@ -260,7 +372,37 @@ the 8MB PSRAM to free SRAM," and they share infrastructure — that dictates the
      `fluidsynth.c`; (E) drop `-q` from `pico_main.c` argv, pass `-m pico_pwm -p polled`. SQ3 ships
      `ADL.DRV` so its sound resources carry Adlib tracks — no extra resource handling needed.
 
-Suggested order: 1 → (2 ∥ 3) → 4.
+Suggested order: 1 ∥ 2 ∥ 3 (all independent; pick by user-visible value vs. measured headroom).
+
+### PARKED — LCD loading-progress display (planned, not implemented)
+
+Goal: after game selection clears the LCD, mirror the engine's load messages to the LCD until the
+first room is drawn (intro), so the long load isn't a blank screen. **Chosen approach = A** (capture
+`sciprintf` via the string callback). Parked pending the user's go-ahead.
+
+**Output-path facts (verified):**
+- `sciprintf` (console.c:46) has two independent sinks: `con_passthrough` → `printf` → USB/UART, and
+  `_con_string_callback(buf)` settable via `con_set_string_callback()` (console.c:91). The callback
+  **owns `buf` and must `free()` it**. Callback is currently UNUSED on Pico.
+- `gfxprintf` is `#define gfxprintf sciprintf` (resource.h:396); `GFXWARN`/`GFXERROR` route entirely
+  through `sciprintf` → **captured by A**.
+- `[mem]` lines come from `printf` in the `MEMPRINT` macro (pico_main.c:20), NOT `sciprintf` →
+  **MISSED by A** (recoverable with one extra edit pointing MEMPRINT at `lcd_print_string`).
+- LCD text engine: `lcd_print_string` (lcdspi.c:429) appends-and-scrolls; `lcd_clear` (439).
+
+**Implementation sketch (≈3 edits):**
+- pico_main.c: after the chooser, before `freesci_main` (line ~210), set a flag and register a
+  callback `cb(buf){ lcd_print_string(buf); free(buf); }` via `con_set_string_callback`.
+- pico_driver.c: when the flag is active, skip `pico_clear_screen_black` in `pico_init` and skip the
+  `flush_region` in `pico_update` GFX_BUFFER_FRONT (so load text isn't wiped/overdrawn early). Note
+  `_reset_graphics_input` (game.c:218) issues a FRONT flush *during* load — that's why the handover
+  point is the first room composite, not the first FRONT flush.
+- End-hook at the first `pico_render_background` call (operations.c:2311, the "first draw" signal):
+  `con_set_string_callback(NULL); pico_clear_screen_black(); flag=0`.
+
+**Leak note:** gameplay emits `sciprintf` continuously (kNOP unmapped, vol/pri selector, invalid
+param var, song-handle warnings). The end-hook unregistering the callback at first room composite is
+what prevents load text from leaking over the running game — it is essential, not optional.
 
 ### Known graphics limitations on Pico (not yet fixed)
 
@@ -286,12 +428,13 @@ roadmap above (gameplay works without them), but documented so they aren't redis
 
 Current heap on the RP2350/PicoCalc is ~388 KB post-init. The same firmware on an RP2040 would have
 ~388 − (520 − 264) ≈ **132 KB**, so the SCI0 pic decoder (~128 KB peak even after the visual/priority
-split) leaves almost no room. An RP2040 build only becomes feasible as the *end state* of the roadmap
-— specifically #1 (script/resource data → PSRAM with an SRAM cache window) is a hard RP2040
-requirement, plus view-cel and control-map data kept out of SRAM. The PSRAM PIO driver, `lcdspi`,
-`i2ckbd`, and FatFS all already run on RP2040; only the sound path's software floats (no RP2040 FPU)
-would need attention, and sound is off until #4. Strategy: land #1–#3 on the RP2350 (where there's
-slack to debug), then try `PICO_PLATFORM=rp2040`.
+split) leaves almost no room. RP2040 feasibility now looks **doubtful**: the obvious headroom win —
+offloading script/resource data to PSRAM — was ruled out (script `buf`s are hot read-write VM memory,
+see roadmap ✗), so the resident script working set stays in SRAM with no easy way to shed it. What's
+left to keep out of SRAM is view-cel and control-map data, which alone is unlikely to bridge the
+~256 KB gap. The PSRAM PIO driver, `lcdspi`, `i2ckbd`, and FatFS all already run on RP2040; the sound
+path's software floats (no RP2040 FPU) would also need attention. Treat RP2040 as aspirational, not a
+near-term target, until a way to shrink the SCI0 decode peak and the resident VM working set is found.
 
 ## Key CMake decisions
 
