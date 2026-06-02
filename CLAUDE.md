@@ -241,13 +241,57 @@ the 8MB PSRAM to free SRAM," and they share infrastructure — that dictates the
    *static* pic control; runtime actor-to-actor blocking writes to `state->control_map`, NULL on
    Pico — separate, lower priority.)
 
-4. **Sound *(independent track, largest unknown — last or in parallel)*.** Feed FreeSCI's OPL2
-   softsynth (`fmopl.c`) PCM output into a new `src/sfx/pcm_device/pico_pwm.c` on top of the
-   existing `pwm_synth`, then drop `--no-sound` from `pico_main.c`. Main risk is **CPU**, not RAM:
-   OPL2 emulation on the M33 shares cycles with the VM and synchronous-SPI blits — may need a
-   lighter mixer or downsampling. Worth a feasibility spike before committing.
+4. **Sound *(independent track — gated on heap headroom, not CPU)*.** The whole sound stack
+   (`scisound`/`scisoftseq`/`scipcm`/`scimixer`) already links into the firmware but is dormant:
+   `pico_main.c` passes `-q` → `SFX_STATE_FLAG_NOSOUND`. PWM output already runs (`pwm_synth_init(26)`
+   at boot: 8-bit mono, 22 kHz PWM on GPIO 26/27); what's missing is feeding *PCM* into it instead
+   of the tiny_agi sine channels.
+   - **CPU is fine:** OPL2 inner loop ≈ 9 voices × ~30 cyc × 22050 ≈ 4% at 150 MHz; PWM IRQ <1%.
+     `OPLOpenTable` uses `pow/log10/sin` once at init (fast with the RP2350 FPU; slow on RP2040).
+   - **RAM is the gate.** Static `.bss` already costs ~34 KB (mostly `fmopl.c`'s `ENV_CURVE`,
+     present even under NOSOUND). Dynamic synth cost by profile: HQ stereo ~165 KB (**won't fit**),
+     LQ mono default tables ~70 KB, LQ mono + shrunk tables (`EG_ENT=128`, `SIN_ENT=512`, drop the
+     stereo OPL, dynamic `ENV_CURVE`) ~40 KB. Need ≥~80 KB free before enabling — i.e. do #1 first.
+   - **Five deliverables:** (A) `src/sfx/pcm_device/pico_pwm.c` implementing `sfx_pcm_device_t` +
+     ring buffer, downconverting the mixer's 16-bit samples to 8-bit; (B) rewrite `pwm_synth.c`'s
+     IRQ to pop the PCM ring (also frees ~44 KB flash by dropping `pwm_strings.h`); (C)
+     `src/sfx/timer/pico.c` using `add_repeating_timer_us(-16667,…)` (60 Hz) to replace POSIX
+     `sigalrm.c`; (D) CMake wiring + register `pcm_driver_pico_pwm` behind `HAVE_PICO_PWM`, exclude
+     `fluidsynth.c`; (E) drop `-q` from `pico_main.c` argv, pass `-m pico_pwm -p polled`. SQ3 ships
+     `ADL.DRV` so its sound resources carry Adlib tracks — no extra resource handling needed.
 
 Suggested order: 1 → (2 ∥ 3) → 4.
+
+### Known graphics limitations on Pico (not yet fixed)
+
+These are correctness gaps in the Pico render path vs the SDL pipeline. Lower priority than the
+roadmap above (gameplay works without them), but documented so they aren't rediscovered cold.
+
+- **Per-pixel priority occlusion is wrong — "last drawn wins" instead of "highest priority wins."**
+  `pico_blit_indexed` (`pico_driver.c`) writes the color unconditionally (gated only on the cel's
+  `color_key`) and gates *only* the priority write on `row_pri[x] <= priority`. The SDL crossblit
+  (`gfx_crossblit.c`) instead gates the **color** write on the priority test, so background priority
+  occludes actors. Effect on Pico: the ego won't hide behind higher-priority scenery (e.g. walking
+  behind a desk). Fix: gate `row_dst[x] = lut[idx]` on the same `pri_row[x] <= priority` test, after
+  paging the priority rows in (they're resident in SRAM via the disowned priority buffer, so no
+  PSRAM read needed unless that changes).
+- **`static_priority_map` is aliased to `priority_map`** (`operations.c` `_gfxop_init_common`, under
+  `HAVE_PICO`). On SDL these are distinct: the static one holds the pic's base priority and is copied
+  back over the working map each frame to erase last frame's sprite priorities. Aliased, that copy
+  (`gfx_copy_pixmap_box_i`) is a no-op, so sprite priorities accumulate and z-ordering degrades the
+  longer you stand in a room. Proper fix: keep the static priority map PSRAM-resident and page the
+  dirty rect back into an SRAM scratch on BACK-buffer update (same scratch the occlusion fix uses).
+
+### RP2040 portability note
+
+Current heap on the RP2350/PicoCalc is ~388 KB post-init. The same firmware on an RP2040 would have
+~388 − (520 − 264) ≈ **132 KB**, so the SCI0 pic decoder (~128 KB peak even after the visual/priority
+split) leaves almost no room. An RP2040 build only becomes feasible as the *end state* of the roadmap
+— specifically #1 (script/resource data → PSRAM with an SRAM cache window) is a hard RP2040
+requirement, plus view-cel and control-map data kept out of SRAM. The PSRAM PIO driver, `lcdspi`,
+`i2ckbd`, and FatFS all already run on RP2040; only the sound path's software floats (no RP2040 FPU)
+would need attention, and sound is off until #4. Strategy: land #1–#3 on the RP2350 (where there's
+slack to debug), then try `PICO_PLATFORM=rp2040`.
 
 ## Key CMake decisions
 
