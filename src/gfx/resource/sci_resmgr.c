@@ -162,7 +162,45 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			free(vmap->index_data);
 			vmap->index_data = NULL;
 		}
-		/* Pass 2: priority map */
+#ifdef PICO_DECODE_CONTROL_MAP
+		/* Pass 2: control map.
+		   Needed for collision detection and control-line scripts — kCanBeHere
+		   (kgraphics.c) scans pic->control_map via gfxop_scan_bitmask.  Without it
+		   every scan returns 0: the ego walks through blocking polygons and control
+		   triggers (e.g. SQ3's trash elevator) never fire.  Control FILLS flood-fill
+		   the enclosed region through the aux_map (AUXBUF_FILL), so a temporary
+		   aux_map must exist for this pass.  Both control index_data and aux_map are
+		   freed before the priority pass so decode peak stays ~128KB, not ~192KB.
+
+		   DISABLED by default: the extra ~128KB transient decode peak OOMs on some
+		   rooms.  Re-enable with -DPICO_CONTROL_MAP=ON once the decode budget allows
+		   (e.g. priority map also offloaded to PSRAM).  See CLAUDE.md open issues. */
+		gfx_pixmap_alloc_index_data(scaled_pic->control_map);
+		scaled_pic->aux_map = (byte*)sci_malloc(
+			scaled_pic->control_map->index_xl * scaled_pic->control_map->index_yl);
+		if (!scaled_pic->control_map->index_data || !scaled_pic->aux_map) {
+			pico_picdec_cache_end(); return GFX_ERROR;
+		}
+		gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
+
+		gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
+				&style, res->id, 0,
+				state->static_palette, state->static_palette_entries);
+
+		{	/* Offload control to PSRAM; gfxop_scan_bitmask reads it back row-by-row */
+			gfx_pixmap_t *cmap = scaled_pic->control_map;
+			size_t sz = (size_t)(cmap->index_xl * cmap->index_yl);
+			cmap->psram_addr  = psram_alloc(sz);
+			cmap->psram_valid = 1;
+			psram_store(cmap->psram_addr, cmap->index_data, sz);
+			free(cmap->index_data);
+			cmap->index_data = NULL;
+		}
+		free(scaled_pic->aux_map);
+		scaled_pic->aux_map = NULL;
+#endif /* PICO_DECODE_CONTROL_MAP */
+
+		/* Pass 3: priority map */
 		gfx_pixmap_alloc_index_data(scaled_pic->priority_map);
 		if (!scaled_pic->priority_map->index_data) {
 			pico_picdec_cache_end(); return GFX_ERROR;

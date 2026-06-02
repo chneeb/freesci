@@ -144,7 +144,9 @@ were **wrong** and have been reverted — keep them resident:
 - **Priority/control bitmask scans from PSRAM** (`operations.c` `_gfxop_scan_one_bitmask`,
   `gfxop_scan_bitmask`). Since priority/control `index_data` is offloaded to PSRAM on Pico,
   the clipped query zone is read back row-by-row. `state->control_map` is NULL on Pico, so
-  the scan uses the pic's own `control_map` instead.
+  the scan uses the pic's own `control_map` instead. **Caveat:** the pic's control map is only
+  decoded when built with `-DPICO_CONTROL_MAP=ON` (default OFF — see roadmap #3); otherwise
+  `pic->control_map->psram_valid` is 0 and the control scan returns 0 (no collision).
 
 - **VM value stack must stay full-size** (`vm.h` `VM_STACK_SIZE 0x1000`). It was once shrunk
   to `0x400` on Pico to save SRAM; SQ3 room 2 (`Game::doit` → `eachElementDo(#check)` over the
@@ -201,24 +203,51 @@ The old "Roger won't walk / freeze on landing in room 2" was **never an input bu
 undersized VM value stack (`VM_STACK_SIZE 0x400`, see correctness fixes above). A second crash
 (panic while walking / on text input) was the **clone-table OOM** fixed by `GC_INTERVAL 2048`.
 
-### Open issues on Pico (current)
+### RESOLVED — garbage rectangle during shadow/priority redraws
+Cached views survived a room change with a stale `psram_addr`. `gfxr_free_all_pics`
+(`src/gfx/resmgr.c`, called on every room change) freed the PIC tree and called `psram_reset()`
+(rewinds the PSRAM bump arena to offset 0) but left the VIEW tree cached. Persistent views
+(Roger's ego view, reused props like the trash lift) kept `psram_valid`/`psram_addr` pointing into
+the arena the next room's offloads then overwrote → black box, then cycling memory garbage. Fix:
+free the VIEW tree alongside the PIC tree before `psram_reset()`, so `gfxr_get_view` re-decodes
+fresh. Trade-off: views re-decode per room change instead of staying cached — correct call on Pico,
+and SQ3's per-room view set is small.
 
-1. **No text parser — "look around" etc. do nothing.** `_init_vocabulary` (`game.c`, under
-   `HAVE_PICO`) deliberately NULLs `parser_words`/`parser_rules`/`parser_suffices`/`parser_branches`
-   to save ~80KB, so `kParse` tokenizes against an empty vocab and no command is understood. This
-   is a RAM trade-off, not a load failure. To restore the parser, actually load the vocab and
-   offload it to PSRAM (it is read-only after build, so a PSRAM-resident vocab with a small read
-   path is viable — see PSRAM candidate list). Until then SQ3 is keyboard-shortcut only.
+### Pico roadmap (remaining work, prioritized)
 
-2. **Garbage rectangle instead of Roger during shadow/priority redraws.** Walking Roger through a
-   shadow region (which alters his sprite via the priority/shadow path) intermittently blits a
-   rectangle of changing memory garbage where the view should be. The shifting contents mean an
-   uninitialized/stale buffer is being drawn — prime suspects: a dynamic-view pixmap whose
-   `index_data` was offloaded/freed to PSRAM but re-blit from a stale/invalid `psram_addr`, or a
-   view buffer sized from wrong `xl/yl` (cf. the manual text-dimension fix). Start in
-   `pico_blit_indexed` (`pico_driver.c`) and the view decode path (`gfxr_draw_view0` /
-   `gfxop_draw_cel`), checking `psram_valid`/`psram_addr` and the pixmap dimensions on the
-   shadowed-cel path. Not yet diagnosed.
+The unifying constraint is the **~388KB SRAM heap**. Every item below is "move read-only data to
+the 8MB PSRAM to free SRAM," and they share infrastructure — that dictates the order.
+
+1. **Resource/script data → PSRAM read cache *(keystone — do first)*.** Scripts + resources are
+   ~100–200KB resident, read-only after load — the largest headroom win, and the thing that
+   currently OOMs the control-map decode (#3). Build a generic PSRAM-backed read cache: data in
+   PSRAM, a few-KB SRAM LRU window for hot reads; route VM `script_t`/resource access through it.
+   Most invasive, but it unblocks #2 and #3.
+
+2. **Vocab loading → re-enable the text parser.** `_init_vocabulary` (`game.c`, under `HAVE_PICO`)
+   NULLs `parser_words`/`parser_rules`/`parser_suffices`/`parser_branches` to save ~80KB, so
+   `kParse` matches an empty vocab and "look around" etc. do nothing. Vocab is read-only after build
+   → PSRAM-resident, reusing #1's read cache (or a bursty staging buffer; parser lookups aren't
+   latency-critical). Moderate: the parser accesses these as in-SRAM pointer arrays, so it needs an
+   access shim or load-on-parse staging.
+
+3. **Control-map collision → flip the flag back on.** Code is written and gated behind
+   `PICO_DECODE_CONTROL_MAP` (CMake option `-DPICO_CONTROL_MAP=ON`, default OFF). Without the
+   control map, `kCanBeHere` → `gfxop_scan_bitmask(pic->control_map)` always returns 0: ego walks
+   through blocking polygons and control triggers (SQ3's trash elevator) never fire. The decode adds
+   a ~128KB transient peak (a temporary `aux_map` for `AUXBUF_FILL`'s flood fill + the control
+   `index_data`, both freed before the priority pass), which OOMs some rooms today. No new code
+   needed — just the headroom that #1 frees, then turn the flag on and verify. (Restores only
+   *static* pic control; runtime actor-to-actor blocking writes to `state->control_map`, NULL on
+   Pico — separate, lower priority.)
+
+4. **Sound *(independent track, largest unknown — last or in parallel)*.** Feed FreeSCI's OPL2
+   softsynth (`fmopl.c`) PCM output into a new `src/sfx/pcm_device/pico_pwm.c` on top of the
+   existing `pwm_synth`, then drop `--no-sound` from `pico_main.c`. Main risk is **CPU**, not RAM:
+   OPL2 emulation on the M33 shares cycles with the VM and synchronous-SPI blits — may need a
+   lighter mixer or downsampling. Worth a feasibility spike before committing.
+
+Suggested order: 1 → (2 ∥ 3) → 4.
 
 ## Key CMake decisions
 

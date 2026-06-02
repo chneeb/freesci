@@ -231,6 +231,17 @@ gfxr_free_all_pics(gfx_driver_t *driver, gfx_resstate_t *state)
 		sbtree_foreach(tree, (void *) &params, gfxr_sbtree_free_func);
 		/* Keep tree alive so gfxr_get_pic can create new entries after this call */
 	}
+	/* Views offload their cel index_data into the same PSRAM bump arena that
+	   psram_reset() rewinds below.  Cached views (the persistent ego/Roger view,
+	   reused props like the trash lift) would otherwise keep stale psram_addr into
+	   a recycled+overwritten arena -> garbage rectangles.  Free them too so
+	   gfxr_get_view re-decodes fresh after the reset. */
+	tree = state->resource_trees[GFX_RESOURCE_TYPE_VIEW];
+	if (tree) {
+		params.args[0] = GFX_RESOURCE_TYPE_VIEW;
+		params.driver = driver;
+		sbtree_foreach(tree, (void *) &params, gfxr_sbtree_free_func);
+	}
 	psram_reset();
 }
 #endif
