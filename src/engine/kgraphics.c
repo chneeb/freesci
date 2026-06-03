@@ -31,6 +31,10 @@
 #include "sci_graphics.h"
 #include <sci_widgets.h>
 
+#ifdef HAVE_PICO
+#include <malloc.h>
+#endif
+
 #undef DEBUG_LSRECT
 
 /* Graph subfunctions */
@@ -1133,6 +1137,71 @@ _k_view_list_free_backgrounds(state_t *s, view_object_t *list, int list_nr);
 
 int sci01_priority_table_flags = 0;
 
+#ifdef HAVE_PICO
+/* Per-room SRAM breakdown probe: where do the live bytes go?
+   Walks the seg-manager heap to tally loaded scripts (and their hot buf
+   bytes), the grow-never-shrink clone/list/node tables (live vs capacity),
+   and mallinfo (uordblks=live, fordblks=free, ordblks=free-chunk count =
+   fragmentation indicator). One line per room so a single flashed session
+   shows which of {scripts pile up, table high-water, fragmentation} grows. */
+static void
+pico_mem_breakdown(state_t *s, int nr)
+{
+	int i;
+	int scripts = 0, scripts_unlocked = 0;
+	size_t script_bytes = 0;
+	int clones_used = 0, clones_cap = 0;
+	int lists_used = 0, lists_cap = 0;
+	int nodes_used = 0, nodes_cap = 0;
+	size_t table_bytes = 0;
+	struct mallinfo mi;
+
+	for (i = 0; i < s->seg_manager.heap_size; i++) {
+		mem_obj_t *mobj = s->seg_manager.heap[i];
+		if (!mobj)
+			continue;
+		switch (mobj->type) {
+		case MEM_OBJ_SCRIPT:
+			scripts++;
+			script_bytes += mobj->data.script.buf_size;
+			if (mobj->data.script.lockers == 0)
+				scripts_unlocked++;
+			break;
+		case MEM_OBJ_CLONES:
+			clones_used += mobj->data.clones.entries_used;
+			clones_cap  += mobj->data.clones.entries_nr;
+			table_bytes += (size_t)mobj->data.clones.entries_nr
+				* sizeof(clone_entry_t);
+			break;
+		case MEM_OBJ_LISTS:
+			lists_used += mobj->data.lists.entries_used;
+			lists_cap  += mobj->data.lists.entries_nr;
+			table_bytes += (size_t)mobj->data.lists.entries_nr
+				* sizeof(list_entry_t);
+			break;
+		case MEM_OBJ_NODES:
+			nodes_used += mobj->data.nodes.entries_used;
+			nodes_cap  += mobj->data.nodes.entries_nr;
+			table_bytes += (size_t)mobj->data.nodes.entries_nr
+				* sizeof(node_entry_t);
+			break;
+		default:
+			break;
+		}
+	}
+
+	mi = mallinfo();
+	sciprintf("[mem] BREAKDOWN nr=%d: scripts=%d (%lu B, %d unlocked) "
+		  "clones=%d/%d lists=%d/%d nodes=%d/%d tablemem=%lu segmem=%lu | "
+		  "uord=%d ford=%d arena=%d chunks=%d\n",
+		  nr, scripts, (unsigned long) script_bytes, scripts_unlocked,
+		  clones_used, clones_cap, lists_used, lists_cap,
+		  nodes_used, nodes_cap, (unsigned long) table_bytes,
+		  (unsigned long) s->seg_manager.mem_allocated,
+		  mi.uordblks, mi.fordblks, mi.arena, mi.ordblks);
+}
+#endif
+
 reg_t
 kDrawPic(state_t *s, int funct_nr, int argc, reg_t *argv)
 {
@@ -1225,6 +1294,10 @@ kDrawPic(state_t *s, int funct_nr, int argc, reg_t *argv)
 
 	s->pic_not_valid = 1;
 	s->pic_is_new = 1;
+
+#ifdef HAVE_PICO
+	pico_mem_breakdown(s, pic_nr);
+#endif
 
 	return s->r_acc;
 

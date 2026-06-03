@@ -2070,12 +2070,14 @@ said_parse_spec(state_t *s, byte *spec)
 /** primitive functions **/
 
 #define AUG_READ_BRANCH(a, br, p) \
-  if (tree[p].type != PARSE_TREE_NODE_BRANCH) \
+  if ((p) < 0 || (p) >= VOCAB_TREE_NODES \
+      || tree[p].type != PARSE_TREE_NODE_BRANCH) \
     return 0; \
   a = tree[p].content.branches[br];
 
 #define AUG_READ_VALUE(a, p) \
-  if (tree[p].type != PARSE_TREE_NODE_LEAF) \
+  if ((p) < 0 || (p) >= VOCAB_TREE_NODES \
+      || tree[p].type != PARSE_TREE_NODE_LEAF) \
     return 0; \
   a = tree[p].content.value;
 

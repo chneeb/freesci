@@ -2243,8 +2243,15 @@ gfxw_remove_port(gfxw_visual_t *visual, gfxw_port_t *port)
 	}
 
 	parent = (gfxw_port_t *) port->parent;
-	if (port->port_flags & WINDOW_FLAG_AUTO_RESTORE)
+	if (port->port_flags & WINDOW_FLAG_AUTO_RESTORE) {
+		/* gfxw_restore_snapshot frees the matched widgets but returns the
+		   snapshot struct itself for the caller to free (see gfx_widgets.h).
+		   The return value was discarded here, leaking one gfxw_snapshot_t
+		   per auto-restore window dispose. */
 		gfxw_restore_snapshot(visual, port->restore_snap);
+		free(port->restore_snap);
+		port->restore_snap = NULL;
+	}
 
 	if (port->widfree(GFXW(port)))
 		return parent;

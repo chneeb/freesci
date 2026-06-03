@@ -101,7 +101,9 @@ This change is already on the `pico-mem-opts` branch and must be cherry-picked t
 
 1. **`aux_map` pointer fix** — must land first; without it room transitions still OOM
 2. **Skip `control_map->index_data` allocation** in `gfxr_alloc_pic` (not just free after decode) — saves 64KB peak
-3. **View `index_data` → PSRAM** — `pico_blit_indexed` already handles it; extend to view decode in `gfxr_draw_view0` — saves ~30–80KB of sprite data that turns over every room
+3. **View `index_data` → PSRAM** — *IN PROGRESS* (this is the death-animation OOM fix; see "Pico OOMs are
+   fragmentation + peak" below). `pico_blit_indexed` already reads cel `index_data` from PSRAM; extend the
+   same offload to view decode in `gfxr_draw_view0` — saves ~30–80KB of sprite data that turns over every room
 4. ~~**Resource data (scripts) → PSRAM**~~ — RULED OUT: `script_t.buf` is hot read-write VM working memory, not offloadable to a read-only cache (see roadmap ✗)
 
 ### SD card game selection
@@ -262,24 +264,42 @@ trash-elevator fault: if that warning fires there, the OOB write is implicated; 
 
 ### OPEN — top priority — heap corruption surfacing as a GC fault ("aspb")
 
-Two HardFaults (fresh-boot after long play, and the trash-elevator path) both land **inside the GC
-`reg_t` hashmap walk** (`hashmap.c:135` `while (*node && COMP(value, (*node)->name)) node =
-&((*node)->next);`, comparator `compare_reg_t` in `reg_t_hashmap.c:33`). The second had
-**BFAR `0x62707361`**, which is ASCII `61 73 70 62` = **"aspb"** in little-endian memory order — i.e.
-a GC node's `next` pointer (a 12-byte `malloc`'d `{reg_t name; int value; node *next;}`) was overwritten
-with **string bytes**. A pointer holding lowercase ASCII means a string-writing path overflowed into,
-or wrote through a freed-then-reused, GC node. GC is only the **canary**: densest small-block allocator
-+ pointer-walk, and on Pico it runs every 2048 allocs (16× more than desktop), so it trips on the
-damaged node first.
+Three HardFaults, all the same root cause — **heap allocator metadata smashed by an overflow** — caught
+at different downstream sites:
 
-- **Control map is NOT the corruptor (ruled out by static audit).** All Pico control writes go through
-  `ctl_set`/`ctl_fill`/`ctl_draw_line`, which only ever write values 0–15 and are bounds-clipped; the
-  map is read-only during gameplay. Enabling it (default ON) merely **fragments the heap** so a
-  pre-existing string-overflow/UAF now lands on a live GC node instead of in slack. Desktop's roomy
-  heap + 2× buffers absorb the same bad write silently — latent, not absent.
+- **Two land inside the GC `reg_t` hashmap walk** (`hashmap.c:135` `while (*node && COMP(value,
+  (*node)->name)) node = &((*node)->next);`, comparator `compare_reg_t` in `reg_t_hashmap.c:33`). One had
+  **BFAR `0x62707361`** = ASCII `61 73 70 62` = **"aspb"** (little-endian memory order) — a GC node's
+  `next` pointer (a 12-byte `malloc`'d `{reg_t name; int value; node *next;}`) overwritten with **string
+  bytes**. A pointer holding lowercase ASCII means a string-writing path overflowed into, or wrote
+  through a freed-then-reused, GC node.
+- **One lands inside newlib `free()` itself** (`_free_r`, `_mallocr.c:2675`, the chunk-unlink
+  `FD=P->fd; BK=P->bk; …`), CFSR `0x8200` precise bus fault, **BFAR `0x2009f94e`** — ~121 KB *above* the
+  RP2350 SRAM top (`0x20082000`), a wild chunk pointer. free() followed a smashed boundary tag into
+  unmapped RAM. This is the **same corruption one layer deeper**: not a GC-specific bug — the allocator's
+  own metadata is damaged, which is the signature of a heap buffer overflow into an adjacent chunk header.
+  - **Context (pico.log up to this fault):** repeating `Activating port 1 after disposing window 4` +
+    the SQ3 invalid-param spam = **message windows opening/closing** (player typing parser commands and
+    reading responses). Last alloc before the fault `malloc 1282 2007FD10->20080212` **succeeded** (not
+    OOM) and ended **7.6 KB under the SRAM ceiling** — i.e. heap nearly full, so the overflow lands on
+    live metadata instead of slack. The faulting `free()` is almost certainly freeing a **window/pixmap
+    backing buffer during window dispose**, whose neighbouring chunk was smashed by an earlier
+    text-path write. Crash site = window teardown; overflow source = the message/text path.
+
+GC and free() are only the **canaries** (densest small-block alloc + pointer-walk; GC runs every 2048
+allocs on Pico, 16× more than desktop), so they trip on the damaged block first.
+
+- **Control map is NOT the corruptor (ruled out by static audit + log).** All Pico control writes go
+  through `ctl_set`/`ctl_fill`/`ctl_draw_line`, which only ever write values 0–15 and are bounds-clipped;
+  the map is read-only during gameplay. Enabling it (default ON) merely **fragments the heap** so a
+  pre-existing string-overflow/UAF now lands on a live block instead of in slack. (The window-dispose log
+  above shows **no** `control map: 32KB alloc failed` warning — the control map decoded fine that session;
+  the fault is unrelated to control decode.) Desktop's roomy heap + 2× buffers absorb the same bad write
+  silently — latent, not absent.
 - **Prime suspects:** SCI string kernels (`kFormat`/`kStrcpy`/`kStrcat`/`kString` in `kstring.c`) writing
-  past a `dynmem`/`sys_strings` buffer, or save/restore name handling. These are the engine paths that
-  write attacker-length ASCII into heap blocks.
+  past a `dynmem`/`sys_strings` buffer, or save/restore name handling — these build the **message-window
+  strings** implicated by the dispose-time `free()` fault. These are the engine paths that write
+  attacker-length ASCII into heap blocks.
 - **Find it with desktop ASan, not the device.** `build-asan/src/freesci` is built with
   `-fsanitize=address -g -fno-omit-frame-pointer`. ASan traps the bad write at the instant it happens,
   independent of heap layout, and names the writing function:
@@ -287,15 +307,59 @@ damaged node first.
   ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
     ./build-asan/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl --disable-mouse
   ```
-  Play and deliberately trigger text: "look" at scenery, read signs, open inventory, ride the trash
-  elevator (its control-trigger messages). Capture the `==ERROR: AddressSanitizer: heap-buffer-overflow`
-  / `heap-use-after-free` report. The 90s intro-only ASan run was clean → the bug is on a
-  **text/string interaction path**, not the decode path.
+  **Hammer message windows** — that is the implicated churn, not just "trigger text": type parser
+  commands, read the responses, open/close inventory and dialogs repeatedly, "look" at scenery, read
+  signs. Each message window open/close runs the string-building kernels (the overflow source) and then
+  frees the window buffer (the `free()` that trips). Capture the `==ERROR: AddressSanitizer:
+  heap-buffer-overflow` / `heap-use-after-free` report. The 90s intro-only ASan run was clean → the bug
+  is on the **text/message-window path**, not the decode path.
 - **Why the Pico no-collision A/B is a weak test:** control-OFF changes heap layout (may move the
   overflow into slack → false "fixed") *and* disables the control triggers that run the trash-elevator
   script (→ may never execute the buggy path). Use it only to corroborate independence, never to refute.
 
 Record the root cause here once ASan pinpoints it.
+
+### DIAGNOSIS — the Pico OOMs are fragmentation + transient peak, NOT a leak
+
+The per-room breakdown probe (below) settled this. The monotonic `used`-bytes growth that *looked* like a
+leak is a **bounded working set plus heap fragmentation**. Contiguity — not total free bytes — is the
+limiting resource: a small `malloc` fails with several KB *total* free because that free space is shattered
+into chunks none of which is large enough.
+
+**Evidence (one flashed SQ3 session, intro → trash elevator → conveyor death):**
+- `scripts`: 15 → 18, ~35KB → ~45KB, then **plateaus** (not unbounded).
+- clone/list/node tables: tiny (~3KB total), ratchet up in small steps (grow-never-shrink, but capped).
+- `chunks` (free-chunk count = fragmentation): 11 → 21 → 44 → 53 → 62 — *this* is what climbs.
+- `uord` (live bytes): ~287KB during early play → +79KB death-animation spike to ~417KB (≈97% of the
+  427744-byte arena ceiling).
+- Crash: `malloc 2745 failed, free=10720` at `gfx_tools.c:256` `gfx_pixmap_alloc_index_data` — a **view-cel
+  index buffer**. 10720 bytes free, but no 2745-byte contiguous run among 62 fragments. ⇒ roadmap candidate
+  #3 (view `index_data` → PSRAM) directly targets this peak.
+
+The earlier 961d1fc2 crash (`decompress0` needed 12664 with 19048 free) is the same class — a small
+contiguous block denied while KB remain free. SCI0's working set already runs near the ceiling; normal play
+fragments the heap (room changes re-decode pics = big transient allocs/frees; parser/dialog lines open and
+close message windows = small alloc/free churn). No leak is required to OOM.
+
+NB this is distinct from the "aspb" heap *corruption* above (a pointer overwritten with ASCII = an
+overflow, not exhaustion). Fragmentation OOM ≠ metadata smash; both are open, tracked separately.
+
+**Elevator boarding is gated on the control map decoding, which is fragmentation-sensitive.** `rm004::doit`
+requires `ego.onControl == 3`; `kOnControl` reads `pic->control_map`, which only exists if room 4's control
+pic (2052) decoded — needing a contiguous `malloc(32000)`. When room 4 is entered with a fragmented heap the
+decode fails silently (`psram_valid=0` → scan returns 0 → `onControl` always 0 → boarding impossible). When
+entered with ~82KB contiguous free it decodes and boarding works. So "the elevator worked this time" was a
+heap-state effect, not a logic change.
+
+### Per-room SRAM breakdown probe (diagnostic, keep until OOM headroom is comfortable)
+
+`pico_mem_breakdown` (`kgraphics.c`, called at the end of `kDrawPic` under `HAVE_PICO`) walks
+`s->seg_manager.heap[]` and prints one `[mem] BREAKDOWN` line per room: loaded script count + hot `buf`
+bytes + unlocked count, the clone/list/node tables (used/cap), seg-manager `mem_allocated`, and `mallinfo`
+(`uord`=live, `ford`=free, `arena`, `chunks`=free-chunk count = fragmentation). Paired with the
+`[mem] room enter/ready` lines in `gfxop_new_pic` (`operations.c`), a single flashed session shows which of
+{scripts pile up, tables high-water, fragmentation climbs} is actually growing. This is what proved the
+no-leak diagnosis above — leave it in to measure before/after the view-cel offload.
 
 ### Pico roadmap (remaining work, prioritized)
 

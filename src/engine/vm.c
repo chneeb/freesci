@@ -140,7 +140,8 @@ signed_validate_arithmetic(reg_t reg)
 }
 
 static inline int
-validate_variable(reg_t *r, reg_t *stack_base, int type, int max, int index, int line)
+validate_variable(reg_t *r, reg_t *stack_base, int type, int max, int index, int line,
+		  reg_t pc, int is_write)
 {
 	const char *names[4] = {"global", "local", "temp", "param"};
 
@@ -151,6 +152,10 @@ validate_variable(reg_t *r, reg_t *stack_base, int type, int max, int index, int
 		else
 			sciprintf("(out of range [%d..%d])", 0, max-1);
 		sciprintf(" in %s, line %d\n", __FILE__, line);
+		/* OOB-hunt diagnostic: name the SCI bytecode location and direction so
+		   the offending game script can be disassembled (scidisasm). */
+		sciprintf("[VM]   -> %s at script %04x:%04x (idx=%d, valid [0..%d])\n",
+			  is_write ? "WRITE" : "READ", pc.segment, pc.offset, index, max - 1);
 		if (!_weak_validations)
 			script_debug_flag = script_error_flag = 1;
 
@@ -165,6 +170,23 @@ validate_variable(reg_t *r, reg_t *stack_base, int type, int max, int index, int
 				return 1;
 			} else {
 				sciprintf("[VM] Access within stack boundaries; access granted.\n");
+				/* The granted access lands at r[index], i.e. value-stack slot
+				   (total_offset + index). The original check only validated the
+				   base r, NOT r+index — so a granted WRITE can corrupt another
+				   VM frame's reg_t (silent on desktop, fatal on Pico's tight
+				   heap), and if total_offset+index >= VM_STACK_SIZE it overruns
+				   the value-stack malloc entirely. This is the suspected
+				   ASan-invisible heap corruptor: flag it loudly. */
+				if (is_write) {
+					sciprintf("[VM][OOB-WRITE] GRANTED out-of-bounds %s WRITE"
+						  " idx=%d max=%d at script %04x:%04x"
+						  " (slot=%d/%d)%s\n",
+						  names[type], index, max,
+						  pc.segment, pc.offset,
+						  total_offset + index, VM_STACK_SIZE,
+						  (total_offset + index >= VM_STACK_SIZE)
+						  ? "  *** PAST VALUE-STACK MALLOC ***" : "");
+				}
 				return 0;
 			}
 		};
@@ -175,18 +197,20 @@ validate_variable(reg_t *r, reg_t *stack_base, int type, int max, int index, int
 }
 
 static inline reg_t
-validate_read_var(reg_t *r, reg_t *stack_base, int type, int max, int index, int line, reg_t default_value)
+validate_read_var(reg_t *r, reg_t *stack_base, int type, int max, int index, int line,
+		  reg_t pc, reg_t default_value)
 {
-	if (!validate_variable(r, stack_base, type, max, index, line))
+	if (!validate_variable(r, stack_base, type, max, index, line, pc, 0))
 		return r[index];
 	else
 		return default_value;
 }
 
 static inline void
-validate_write_var(reg_t *r, reg_t *stack_base, int type, int max, int index, int line, reg_t value)
+validate_write_var(reg_t *r, reg_t *stack_base, int type, int max, int index, int line,
+		   reg_t pc, reg_t value)
 {
-	if (!validate_variable(r, stack_base, type, max, index, line))
+	if (!validate_variable(r, stack_base, type, max, index, line, pc, 1))
 		r[index] = value;
 }
 
@@ -199,15 +223,15 @@ validate_write_var(reg_t *r, reg_t *stack_base, int type, int max, int index, in
 #  define validate_arithmetic(r) ((r).offset)
 #  define signed_validate_arithmetic(r) ((int) ((r).offset)&0x8000 ? (signed) ((r).offset)-65536 : ((r).offset))
 #  define validate_variable(r, sb, t, m, i, l)
-#  define validate_read_var(r, sb, t, m, i, l) ((r)[i])
-#  define validate_write_var(r, sb, t, m, i, l, v) ((r)[i] = (v))
+#  define validate_read_var(r, sb, t, m, i, l, pc) ((r)[i])
+#  define validate_write_var(r, sb, t, m, i, l, pc, v) ((r)[i] = (v))
 #  define validate_property(o, p) (&((o)->variables[p]))
 #  define ASSERT_ARITHMETIC(v) (v).offset
 
 #endif
 
-#define READ_VAR(type, index, def) validate_read_var(variables[type], s->stack_base, type, variables_max[type], index, __LINE__, def)
-#define WRITE_VAR(type, index, value) validate_write_var(variables[type], s->stack_base, type, variables_max[type], index, __LINE__, value)
+#define READ_VAR(type, index, def) validate_read_var(variables[type], s->stack_base, type, variables_max[type], index, __LINE__, xs->addr.pc, def)
+#define WRITE_VAR(type, index, value) validate_write_var(variables[type], s->stack_base, type, variables_max[type], index, __LINE__, xs->addr.pc, value)
 #define WRITE_VAR16(type, index, value) WRITE_VAR(type, index, make_reg(0, value));
 
 #define ACC_ARITHMETIC_L(op) make_reg(0, (op validate_arithmetic(s->r_acc)))

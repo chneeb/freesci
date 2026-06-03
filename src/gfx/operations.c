@@ -2216,6 +2216,17 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	BASIC_CHECKS(GFX_FATAL);
 
 #ifdef HAVE_PICO
+	/* Heap-growth probe: free heap carried over from the PREVIOUS room's
+	   gameplay, measured at the same point every room change. A monotonic
+	   decline room-over-room = a real leak; saturate-then-recover = healthy
+	   but GC-starved. Logged before any freeing so it reflects the low-water
+	   mark reached during the prior room. */
+	{
+		struct mallinfo _mi = mallinfo();
+		sciprintf("[mem] room enter nr=%d: free=%d arena=%d used=%d\n",
+			  nr, _mi.fordblks, _mi.arena, _mi.uordblks);
+	}
+
 	/* Free all cached pics and reset PSRAM before decoding the new room. */
 	gfxr_free_all_pics(state->driver, state->resstate);
 
@@ -2309,6 +2320,15 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   the background from PSRAM so the room art appears immediately. */
 	pico_alloc_visual(state->driver);
 	pico_render_background(state->driver);
+
+	/* Post-decode baseline: free heap once the new room is fully resident.
+	   Compare against the next room's "room enter" line — if this baseline
+	   drifts down over many rooms, something allocated per room is not freed. */
+	{
+		struct mallinfo _mi = mallinfo();
+		sciprintf("[mem] room ready nr=%d: free=%d arena=%d used=%d\n",
+			  nr, _mi.fordblks, _mi.arena, _mi.uordblks);
+	}
 #endif
 
 	return retval;

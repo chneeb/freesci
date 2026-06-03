@@ -756,6 +756,10 @@ kNOP(state_t *s, int funct_nr, int argc, reg_t *argv)
 
 	SCIkwarn(SCIkWARNING, "Warning: Kernel function 0x%02x invoked: %s", funct_nr, problem);
 
+#ifndef HAVE_PICO
+	/* On Pico the SCIkwarn above is suppressed (tools.c), but these direct
+	   sciprintf()s are not — leaving one blank line per kNOP call (SQ3 hits the
+	   unmapped 0x71 every input cycle) flooding the UART. Guard the cosmetic tail. */
 	if (s->kfunct_table[funct_nr].orig_name &&
 	    strcmp(s->kfunct_table[funct_nr].orig_name, SCRIPT_UNKNOWN_FUNCTION_STRING))
 	  {
@@ -763,6 +767,7 @@ kNOP(state_t *s, int funct_nr, int argc, reg_t *argv)
 	  }
 
 	sciprintf("\n");
+#endif
 	return NULL_REG;
 }
 
