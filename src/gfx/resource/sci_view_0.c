@@ -36,6 +36,10 @@
 #include <gfx_resource.h>
 #include <gfx_tools.h>
 
+#ifdef HAVE_PICO
+#include "psram_alloc.h"
+#endif
+
 
 gfx_pixmap_t *
 gfxr_draw_cel0(int id, int loop, int cel, byte *resource, int size, gfxr_view_t *view, int mirrored)
@@ -126,6 +130,24 @@ gfxr_draw_cel0(int id, int loop, int cel, byte *resource, int size, gfxr_view_t 
 			writepos += count;
 		}
 	}
+
+#ifdef HAVE_PICO
+	/* Offload this cel to PSRAM the moment it is decoded, so the SRAM decode
+	   peak is a single cel rather than the whole view's cels at once (a view's
+	   worth of resident index_data is what OOMs the death animation). The
+	   post-decode loop in gfxr_interpreter_get_view then sees index_data==NULL
+	   and skips it; pico_blit_indexed reads it back row-by-row. Safe because the
+	   SCI0/SCI01 versions routed here never call gfxr_palettize_view, so nothing
+	   reads index_data between here and blit time. */
+	{
+		size_t sz = (size_t)(retval->index_xl * retval->index_yl);
+		retval->psram_addr  = psram_alloc(sz);
+		retval->psram_valid = 1;
+		psram_store(retval->psram_addr, retval->index_data, sz);
+		free(retval->index_data);
+		retval->index_data = NULL;
+	}
+#endif
 
 	return retval;
 }

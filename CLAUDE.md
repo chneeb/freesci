@@ -262,6 +262,55 @@ with the offending index — **diagnostic, not silent**, so it can't mask a beni
 (~64000–64500) vs a wild value. This is retained as defense-in-depth and as a probe for the still-open
 trash-elevator fault: if that warning fires there, the OOB write is implicated; if not, look elsewhere.
 
+### OPEN — corruption confirmed — branch-to-NULL HardFault (death-scene / 4ded2752)
+
+The captured fault dump for the 4ded2752 session is a **jump to address 0**, NOT the GC
+NULL-malloc data-deref earlier guessed for that log (that guess is **retracted** — see decode):
+
+```
+HardFault PC=0x00000000   ← branched to address 0, fetched an instruction there
+LR  =0x20081…0            ← SRAM, near top-of-stack region
+CFSR=0x00020000           ← UFSR bit1 = INVSTATE (UsageFault); BFSR/MMFSR both 0
+HFSR=0x40000000           ← FORCED (the UsageFault escalated to HardFault)
+MMFAR=0xe000ed34          ← = the MMFAR register's own address → MMARVALID clear → no fault addr
+BFAR =0xe000ed38          ← = the BFAR register's own address  → BFARVALID clear → no fault addr
+```
+
+Decode: **PC=0 + INVSTATE + no valid BFAR/MMFAR = a control-flow transfer to NULL**, i.e. a call
+through a **NULL/corrupted-to-zero function pointer** (addr 0 has bit[0]=0 → Thumb bit lost → INVSTATE)
+or a `POP {PC}` returning through a zeroed stack slot. This is **not** a data write — a NULL-malloc
+deref in `hashmap.c` would fault with PC in flash (`0x10xxxxxx`) + a small BFAR + BFSR set, which is
+**not** what the dump shows. So the `calloc 2060` + `malloc 12` flood in the log tail was GC merely
+*running* just before the fault; the fault itself is a jump-to-0. **This puts the 4ded2752 crash in the
+corruption family below ("aspb"), not the OOM family.** The hashmap `sci_malloc`/`sci_calloc` hardening
+stays (legible GC-time OOM) but does **not** fix this crash.
+
+Likeliest concrete culprit given "fault before the Roger death scene": a **gfxw widget whose op
+pointer (`draw`/`free`/`tag`/…) was overwritten with 0** — the death scene spins up animation widgets
+and calls them via C function pointers (`widget->draw(...)`). Overflow source still points at the
+message-window/text path (same as the dispose-time `free()` fault). → ASan target unchanged; add the
+death-scene widget path to the things to hammer.
+
+**Static-analysis finding — the SCI string kernels discard a known buffer size.** `kFormat`,
+`kStrCat`, `kStrCpy` (`kstring.c`) deref their dest with `kernel_dereference_bulk_pointer(s, argv[0], 0)`
+— the `0` is the bounds arg, so `_kernel_dereference_pointer` (`kernel.c:1097`) skips the
+`entries > maxsize` check and **throws away the real size** `sm_dereference` computed (`seg_manager.c`:
+`dynmem.size`, `sys_strings[].max_size`, script/locals/stack byte counts). They then write unbounded:
+`kFormat` caps at a **fake `maxsize=4096`** (comment: "Arbitrary..."), `kStrCat` is a bare `strcat`,
+`kStrCpy`'s argc==2 path a bare `strcpy`. A long formatted/concatenated dialog string (the message-
+window path the logs correlate with) overflows a small dynmem/sys_string buffer → ASCII into the next
+heap chunk = the "aspb"/PC=0 signature. Desktop survives on slack; Pico's tight heap puts a live
+pointer right after.
+
+**Probe in place (no behavior change, no clamp).** `str_overflow_probe` (`kstring.c`) + a one-shot
+clause in `CHECK_OVERFLOW1` now log `[strprobe] <kernel> writes N bytes into an M-byte buffer …
+(overflow by K)` whenever a write crosses the *real* dest size, **without truncating** — the write
+proceeds exactly as before (`kFormat` still hard-stops at 4096). Captured via `sciprintf` → pico.log
+over serial, so the line lands **before** the eventual branch-to-NULL crash and names the culprit
+kernel + buffer. **Next device session: grep pico.log for `[strprobe]`** — if one fires just before the
+`[FAULT]`, that kernel/buffer is the overflow source; then fix with a real bounds clamp (the size is
+already in hand). If none fires, the corruptor is elsewhere (not these three string kernels).
+
 ### OPEN — top priority — heap corruption surfacing as a GC fault ("aspb")
 
 Three HardFaults, all the same root cause — **heap allocator metadata smashed by an overflow** — caught
@@ -288,6 +337,19 @@ at different downstream sites:
 
 GC and free() are only the **canaries** (densest small-block alloc + pointer-walk; GC runs every 2048
 allocs on Pico, 16× more than desktop), so they trip on the damaged block first.
+
+- **NOTE — distinguish the OOM variant from the corruption variant.** A *separate* GC HardFault class is
+  a plain out-of-memory NULL-deref, not a metadata smash: on a full heap the GC node alloc at
+  `hashmap.c` (`TYPE##_hash_map_check_value`) and the bucket alloc in `new_##TYPE##_hash_map` used **raw
+  `malloc`/`calloc` with no NULL check**, then dereferenced immediately. The 4ded2752 session log shows
+  exactly this — `calloc 2060` (bucket array) + a flood of ~270 `malloc 12` (the 12-byte nodes) then
+  `[FAULT]` with **no `[OOM]` line** (raw malloc bypasses `pico_oom_report`). **Hardened:** both now use
+  `sci_malloc`/`sci_calloc` (`hashmap.c` includes `sci_memory.h`), so a GC-time exhaustion self-reports
+  via `pico_oom_report` (legible LCD dump + halt) instead of a blind NULL-deref. This does **not** address
+  the "aspb" corruption variant above (BFAR holding ASCII = an overflow, not exhaustion) — that is still
+  open and is the ASan target. Use the presence/absence of an `[OOM]` LCD line to tell the two apart on the
+  next device run: `[OOM]` present = exhaustion (need more heap headroom); HardFault with no `[OOM]` and a
+  garbage/ASCII BFAR = corruption.
 
 - **Control map is NOT the corruptor (ruled out by static audit + log).** All Pico control writes go
   through `ctl_set`/`ctl_fill`/`ctl_draw_line`, which only ever write values 0–15 and are bounds-clipped;
@@ -319,12 +381,40 @@ allocs on Pico, 16× more than desktop), so they trip on the damaged block first
 
 Record the root cause here once ASan pinpoints it.
 
-### DIAGNOSIS — the Pico OOMs are fragmentation + transient peak, NOT a leak
+### DIAGNOSIS — Pico OOMs = transient peak + fragmentation, PLUS a real ~10KB/room accumulation
 
-The per-room breakdown probe (below) settled this. The monotonic `used`-bytes growth that *looked* like a
-leak is a **bounded working set plus heap fragmentation**. Contiguity — not total free bytes — is the
-limiting resource: a small `malloc` fails with several KB *total* free because that free space is shattered
-into chunks none of which is large enough.
+Two distinct pressures, established by the per-room breakdown probe:
+
+1. **Transient peak + fragmentation** (the immediate OOM trigger). Contiguity — not total free bytes — is
+   the limiting resource: a small `malloc` fails with several KB *total* free because that free space is
+   shattered into chunks none of which is large enough.
+2. **A genuine baseline accumulation** (CORRECTION to the earlier "no leak" claim). The 4e2df48b session
+   re-entered the SAME room 3 twice and the resident `uord` rose **319 960 → 365 184 (+45 KB)** — for an
+   identical room, with the arena flat at 411 360 (so not fragmentation slack, genuinely more live bytes),
+   and *despite* the 2nd visit failing to allocate the 32 KB control map. Scripts were flat (~44 KB) and the
+   seg tables only grew ~3 KB, so **~42 KB accumulated in allocations the probe did not yet count** (hunk /
+   dynmem / sys_strings / non-seg gfx+widget). The probe was extended to itemize hunks (count+bytes), dynmem
+   (count+bytes), locals, sys_strings to localize it; activity between the two visits was heavy
+   message-window churn (`Activating port 1 after disposing window 4`) plus a save-game → suspects are
+   graphics save-under hunks, a per-window-dispose leak, or save/restore buffers.
+
+   **CONFIRMED non-seg-manager (97bdee70 session).** That run itemized hunks/dynmem/locals/sysstr and they
+   are all **flat/zero** while the SAME room 3's `uord` rose 334 408 → 339 048 → **374 568** across heavy
+   message-window churn (scripts went *down*, `hunks=0`, `dynmem=0`, tables flat). The ~35 KB jump lives in
+   allocations the breakdown structurally cannot see (gfx pixmaps + widgets are **not** in
+   `seg_manager.heap[]`). The session ended in a clean `[OOM]` (exhaustion, not corruption) at
+   `decompress0.c:303` (the 12 664 B decompressed-resource buffer) with the heap **94 % full** (used
+   400 656 / arena 427 744) and fragmented — the accumulation pushed the baseline up until a routine decode
+   alloc could not find a contiguous block.
+
+   **Next probe — gfx-layer leak counters (in firmware, not yet flashed).** `gfx_new_pixmap`/
+   `gfx_clone_pixmap`/`gfx_free_pixmap` (`gfx_tools.c`) maintain `gfx_pixmaps_live`; `_gfxw_new_widget`/
+   `_gfxw_unallocate_widget` (`widgets.c`) maintain `gfxw_widgets_live`. Both print on the BREAKDOWN line as
+   `gfxpxm=N widgets=M`. **Read them across same-room revisits:** if `gfxpxm` climbs, the leak is in the
+   pixmap layer (window save-unders / decoration backgrounds / view cels); if `widgets` climbs, it's the
+   widget tree (ports/dynviews/text not freed on dispose); if both flat while `uord` still rises, the
+   accumulation is in resource/save-restore buffers instead. This is the localizing step now that
+   seg-manager is ruled out.
 
 **Evidence (one flashed SQ3 session, intro → trash elevator → conveyor death):**
 - `scripts`: 15 → 18, ~35KB → ~45KB, then **plateaus** (not unbounded).

@@ -30,7 +30,38 @@
 #include <engine.h>
 #include "message.h"
 
+/* Diagnostic probe (no behavior change, no truncation): the SCI string kernels
+   write into a script-provided buffer whose real size the seg-manager knows
+   (sm_dereference's size out-param) but the kernels discard by passing entries=0.
+   A write longer than that real size silently smashes the adjacent heap chunk —
+   the suspected source of the Pico branch-to-NULL (PC=0) HardFault. This reports
+   the offending kernel + buffer to the log without changing what gets written, so
+   the next device session names the culprit. */
+static void
+str_overflow_probe(state_t *s, const char *kfunc, reg_t dest, int need)
+{
+	int bufsize = 0;
+	if (!dest.segment)
+		return;
+	if (!sm_dereference(&s->seg_manager, dest, &bufsize))
+		return;
+	if (need > bufsize)
+		sciprintf("[strprobe] %s writes %d bytes into a %d-byte buffer "
+			  PREG" (overflow by %d)\n",
+			  kfunc, need, bufsize, PRINT_REG(dest), need - bufsize);
+}
+
+/* The kformat_* locals are supplied by kFormat (the only user of this macro);
+   the first clause is a one-shot probe against the real dest size, the second is
+   the original (unchanged) 4096 hard stop. */
 #define CHECK_OVERFLOW1(pt, size, rv) \
+	if (kformat_real_size > 0 && !kformat_overflow_warned \
+	    && ((pt) - (str_base)) + (size) > kformat_real_size) { \
+		sciprintf("[strprobe] kFormat writes past dest buffer: need %d > %d bytes " \
+			  PREG"\n", (int)(((pt) - (str_base)) + (size)), \
+			  kformat_real_size, PRINT_REG(dest)); \
+		kformat_overflow_warned = 1; \
+	} \
 	if (((pt) - (str_base)) + (size) > maxsize) { \
 		SCIkwarn(SCIkERROR, "String expansion exceeded heap boundaries\n"); \
 		return rv;\
@@ -364,6 +395,7 @@ kStrCat(state_t *s, int funct_nr, int argc, reg_t *argv)
 	char *s1 = kernel_dereference_char_pointer(s, argv[0], 0);
 	char *s2 = kernel_dereference_char_pointer(s, argv[1], 0);
 
+	str_overflow_probe(s, "kStrCat", argv[0], (int)(strlen(s1) + strlen(s2) + 1));
 	strcat(s1, s2);
 	return argv[0];
 }
@@ -402,9 +434,11 @@ kStrCpy(state_t *s, int funct_nr, int argc, reg_t *argv)
 	{
 		int length = SKPV(2);
 
-		if (length>=0)
+		if (length>=0) {
+			str_overflow_probe(s, "kStrCpy(n)", argv[0], length);
 			strncpy(dest, src, length);
-		else {
+		} else {
+			str_overflow_probe(s, "kStrCpy(neg)", argv[0], -length);
 			if (s->seg_manager.heap[argv[0].segment]->type == MEM_OBJ_DYNMEM) {
 				reg_t *srcp = (reg_t *) src;
 				
@@ -419,8 +453,10 @@ kStrCpy(state_t *s, int funct_nr, int argc, reg_t *argv)
 				memcpy(dest, src, -length);
 		}
 	}
-	else
+	else {
+		str_overflow_probe(s, "kStrCpy", argv[0], (int)(strlen(src) + 1));
 		strcpy(dest, src);
+	}
 
 	return argv[0];
 }
@@ -507,7 +543,11 @@ kFormat(state_t *s, int funct_nr, int argc, reg_t *argv)
 	int str_leng = 0; /* Used for stuff like "%13s" */
 	int unsigned_var = 0;
 	int maxsize = 4096; /* Arbitrary... */
+	int kformat_real_size = 0;   /* probe: true size of the dest buffer (0 = unknown) */
+	int kformat_overflow_warned = 0;
 
+	if (dest.segment)
+		sm_dereference(&s->seg_manager, dest, &kformat_real_size);
 
 	if (position.segment)
 		startarg = 2;

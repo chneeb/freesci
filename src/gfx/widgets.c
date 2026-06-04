@@ -38,6 +38,14 @@
 
 point_t gfxw_point_zero = {0, 0};
 
+#ifdef HAVE_PICO
+/* Leak probe: net count of live gfxw_widget_t (alloc - free). Printed on the
+   per-room BREAKDOWN line. Disambiguates the non-seg accumulation: if widgets
+   climb (not pixmaps) across same-room revisits, the leak is in the widget tree
+   (ports/dynviews/text) rather than the pixmap layer. */
+int gfxw_widgets_live = 0;
+#endif
+
 #define MAX_SERIAL_NUMBER 0x7fffffff
 static int widget_serial_number_counter = 0x10000; /* Avoid confusion with IDs */
 
@@ -170,6 +178,10 @@ _gfxw_new_widget(int size, gfxw_widget_type_t type)
 
 	_gfxw_debug_add_widget(widget);
 
+#ifdef HAVE_PICO
+	gfxw_widgets_live++;
+#endif
+
 	return widget;
 }
 
@@ -220,6 +232,10 @@ _gfxw_unallocate_widget(gfx_state_t *state, gfxw_widget_t *widget)
 	widget->magic = GFXW_MAGIC_INVALID;
 	free(widget);
 	_gfxw_debug_remove_widget(widget);
+
+#ifdef HAVE_PICO
+	gfxw_widgets_live--;
+#endif
 }
 
 #define GFX_ASSERT(_x) \

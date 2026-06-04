@@ -28,6 +28,15 @@
 #include <sci_memory.h>
 #include <gfx_tools.h>
 
+#ifdef HAVE_PICO
+/* Leak probe: net count of live gfx_pixmap_t (alloc - free). The per-room
+   BREAKDOWN line (kgraphics.c) prints this. The breakdown only walks
+   seg_manager.heap[], which does NOT include gfx pixmaps; a session-long rise
+   here across same-room revisits localizes the non-seg accumulation to the
+   pixmap layer (window save-unders / decoration backgrounds / view cels). */
+int gfx_pixmaps_live = 0;
+#endif
+
 /* set optimisations for Win32: */
 #ifdef _WIN32
 #	include <memory.h>
@@ -150,6 +159,9 @@ gfx_clone_pixmap(gfx_pixmap_t *pxm, gfx_mode_t *mode)
 		memcpy(clone->alpha_map, pxm->alpha_map, clone->xl * clone->yl);
 	}
 
+#ifdef HAVE_PICO
+	gfx_pixmaps_live++;
+#endif
 	return clone;
 }
 
@@ -192,6 +204,9 @@ gfx_new_pixmap(int xl, int yl, int resid, int loop, int cel)
 
 	pxm->color_key = 0xff;
 
+#ifdef HAVE_PICO
+	gfx_pixmaps_live++;
+#endif
 	return pxm;
 }
 
@@ -236,6 +251,10 @@ gfx_free_pixmap(gfx_driver_t *driver, gfx_pixmap_t *pxm)
 		free(pxm->colors);
 
 	free(pxm);
+
+#ifdef HAVE_PICO
+	gfx_pixmaps_live--;
+#endif
 }
 
 

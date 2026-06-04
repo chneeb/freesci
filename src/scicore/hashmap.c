@@ -32,6 +32,7 @@
 */
 #include <stdio.h>
 #include <stdlib.h>
+#include <sci_memory.h>
 
 #ifdef MUST_FREE
 #  define CLEAR_NODE(n) free(n->name); n->name = NULL
@@ -55,7 +56,7 @@
 TYPE##_hash_map_t *								\
 new_##TYPE##_hash_map(void)							\
 {										\
-	TYPE##_hash_map_t *map = (TYPE##_hash_map_t*)calloc(1, sizeof(TYPE##_hash_map_t));\
+	TYPE##_hash_map_t *map = (TYPE##_hash_map_t*)sci_calloc(1, sizeof(TYPE##_hash_map_t));\
 										\
 	return map;								\
 }										\
@@ -156,7 +157,7 @@ TYPE##_hash_map_check_value(TYPE##_hash_map_t *map, TYPE value,                 
                 (*node)->next = NULL;                                           \
 		(*node)->name = DUP_VALUE(value);				\
 	} else {								\
-		*node = (TYPE##_hash_map_node_t*)malloc(sizeof(TYPE##_hash_map_node_t));\
+		*node = (TYPE##_hash_map_node_t*)sci_malloc(sizeof(TYPE##_hash_map_node_t));\
 		(*node)->name = DUP_VALUE(value);				\
 		(*node)->value = map->base_value++;				\
                 (*node)->next = NULL;                                           \

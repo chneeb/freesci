@@ -1154,10 +1154,18 @@ pico_mem_breakdown(state_t *s, int nr)
 	int lists_used = 0, lists_cap = 0;
 	int nodes_used = 0, nodes_cap = 0;
 	size_t table_bytes = 0;
+	int hunks_used = 0, hunks_cap = 0;
+	size_t hunk_bytes = 0;
+	int dynmem_nr = 0;
+	size_t dynmem_bytes = 0;
+	int locals_nr = 0, sysstr_nr = 0;
 	struct mallinfo mi;
+	extern int gfx_pixmaps_live;   /* gfx_tools.c — net live pixmap count */
+	extern int gfxw_widgets_live;  /* widgets.c   — net live widget count  */
 
 	for (i = 0; i < s->seg_manager.heap_size; i++) {
 		mem_obj_t *mobj = s->seg_manager.heap[i];
+		int h;
 		if (!mobj)
 			continue;
 		switch (mobj->type) {
@@ -1185,19 +1193,49 @@ pico_mem_breakdown(state_t *s, int nr)
 			table_bytes += (size_t)mobj->data.nodes.entries_nr
 				* sizeof(node_entry_t);
 			break;
+		case MEM_OBJ_HUNK:
+			/* Graphics "hunk" allocs (save-under-window backgrounds etc.):
+			   prime suspect for per-window-dispose accumulation. Sum live
+			   slots' byte sizes plus the table high-water. */
+			hunks_used += mobj->data.hunks.entries_used;
+			hunks_cap  += mobj->data.hunks.entries_nr;
+			for (h = 0; h < mobj->data.hunks.max_entry; h++)
+				if (mobj->data.hunks.table[h].next_free == h
+				    && mobj->data.hunks.table[h].entry.mem)
+					hunk_bytes += mobj->data.hunks.table[h].entry.size;
+			break;
+		case MEM_OBJ_DYNMEM:
+			dynmem_nr++;
+			dynmem_bytes += mobj->data.dynmem.size;
+			break;
+		case MEM_OBJ_LOCALS:
+			locals_nr++;
+			break;
+		case MEM_OBJ_SYS_STRINGS:
+			sysstr_nr++;
+			break;
 		default:
 			break;
 		}
 	}
 
 	mi = mallinfo();
+	/* resmgr LRU is capped at 32KB on Pico (main.c) and self-evicts, so
+	   reslru should plateau near its ceiling. reslock (locked resources)
+	   bypasses the cap entirely — if it climbs across same-room revisits,
+	   resources are being locked and never unlocked = the accumulation. */
 	sciprintf("[mem] BREAKDOWN nr=%d: scripts=%d (%lu B, %d unlocked) "
-		  "clones=%d/%d lists=%d/%d nodes=%d/%d tablemem=%lu segmem=%lu | "
+		  "clones=%d/%d lists=%d/%d nodes=%d/%d tablemem=%lu "
+		  "hunks=%d/%d (%lu B) dynmem=%d (%lu B) locals=%d sysstr=%d "
+		  "gfxpxm=%d widgets=%d reslru=%d reslock=%d | "
 		  "uord=%d ford=%d arena=%d chunks=%d\n",
 		  nr, scripts, (unsigned long) script_bytes, scripts_unlocked,
 		  clones_used, clones_cap, lists_used, lists_cap,
 		  nodes_used, nodes_cap, (unsigned long) table_bytes,
-		  (unsigned long) s->seg_manager.mem_allocated,
+		  hunks_used, hunks_cap, (unsigned long) hunk_bytes,
+		  dynmem_nr, (unsigned long) dynmem_bytes, locals_nr, sysstr_nr,
+		  gfx_pixmaps_live, gfxw_widgets_live,
+		  s->resmgr->memory_lru, s->resmgr->memory_locked,
 		  mi.uordblks, mi.fordblks, mi.arena, mi.ordblks);
 }
 #endif
