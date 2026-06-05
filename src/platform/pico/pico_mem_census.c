@@ -52,23 +52,25 @@ int    pico_census_total_count = 0;          /* live blocks, all buckets */
 /* Suppresses inner accounting when calloc/realloc call malloc/free internally. */
 static int census_depth = 0;
 
-/* ── Call-site tagging for the 256-511 byte bucket (the per-revisit leaker) ──
+/* ── Call-site tagging for the 32-127 byte buckets (the per-restore leaker) ──
  * The histogram above localizes the leak to a size class; this names the
  * source line. sci_memory.c calls census_site_register() after every
  * successful sci_malloc/sci_calloc, passing the block's __FILE__/__LINE__ (it
  * already carries them). We record {ptr -> site} only for blocks whose usable
- * size lands in [256,512). Every free routes through __wrap_free (raw free()
+ * size lands in [32,128). Every free routes through __wrap_free (raw free()
  * too, which is how the gfx layer releases sci_malloc'd blocks), so
  * deregistration by ptr there is symmetric regardless of which API freed it.
- * Diff a site's live_count across same-room revisits → the growing site is the
- * leak. Tracking only one bucket keeps the ptr table small and the hooks cheap.
+ * Diff a site's live_count across same-room restores → the growing site is the
+ * leak. The measured restore leak is ~15 blocks/restore in [32,64) plus ~3 in
+ * [64,128), so this window brackets it. Many more distinct call sites emit
+ * small blocks than 256B blocks, hence the larger site table.
  *
  * Site identity is the (file-pointer, line) pair: __FILE__ is a string literal
  * with a stable address, so comparing the pointer is enough and avoids strcmp. */
-#define SITE_LO 256
-#define SITE_HI 512
-#define CENSUS_NSITES   96
-#define CENSUS_NPTRS    2048   /* power of two; > peak live 256-byte blocks */
+#define SITE_LO 32
+#define SITE_HI 128
+#define CENSUS_NSITES   192
+#define CENSUS_NPTRS    2048   /* power of two; > peak live 32-127 byte blocks */
 
 struct census_site { const char *file; int line; int live_count; size_t live_bytes; };
 struct census_ptr  { void *ptr; int site; unsigned usable; };

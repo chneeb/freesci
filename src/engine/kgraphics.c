@@ -1129,7 +1129,32 @@ kOnControl(state_t *s, int funct_nr, int argc, reg_t *argv)
 		xlen = SKPV(arg+2) - xstart;
 	}
 
-	return make_reg(0, gfxop_scan_bitmask(s->gfx_state, gfx_rect(xstart, ystart + 10, xlen, ylen), map));
+	{
+		int _oc = gfxop_scan_bitmask(s->gfx_state,
+					     gfx_rect(xstart, ystart + 10, xlen, ylen), map);
+#ifdef HAVE_PICO
+		/* Elevator-pickup probe: rm004::doit gates the trash-bucket scoop on
+		   (ego onControl == 3).  Log control-mask scans whenever the bitmask
+		   changes so pico.log shows what value the script actually sees as
+		   Roger steps onto the elevator spot.  Throttled to transitions only. */
+		if (map & GFX_MASK_CONTROL) {
+			static int _last = -1;
+			if (_oc != _last) {
+				gfx_state_t *_gs = s->gfx_state;
+				gfxr_pic_t *_p = (_gs->pic_unscaled) ? _gs->pic_unscaled : _gs->pic;
+				gfx_pixmap_t *_cm = _p ? _p->control_map : NULL;
+				_last = _oc;
+				sciprintf("[oc] rect=(%d,%d %dx%d) -> bitmask=%d  cm=%s valid=%d addr=%lu idata=%p\n",
+					  xstart, ystart + 10, xlen, ylen, _oc,
+					  _cm ? "y" : "NULL",
+					  _cm ? _cm->psram_valid : -1,
+					  _cm ? (unsigned long)_cm->psram_addr : 0,
+					  (void *)(_cm ? _cm->index_data : NULL));
+			}
+		}
+#endif
+		return make_reg(0, _oc);
+	}
 }
 
 void

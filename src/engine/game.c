@@ -825,6 +825,9 @@ game_exit(state_t *s)
 
 	sci_free(s->game_name);
 
+	free(s->game_version);
+	s->game_version = NULL;
+
 	return 0;
 }
 

@@ -261,6 +261,59 @@ with the offending index — **diagnostic, not silent**, so it can't mask a beni
 (~64000–64500) vs a wild value. This is retained as defense-in-depth and as a probe for the still-open
 trash-elevator fault: if that warning fires there, the OOB write is implicated; if not, look elsewhere.
 
+### RESOLVED (elevator) + LOCALIZED (per-restore leak) — savegame-restore control map starved by a clone-variables leak
+
+**Symptom:** SQ3's trash elevator (room 4) picked Roger up on a fresh boot but, after *several* savegame
+restores, stopped — `kOnControl` returned bitmask **0** (no collision) instead of **3** (the scoop). The
+user correctly guessed "a leak." The elevator gate is `rm004::doit` requiring `ego onControl == 3`;
+`kOnControl` (`kgraphics.c`) returns `gfxop_scan_bitmask(...)` = `retval |= (1<<v)` per control colour
+(bg colour 0 → bit 1; scoop → bits 0+1 = 3; 0 = control map absent/`psram_valid=0`).
+
+**Root chain (confirmed from pico.log):** every restore runs `replay()`, which re-enters room 4 and
+re-decodes control pic 2052 into a raw `malloc((GFXR_AUX_MAP_SIZE+1)>>1)` = 32000-byte nibble buffer
+(`sci_resmgr.c`). A per-restore heap leak (below) ratcheted `uordblks` up until that `malloc(32000)`
+returned NULL → graceful degrade (skip Pass 2, `psram_valid=0`, GFXWARN) → scan returns 0 → elevator
+dead. So the **elevator code is correct** (the `[oc]`/`[ctl]` probes show `bitmask=3 cm=y valid=1
+addr=76664` whenever the map decoded *and* Roger was on the spot, even after many restores); the failure
+was purely the control decode being starved by accumulated leakage.
+
+**Leak hunt (static audit + the `[32,128)` SITES tagger).** `game_exit` fully tears down the old
+`state_t` each restore, so an *accumulating* leak must live in a structure that survives teardown or be
+an orphaned sub-alloc. Static audit found every major restore/teardown path balanced (menubar,
+sys_strings, song iterators, scripts/objects/code/obj_indices/locals, clones/lists/nodes, classtable,
+file_handles, visual tree, CFSML refstructs, adopted parser/selector/kernel tables) **except** one
+confirmed teardown miss — see fix below. To name the dominant leaker, the census call-site tagger
+(`pico_mem_census.c`) was retargeted from the `[256,512)` bucket to **`[32,128)`** (where the measured
+~1.2 KB/restore lived) and `CENSUS_NSITES` widened 96→192. The retarget worked: across one session the
+`[mem] SITES256:` line showed exactly one site climbing monotonically while all others stayed flat —
+**`kscripts.c:212`** (`kClone` allocating `clone_obj->variables`): live blocks **19 → 38 → 49 → 63 → 93
+→ 165** over ~8 restores, while the live room only ever held `clones=11/88`. So ~150 clone-variable
+blocks (~48 B each) were orphaned.
+
+- **DONE — `game_version` teardown leak (small, certain).** `game_exit` (`game.c`) now does
+  `free(s->game_version); s->game_version = NULL;`. It was *only* freed in `kSaveGame` (`kfile.c:937`),
+  never on the restore-teardown path, where it is `sci_malloc`'d via `_cfsml_read_string`
+  (`savegame.c:2065`). Plain `free()` (not `sci_free`) on purpose: `sci_free(NULL)` hits `BREAKPOINT()`,
+  whereas `free`/`__wrap_free` guard NULL; initial state is `sci_calloc`'d so the field starts NULL.
+  ~10 B/restore. (Note: freeing `sci_malloc`'d memory via raw `free` drifts the known-broken `scilive`
+  counter but not `uordblks` — consistent with existing accepted behaviour.)
+
+- **OPEN but PARKED (stable) — clone-`variables` leak (`kscripts.c:212`, the dominant ~15-block/restore
+  leaker).** `kClone` `sci_malloc`s `clone_obj->variables` separately from the clone table slot.
+  `kDisposeClone` only flags `OBJECT_FLAG_FREED`; `run_gc()` reclaims the **table slot** but (apparently)
+  not the `variables` block, so orphans accumulate through play/restores and are swept only by the final
+  `sm_destroy` at quit (the session ends clean: `used` 274 K → **17 K** at the chooser — no orphan
+  survives process teardown). **Left unfixed per user (2026-06-05): stable.** Each orphan is ~48 B and GC
+  cadence keeps the heap under the ceiling for normal sessions. If a future session OOMs the control
+  decode again after heavy cloning/restores, fix here: free `clone->variables` when GC reclaims a
+  `FREED` clone (check the GC clone-reclaim path vs `sm_destroy`'s `_sm_deallocate` MEM_OBJ_CLONES case).
+
+**Diagnostic probes left in the tree (all `HAVE_PICO`-gated, strip when the clone leak is closed):**
+`[oc]` (`kgraphics.c` `kOnControl`, logs control-mask scans on transition), `[ctl]` (`sci_resmgr.c`,
+counts non-bg control nibbles post-decode so a blank map vs a stale-address read are distinguishable),
+and the retargeted `[32,128)` census/SITES tagger (kept instrumentation — the regression watch for any
+future per-restore growth; diff a SITES site's live_count across same-room restores to name a leaker).
+
 ### OPEN — corruption confirmed — branch-to-NULL HardFault (death-scene / 4ded2752)
 
 The captured fault dump for the 4ded2752 session is a **jump to address 0**, NOT the GC

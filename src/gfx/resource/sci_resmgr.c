@@ -250,6 +250,20 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 				cmap->psram_addr  = psram_alloc(sz);
 				cmap->psram_valid = 1;
 				psram_store(cmap->psram_addr, cmap->index_data, sz);
+				/* Probe: count non-background control nibbles the decode produced,
+				   so a blank map (e.g. after restore) is distinguishable from a
+				   stale/wrong-address read on the scan side ([oc] probe). */
+				{
+					size_t _i, _nz = 0;
+					for (_i = 0; _i < sz; _i++) {
+						uint8_t _b = cmap->index_data[_i];
+						if (_b & 0x0f) _nz++;
+						if (_b & 0xf0) _nz++;
+					}
+					sciprintf("[ctl] pic id=%d decoded nonzero=%u/%u addr=%lu\n",
+						  (int)res->id, (unsigned)_nz, (unsigned)npix,
+						  (unsigned long)cmap->psram_addr);
+				}
 				free(cmap->index_data);
 				cmap->index_data = NULL;
 			}
