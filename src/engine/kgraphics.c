@@ -31,7 +31,7 @@
 #include "sci_graphics.h"
 #include <sci_widgets.h>
 
-#ifdef HAVE_PICO
+#if defined(HAVE_PICO) || defined(__linux__)
 #include <malloc.h>
 #endif
 
@@ -1137,6 +1137,26 @@ _k_view_list_free_backgrounds(state_t *s, view_object_t *list, int list_nr);
 
 int sci01_priority_table_flags = 0;
 
+#if !defined(HAVE_PICO) && defined(__linux__)
+/* Desktop per-room mallinfo probe (gated behind FREESCI_MEMPROBE=1).
+   Mirrors the Pico [mem] BREAKDOWN line so room 3->4->3 churn runs can be
+   diffed against device logs. Small-block accumulation (the suspected
+   save-under churn) shows in uordblks; large SDL surfaces are mmap'd and
+   escape mallinfo, which keeps the signal clean. */
+static void
+desktop_mem_probe(int nr)
+{
+	struct mallinfo mi;
+
+	if (!getenv("FREESCI_MEMPROBE"))
+		return;
+
+	mi = mallinfo();
+	sciprintf("[mem] room nr=%d: uord=%d ford=%d arena=%d chunks=%d\n",
+		  nr, mi.uordblks, mi.fordblks, mi.arena, mi.ordblks);
+}
+#endif
+
 #ifdef HAVE_PICO
 /* Per-room SRAM breakdown probe: where do the live bytes go?
    Walks the seg-manager heap to tally loaded scripts (and their hot buf
@@ -1171,6 +1191,9 @@ pico_mem_breakdown(state_t *s, int nr)
 	extern int gfx_pixmaps_live;   /* gfx_tools.c — net live pixmap count */
 	extern int gfxw_widgets_live;  /* widgets.c   — net live widget count  */
 	extern gfx_pixmap_t *gfx_pixmap_registry; /* gfx_tools.c — live pixmap list */
+	extern int pico_grab_sram_live, pico_grab_sram_total; /* pico_driver.c save-unders */
+	extern int pico_free_sram_total, pico_grab_psram_total;
+	extern size_t pico_grab_sram_bytes;
 	gfx_pixmap_t *rp;
 	size_t pxm_bytes = 0;
 	int big_id = 0, big_loop = 0, big_cel = 0;
@@ -1325,6 +1348,7 @@ pico_mem_breakdown(state_t *s, int nr)
 		  "clones=%d/%d lists=%d/%d nodes=%d/%d tablemem=%lu "
 		  "hunks=%d/%d (%lu B) dynmem=%d (%lu B) locals=%d sysstr=%d "
 		  "gfxpxm=%d (%lu B, big=%06x/%d/%d %lu B, bad=%d/%d) widgets=%d "
+		  "grab=%d/%d (%lu B live) gfree=%d psgrab=%d "
 		  "reslru=%d reslock=%d | "
 		  "scilive=%lu rawgap=%ld "
 		  "uord=%d ford=%d arena=%d chunks=%d\n",
@@ -1340,6 +1364,9 @@ pico_mem_breakdown(state_t *s, int nr)
 		  big_id, big_loop, big_cel, (unsigned long) big_bytes,
 		  pxm_bad, pxm_walked,
 		  gfxw_widgets_live,
+		  pico_grab_sram_live, pico_grab_sram_total,
+		  (unsigned long) pico_grab_sram_bytes,
+		  pico_free_sram_total, pico_grab_psram_total,
 		  s->resmgr->memory_lru, s->resmgr->memory_locked,
 		  (unsigned long) g_sci_live_bytes,
 		  (long) ((long) mi.uordblks - (long) g_sci_live_bytes),
@@ -1442,6 +1469,8 @@ kDrawPic(state_t *s, int funct_nr, int argc, reg_t *argv)
 
 #ifdef HAVE_PICO
 	pico_mem_breakdown(s, pic_nr);
+#elif defined(__linux__)
+	desktop_mem_probe(pic_nr);
 #endif
 
 	return s->r_acc;

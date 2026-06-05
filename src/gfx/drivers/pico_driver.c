@@ -484,6 +484,17 @@ void pico_render_background(gfx_driver_t *drv)
 /* Pixmap operations (no registry — engine owns pxm->data)            */
 /* ------------------------------------------------------------------ */
 
+/* Save-under grab/free accounting (diagnostic for the ~35KB/revisit leak hunt;
+   printed on the [mem] BREAKDOWN line). SRAM grabs are sci_malloc'd and freed
+   individually; PSRAM grabs are bump-allocated and only reclaimed at
+   psram_reset() on room change. If sram_live fails to return to baseline across
+   same-room revisits, save-unders are the leak. */
+int    pico_grab_sram_live  = 0;   /* live SRAM grabs (grab++ / free--)        */
+size_t pico_grab_sram_bytes = 0;   /* live SRAM grab bytes                     */
+int    pico_grab_sram_total = 0;   /* cumulative SRAM grabs                    */
+int    pico_free_sram_total = 0;   /* cumulative SRAM frees                    */
+int    pico_grab_psram_total = 0;  /* cumulative PSRAM grabs (since reset)     */
+
 static int pico_register_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm)
 {
     (void)drv; (void)pxm;
@@ -496,6 +507,9 @@ static int pico_unregister_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm)
     if (pxm->internal.handle == PICO_HANDLE_GRABBED) {
         if (!pxm->internal.info && pxm->data) {
             /* SRAM grab: data was allocated by grab_pixmap */
+            pico_grab_sram_live--;
+            pico_grab_sram_bytes -= (size_t)pxm->xl * pxm->yl;
+            pico_free_sram_total++;
             sci_free(pxm->data);
         }
         /* PSRAM grab (internal.info != NULL): bump-allocated, reclaimed on psram_reset */
@@ -608,11 +622,15 @@ static int pico_grab_pixmap(struct _gfx_driver *drv, rect_t src,
                             src.xl);
             pxm->data = (uint8_t *)(uintptr_t)addr;
             pxm->internal.info = (void *)(uintptr_t)1;
+            pico_grab_psram_total++;
         } else {
             /* Small grab: SRAM */
             if (!pxm->data) {
                 pxm->data = (uint8_t *)sci_malloc(sz);
                 if (!pxm->data) return GFX_FATAL;
+                pico_grab_sram_live++;
+                pico_grab_sram_bytes += sz;
+                pico_grab_sram_total++;
             }
             for (int row = 0; row < src.yl; row++)
                 memcpy(pxm->data + row * src.xl,

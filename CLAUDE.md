@@ -423,11 +423,50 @@ Two distinct pressures, established by the per-room breakdown probe:
 
    Remaining untracked suspects (short list): **fonts** (`gfx_bitmap_font_t`, cached and NOT freed on room
    change), the gfx-resource **sbtree node** structures (kept alive across rooms), and driver-side state.
-   The decisive next step is no longer a counter but a **`--wrap` malloc census** on desktop: build with
-   `-Wl,--wrap=malloc,--wrap=free`, log size + return-address per call, bounce room 3→4→3 with
-   `--disable-mouse`, and diff allocations still-live after each round-trip — that names the leaking call
-   site directly, independent of the probe's blind spot. (`scilive`/`rawgap` on the BREAKDOWN line are the
-   known-broken counters — sci_malloc'd memory freed via raw `free()` makes `scilive` ≫ `uord`; ignore them.)
+
+   **DESKTOP DOES NOT REPRODUCE — the leak is Pico-only code, NOT shared engine code (desktop probe
+   session).** A desktop mallinfo probe was wired up (`desktop_mem_probe`, `kgraphics.c`, gated behind
+   `FREESCI_MEMPROBE=1`, prints the same `uord/ford/arena/chunks` as the Pico BREAKDOWN line) and run with
+   `--disable-mouse` while bouncing SQ3 room 3↔4 a dozen times with message-window churn. Result: **`uord`
+   is flat.** Room 4 oscillated around 23.698 M with **no trend** (one inter-visit delta was *negative*);
+   room 3 decelerated hard toward a plateau (deltas collapsed +26 KB → +5 KB → +2 KB and stopped climbing —
+   the high-water-mark signature of clone/node/list tables + glibc free-list caching settling, not a
+   per-revisit leak). `arena` was **pinned** at 26 079 232 from room 2 on — glibc never grew the heap across
+   the whole bounce; `chunks` bounced 175–249 with no trend. Contrast Pico's sustained **+35 KB on every
+   revisit**. This is **decisive**: any leak in *shared* code would surface as the same small-block growth in
+   desktop `uord` (large SDL surfaces are mmap'd and escape mallinfo, but the Pico growth was measured in
+   `uord` = small-block heap, so the shared small-block paths are the apples-to-apples comparison — and
+   they're flat). So the ~35 KB/revisit lives in the **`HAVE_PICO`-only allocators**: the `pico_driver.c`
+   save-under grab path or the Pico pixmap registry — exactly the suspects the desktop massif run alone
+   could not rule out. This **retires** the `--wrap` malloc census as the next step (it would profile shared
+   code, which is proven clean) and the shared-code suspects above (fonts/sbtree).
+
+   **SAVE-UNDERS RULED OUT — grab/free balance counter (device session 2718a104).** `pico_driver.c`
+   keeps `pico_grab_sram_live/total/bytes`, `pico_free_sram_total`, `pico_grab_psram_total` and the
+   BREAKDOWN line prints them as `grab=<live>/<total> (<bytes> B live) gfree=<n> psgrab=<n>`. SRAM grabs are
+   `sci_malloc`'d in `pico_grab_pixmap` (≤4096 B regions) and freed in `pico_unregister_pixmap`; PSRAM grabs
+   (>4096 B) are bump-allocated and only reclaimed at `psram_reset()` on room change. **Result:**
+   `grab=1/1 (256 B live) gfree=0` stayed **constant the entire session** (walk around → type parser
+   commands → bounce room 3↔4 multiple times). SRAM save-unders do **not** leak — they are NOT the
+   ~35KB/revisit growth. (`psgrab` climbed +2/room but those are PSRAM, reclaimed at every `psram_reset`.)
+   The session ended in a **fragmentation OOM** (`malloc 12664 failed` at `decompress0.c:303`, free=20432
+   but heap 94% full: used 416332 / arena 443484) — a contiguous decode block denied while KB remained
+   free, the downstream consequence of the baseline climbing, NOT a corruption smash (clean `[OOM]` halt,
+   no garbage BFAR). (`scilive`/`rawgap` on the BREAKDOWN line are the known-broken counters — sci_malloc'd
+   memory freed via raw `free()` makes `scilive` ≫ `uord`; ignore them.)
+
+   **TEXT-WIDGET DISPOSE PATH RULED OUT (static audit).** The message-window text free chain is balanced:
+   `_gfxwop_text_free` (`widgets.c:1135` frees `text->text`) → `_gfxwop_basic_free` (`409`) →
+   `_gfxw_unallocate_widget` (`221-228` frees `text_handle` via `gfxop_free_text`). Handle + its per-line
+   pixmaps are released on dispose. The text widget itself is not the leak.
+
+   **Still untracked — the per-window-open accumulator that survives a room change.** A room change frees
+   the PIC and VIEW gfx-resource trees + `psram_reset()` (`resmgr.c:222-246`), so the leak is neither.
+   `gfxr_free_all_pics` does **not** free the FONT or CURSOR resource trees — but a font caches once, it
+   wouldn't grow *per churn*, so fonts are an unlikely sole cause. The growth tracks message-window churn
+   amount (room-3 entries after typing grow ~9-13KB; room-4 entries with no typing +1-3KB) and accumulates
+   across the room-4 round trip. Identity of the per-window-open SRAM allocation is still open — next
+   suspect to instrument is the gfx-resource sbtree / font-cache path, NOT save-unders or text widgets.
 
 **Evidence (one flashed SQ3 session, intro → trash elevator → conveyor death):**
 - `scripts`: 15 → 18, ~35KB → ~45KB, then **plateaus** (not unbounded).
@@ -616,19 +655,57 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
    bursty-access PSRAM cache. Consequence: the items below are independent; there is no shared
    read-cache infrastructure and no ordering dependency on this item.
 
-1. **Vocab loading → re-enable the text parser.** `_init_vocabulary` (`game.c`, under `HAVE_PICO`)
-   NULLs `parser_words`/`parser_rules`/`parser_suffices`/`parser_branches` to save ~80KB, so
-   `kParse` matches an empty vocab and "look around" etc. do nothing. Vocab *is* genuinely read-only
-   after build → a real PSRAM candidate. Note this is **additive**: vocab is already NULL today, so
-   restoring it does not free steady-state SRAM (it spends it), and therefore does **not** unblock
-   the control-map item — keep them decoupled. Design constraint: `parser_rules`/`parser_nodes`
-   lifetime spans two kernel calls — built in `kParse` (`kstring.c`) and still read by `kSaid`
-   (`said.c:2523`) — so a "load, parse, free immediately" shim won't work; rules must survive until
-   Said runs. Two approaches: (a) load-on-demand and free-after-Said (reuses `vocab_get_words` /
-   `vocab_build_gnf`, but ~900 per-word mallocs risk fragmentation and the free-timing is fiddly), or
-   (b) PSRAM-resident packed vocab (one contiguous blob + small SRAM read path; GNF rules built into
-   a transient SRAM arena freed after Said — more work, robust). Measure first: one instrumented boot
-   for steady-state free heap, packed vocab size, and GNF build peak, then pick (a) vs (b).
+1. **Vocab loading → re-enable the text parser. (DESIGN DONE — code not started.)**
+   `_init_vocabulary` (`game.c:63-85`, under `HAVE_PICO`) NULLs `parser_words`/`parser_rules`/
+   `parser_suffices`/`parser_branches` to save ~80KB, so `kParse` matches an empty vocab and "look
+   around" etc. do nothing. Re-enabling just means running the existing `#else` branch
+   (`game.c:87-96`) on Pico too. This is **additive** SRAM spend, not a saving (vocab is NULL today),
+   so it does **not** unblock the control-map item — keep them decoupled.
+
+   **Code audit (verified, corrects the earlier lifetime note):** the four structures and their real
+   access patterns —
+   | Structure | Type | Loaded by | Read by | Lifetime |
+   |---|---|---|---|---|
+   | `parser_words` | `word_t**`, ~900 entries each its own `sci_malloc` | `vocab_get_words` (`vocab.c:72`) | `vocab_tokenize_string` in **kParse** (bsearch+strcmp) | per-kParse |
+   | `parser_suffices` | `suffix_t**`, tens | `vocab_get_suffices` | `vocab_tokenize_string` in **kParse** | per-kParse |
+   | `parser_branches` | `parse_tree_branch_t*` flat array, 44 B each | `vocab_get_branches` | `vocab_build_gnf` (init) + `vocab_gnf_parse` in **kParse** | per-kParse |
+   | `parser_rules` | GNF linked list (`parse_rule_list_t`, pointer-chasing) | `vocab_build_gnf` (`grammar.c:518`) from branches | `vocab_gnf_parse` in **kParse** | per-kParse |
+
+   **DECISIVE: all four are consumed entirely *within* `kParse`.** The only artifact crossing the
+   `kParse → kSaid` boundary is `parser_nodes[500]` (`engine.h:230`), which is **already a resident
+   fixed array in `state_t`** — `kSaid` (`said.c:2528`) reads `parser_nodes` only, never the rules.
+   So the old "rules must survive until Said runs" worry is **WRONG**: rules can be freed at the end
+   of `kParse`. (`vocab_gnf_parse`, the only rule consumer, is called from `kstring.c:331` in kParse,
+   never from said.c.) Also: `parser_rules` is **input-independent** — a pure function of
+   `parser_branches`, identical all game; the only question is resident-once vs rebuilt-per-command.
+
+   **PSRAM lifetime gotcha (the real constraint):** `psram_alloc` (`psram_alloc.c:12`) is a single-
+   offset bump allocator; `psram_reset()` rewinds to **0** on **every room change**
+   (`gfxr_free_all_pics`). Vocab must survive room changes → it cannot sit in the resettable region.
+   **Required:** add a **floor** — allocate vocab at boot, then make `psram_reset()` rewind to the
+   floor (above vocab) not 0. PSRAM is 8MB vs ~80KB vocab, so space is a non-issue.
+
+   **Recommended design (option B, refined):**
+   - *Init:* load words/suffices/branches; pack `parser_words` into **one contiguous PSRAM blob**
+     (offset table + packed records), replacing the ~900 small `sci_malloc`s (themselves a
+     fragmentation source); keep branches+suffices small-SRAM-resident (~3-4 KB, cheap) or in the
+     blob; `psram_set_floor()`; free the SRAM originals.
+   - *Per kParse:* page the words blob into **one** ~23 KB SRAM scratch (not 900 allocs), build GNF
+     rules in a transient SRAM arena, parse into `parser_nodes`, free scratch + rules.
+   - *kSaid:* unchanged. Net steady-state SRAM ≈ 0; per-command cost is a few large allocs.
+
+   **Measure first (step 1, before coding):** throwaway boot probe printing words count + packed
+   size, branches_nr, suffices count, GNF rule count (`_allocd_rules`, `grammar.c:40`) + bytes, and
+   GNF-build transient peak. Decides one tradeoff: GNF rules small (<~10 KB) → keep them resident in
+   SRAM (no per-command rebuild); large (40 KB+) → rebuild per-command as above.
+
+   **File-change checklist:** `psram_alloc.{h,c}` (add `psram_set_floor()`); `game.c`
+   `_init_vocabulary`/`_free_vocabulary` (Pico load→pack→floor path); `vocab.c` (pack + packed-blob
+   read/bsearch helper); `kstring.c` `kParse` (page scratch + transient GNF + free after parse);
+   optional `vocab_psram.c` for the helpers. **Risks:** per-command GNF rebuild CPU (≤30 fixed-point
+   passes, once per typed command — measure); PSRAM read latency in bsearch (paging whole blob to
+   SRAM scratch likely beats per-compare PSRAM reads); `synonyms` are loaded separately by scripts
+   (`kSetSynonyms`), already work on Pico — out of scope.
 
 2. **Control-map collision → DONE FOR NOW (flag ON, works in visited rooms).** Code is written and
    gated behind `PICO_DECODE_CONTROL_MAP` (CMake option `PICO_CONTROL_MAP`, **now default ON**).
@@ -641,20 +718,19 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
    - **Remaining peak-shrink lever (if a new room OOMs):** bit-pack `aux_map`, or offload the priority
      map to PSRAM during decode (the other 64KB live buffer) — **not** a steady-state-SRAM problem, so
      the vocab item does not help here.
-   - **TODO before fully parking — make the control-map OOM self-report.** The 32KB control buffer at
-     `sci_resmgr.c:157` uses **raw `malloc`**, not `sci_malloc`, so on NULL it returns `GFX_ERROR`
-     *silently* (no `pico_oom_report` LCD dump — you'd see a garbled/missing pic, maybe a `GFXERROR`
-     over serial, but no crash message). This is the allocation the control-map feature *added*, i.e.
-     the one most likely to fail first in an unvisited room, and the one that currently wouldn't
-     announce itself. **Do NOT just switch it to `sci_malloc`:** on Pico `sci_malloc` is fail-fast —
-     `pico_oom_report` halts the system, never returns NULL (`sci_memory.c:70-72`), which would turn
-     this *recoverable* `GFX_ERROR` path into a hard halt. Correct fix: keep raw `malloc`, and on the
-     NULL branch emit a clear LCD line (call `pico_oom_report` or a lighter print) **then still
-     `return GFX_ERROR`** — legible AND recoverable. (This fail-fast vs fail-soft split is exactly why
-     the engine mixes `sci_malloc` and raw `malloc`: raw `malloc` is used wherever the caller has a
-     real recovery path.)
-   - **Scope caveat:** restores only *static* pic control; runtime actor-to-actor blocking writes to
-     `state->control_map`, NULL on Pico — separate, lower priority.
+   - **OOM self-report — DONE (supersedes the old TODO).** The 32KB control buffer
+     (`sci_resmgr.c:176`, raw `malloc` deliberately, since the caller has a real recovery path) already
+     degrades gracefully on NULL: it skips Pass 2, leaves `control_map->index_data` NULL /
+     `psram_valid` 0 (so `gfxop_scan_bitmask` returns 0 = no-collision, per-pic and recoverable on the
+     next decode), and emits `GFXWARN("control map: 32KB alloc failed ... decoding without collision")`
+     → `sciprintf` → pico.log over serial. That is the "legible AND recoverable" outcome the old TODO
+     wanted — no further work. (It is **not** routed to the LCD on purpose: `pico_oom_report`/LCD is for
+     *fatal halts*; splatting the LCD for a recoverable mid-game degrade would be wrong.) Nothing left
+     to implement for this item; it is fully parked unless an unvisited room hits the peak-shrink lever
+     above.
+   - **Scope caveat (now a known limitation, not roadmap work):** restores only *static* pic control;
+     runtime actor-to-actor blocking writes to `state->control_map`, which is NULL on Pico — see "Known
+     graphics limitations on Pico". Lower priority.
 
 3. **Sound *(independent track — gated on heap headroom, not CPU)*.** The whole sound stack
    (`scisound`/`scisoftseq`/`scipcm`/`scimixer`) already links into the firmware but is dormant:
