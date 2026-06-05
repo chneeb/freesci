@@ -436,8 +436,11 @@ Two distinct pressures, established by the per-room breakdown probe:
 - `uord` (live bytes): ~287KB during early play → +79KB death-animation spike to ~417KB (≈97% of the
   427744-byte arena ceiling).
 - Crash: `malloc 2745 failed, free=10720` at `gfx_tools.c:256` `gfx_pixmap_alloc_index_data` — a **view-cel
-  index buffer**. 10720 bytes free, but no 2745-byte contiguous run among 62 fragments. ⇒ roadmap candidate
-  #3 (view `index_data` → PSRAM) directly targets this peak.
+  index buffer**. 10720 bytes free, but no 2745-byte contiguous run among 62 fragments. NB the view
+  `index_data` → PSRAM offload is **already DONE** (`sci_resmgr.c:377-399`, all loops/cels), but it frees
+  the cel buffer *after* decode — this alloc is the *transient decode-time* peak, which the offload does
+  NOT shrink. So the remaining lever here is the transient per-cel decode peak (decode into a reused
+  scratch) or the ~35KB/revisit gfx-region leak, **not** re-doing the (completed) view offload.
 
 The earlier 961d1fc2 crash (`decompress0` needed 12664 with 19048 free) is the same class — a small
 contiguous block denied while KB remain free. SCI0's working set already runs near the ceiling; normal play
@@ -446,6 +449,56 @@ close message windows = small alloc/free churn). No leak is required to OOM.
 
 NB this is distinct from the "aspb" heap *corruption* above (a pointer overwritten with ASCII = an
 overflow, not exhaustion). Fragmentation OOM ≠ metadata smash; both are open, tracked separately.
+
+### WORKING-AS-DESIGNED — the `malloc 64000 failed` log lines are the deferred→pinned fallback, not a bug
+
+A pico.log can show one or two `malloc 64000 failed to allocate memory` lines per room change (e.g.
+55e45371 lines 54-55) and **still keep running** (no `[OOM]` halt, the next room draws). That is the
+**designed deferred-visual fallback recovering**, not a failure to investigate. Decode tree:
+
+- There are exactly **two raw `malloc(64000)` sites**, both for the *same* pic-decode visual buffer:
+  the **deferred** alloc (`sci_resmgr.c:155`, the normal path) and the **early-pin fallback**
+  (`operations.c:2281`, reached only if the deferred one failed). Raw `malloc` → the pico-sdk wrapper
+  prints "malloc 64000 failed" *unconditionally* on NULL, but neither site halts — they recover.
+- **Every OTHER 64KB consumer is fail-fast, not recoverable:** `visual[0]` (`pico_alloc_visual` →
+  `sci_malloc`) and the priority map (`gfx_pixmap_alloc_index_data` → `sci_malloc`, `gfx_tools.c:307`)
+  route through `sci_malloc`, which on Pico calls `pico_oom_report` → **LCD `[OOM]` + halt**. So if a
+  log shows `malloc 64000 failed` *without* a following `[OOM]` halt, it is provably the deferred
+  visual buffer (the only recoverable 64KB alloc), never visual[0] or priority.
+- **Why deferred is the default (the tradeoff is real and asymmetric).** Deferred frees `visual[0]`
+  *before* the pic-resource decompress (`operations.c:2254`) so `decompress0` gets its ~12-61KB; the
+  cost is the late 64KB alloc can miss under post-decompress fragmentation → recover via early-pin
+  (free the half-built pic to re-coalesce, retry once). The alternative — pinning 64KB *through* the
+  decompress — would risk a `decompress0` OOM, and that path is `sci_malloc` = **fatal halt**, not
+  recoverable. So deferred is chosen precisely because its failure mode (a double-decode) is survivable.
+- **The only real cost of a deferred miss is a full double-decode** (`gfxr_get_pic` runs twice:
+  decompress + draw discarded, then redone with the pin) — a CPU hitch, not a crash. The
+  `GFXWARN("retrying with early pin")` at `operations.c:2283` is gated by gfx debug level, so the
+  recovery line usually does NOT appear — only the wrapper's bare "failed" does. Absence of the GFXWARN
+  is not evidence of non-recovery.
+- **To make it stop *happening* (not just recover):** lower baseline fragmentation so the deferred
+  alloc succeeds first-try. The view-cel offload lever is already pulled (DONE); the remaining levers
+  are the transient per-cel decode peak and the ~35KB/revisit gfx leak (see DIAGNOSIS above). This is
+  NOT a separate fix — it folds into the fragmentation/leak work.
+
+### Input-scaled allocations audit (reviewed — only VIS_MATRIX is a real watch item)
+
+A sweep for heap allocations with no fixed upper bound (they scale with game data, not a constant), and
+their current status — keep this so they aren't re-investigated cold:
+
+- **`vis_matrix` (`kpathing.c:1433`) — the one genuine input-scaled alloc, but small for SQ3.** It is
+  `sci_calloc(vertices * VIS_MATRIX_ROW_SIZE(vertices), 1)` where `VIS_MATRIX_ROW_SIZE(N) = ceil(N/8)` —
+  i.e. **bit-packed**, ~`N²/8` bytes, *not* `N²` (an earlier note claiming "~1MB for 1000 vertices,
+  one char per cell" was 8× too high; it's ~125KB @ 1000). `vertices` = the count of pathfinding-polygon
+  vertices in the current room (tens for SQ3, not thousands), so real risk on SQ3 is low. It remains the
+  only `O(input²)` single allocation, so if a future room/game stalls or OOMs inside `kAvoidPath`, cap
+  `vertices` here first. Freed at `kpathing.c:1294`.
+- **SCI script heap (`heap.c:44`, `sci_calloc(SCI_HEAP_SIZE,1)`)** — normal VM working memory, already
+  bounded by the resource LRU (`max_memory=1` → one script heap live at a time). Not a growth risk.
+- **Text layout `fragments` (`font.c:177`)** and **drawn-pic cache (`s->pics`, `kgraphics.c:1377-1385`)**
+  — both transient: `fragments` is a single upfront `sci_calloc` sized by `strlen(text)` and freed after
+  render (no doubling loop, despite an old note); `s->pics` high-water-marks (+4 grow, `drawn_nr` resets
+  per draw cycle) and is freed in `_free_graphics_input`. Neither accumulates across rooms. Dismissed.
 
 **Elevator boarding is gated on the control map decoding, which is fragmentation-sensitive.** `rm004::doit`
 requires `ego.onControl == 3`; `kOnControl` reads `pic->control_map`, which only exists if room 4's control
@@ -501,7 +554,8 @@ bytes + unlocked count, the clone/list/node tables (used/cap), seg-manager `mem_
 (`uord`=live, `ford`=free, `arena`, `chunks`=free-chunk count = fragmentation). Paired with the
 `[mem] room enter/ready` lines in `gfxop_new_pic` (`operations.c`), a single flashed session shows which of
 {scripts pile up, tables high-water, fragmentation climbs} is actually growing. This is what proved the
-no-leak diagnosis above — leave it in to measure before/after the view-cel offload.
+no-leak diagnosis above — leave it in to measure the ~35KB/revisit gfx-region growth. (The view-cel
+PSRAM offload is already DONE, `sci_resmgr.c:377-399` — not a pending before/after to measure.)
 
 **`bad=N/M` on the `gfxpxm` field is a probe FALSE-POSITIVE, not a leak (55e45371 session).** The
 breakdown's per-pixmap sanity check counts a node "bad" when it can't reconcile `data_size` against
