@@ -337,6 +337,8 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 	}
 
 	close(fh);
+	chdir(save_cwd);
+	free(save_cwd);
 }
 
 resource_t *

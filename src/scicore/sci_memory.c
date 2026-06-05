@@ -42,6 +42,12 @@
 extern void pico_oom_report(const char *what, unsigned long size,
 			    const char *file, int line, const char *funct);
 
+/* Call-site tagging for the leak census (pico_mem_census.c): records the
+   source line of every sci_malloc/sci_calloc whose block lands in the
+   256-511 byte bucket — the size class the per-revisit leak lives in. No-op
+   for out-of-range sizes. Deregistration is by ptr in __wrap_free. */
+extern void census_site_register(void *ptr, const char *file, int line);
+
 /* Running total of all sci_*-routed live bytes (actual block sizes via
    malloc_usable_size, so it matches mallinfo's accounting). The BREAKDOWN probe
    prints this; comparing its growth to mallinfo.uordblks splits an engine-side
@@ -79,7 +85,7 @@ _SCI_MALLOC(size_t size, const char *file, int line, const char *funct)
 #ifdef HAVE_PICO
 	res = malloc(size);
 	if (res == NULL) pico_oom_report("malloc", (unsigned long)size, file, line, funct);
-	else g_sci_live_bytes += malloc_usable_size(res);
+	else { g_sci_live_bytes += malloc_usable_size(res); census_site_register(res, file, line); }
 #else
 	ALLOC_MEM((res = malloc(size)), size, file, line, funct)
 #endif
@@ -102,7 +108,7 @@ _SCI_CALLOC(size_t num, size_t size, const char *file, int line, const char *fun
 #ifdef HAVE_PICO
 	res = calloc(num, size);
 	if (res == NULL) pico_oom_report("calloc", (unsigned long)(num * size), file, line, funct);
-	else g_sci_live_bytes += malloc_usable_size(res);
+	else { g_sci_live_bytes += malloc_usable_size(res); census_site_register(res, file, line); }
 #else
 	ALLOC_MEM((res = calloc(num, size)), num * size, file, line, funct)
 #endif
@@ -122,7 +128,7 @@ _SCI_REALLOC(void *ptr, size_t size, const char *file, int line, const char *fun
 		size_t old_usable = ptr ? malloc_usable_size(ptr) : 0;
 		res = realloc(ptr, size);
 		if (res == NULL) pico_oom_report("realloc", (unsigned long)size, file, line, funct);
-		else g_sci_live_bytes += malloc_usable_size(res) - old_usable;
+		else { g_sci_live_bytes += malloc_usable_size(res) - old_usable; census_site_register(res, file, line); }
 	}
 #else
 	ALLOC_MEM((res = realloc(ptr, size)), size, file, line, funct)

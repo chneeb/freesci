@@ -1194,6 +1194,12 @@ pico_mem_breakdown(state_t *s, int nr)
 	extern int pico_grab_sram_live, pico_grab_sram_total; /* pico_driver.c save-unders */
 	extern int pico_free_sram_total, pico_grab_psram_total;
 	extern size_t pico_grab_sram_bytes;
+	extern size_t pico_census_bytes[];   /* pico_mem_census.c — live bytes per size bucket */
+	extern int    pico_census_count[];
+	extern size_t pico_census_total_bytes;
+	extern int    pico_census_total_count;
+	extern void   census_dump_sites(void);  /* live [256,512) call sites */
+	size_t tracked_bytes;
 	gfx_pixmap_t *rp;
 	size_t pxm_bytes = 0;
 	int big_id = 0, big_loop = 0, big_cel = 0;
@@ -1339,6 +1345,16 @@ pico_mem_breakdown(state_t *s, int nr)
 	}
 
 	mi = mallinfo();
+
+	/* Sum of every byte category the breakdown can itemize. uord MINUS this is
+	   the "untracked" baseline — the region the ~35KB/revisit leak hides in.
+	   If untracked is what grows across same-room revisits, the leak is in
+	   allocations none of the walks above can see, and the CENSUS line below
+	   localizes it by size. */
+	tracked_bytes = script_bytes + objvar_bytes + clonevar_bytes
+		+ localblk_bytes + table_bytes + hunk_bytes + dynmem_bytes
+		+ pxm_bytes + pico_grab_sram_bytes;
+
 	/* resmgr LRU is capped at 32KB on Pico (main.c) and self-evicts, so
 	   reslru should plateau near its ceiling. reslock (locked resources)
 	   bypasses the cap entirely — if it climbs across same-room revisits,
@@ -1350,7 +1366,7 @@ pico_mem_breakdown(state_t *s, int nr)
 		  "gfxpxm=%d (%lu B, big=%06x/%d/%d %lu B, bad=%d/%d) widgets=%d "
 		  "grab=%d/%d (%lu B live) gfree=%d psgrab=%d "
 		  "reslru=%d reslock=%d | "
-		  "scilive=%lu rawgap=%ld "
+		  "scilive=%lu rawgap=%ld tracked=%lu untracked=%ld "
 		  "uord=%d ford=%d arena=%d chunks=%d\n",
 		  nr, scripts, (unsigned long) script_bytes, scripts_unlocked,
 		  (unsigned long) objvar_bytes, objs_nr,
@@ -1370,7 +1386,34 @@ pico_mem_breakdown(state_t *s, int nr)
 		  s->resmgr->memory_lru, s->resmgr->memory_locked,
 		  (unsigned long) g_sci_live_bytes,
 		  (long) ((long) mi.uordblks - (long) g_sci_live_bytes),
+		  (unsigned long) tracked_bytes,
+		  (long) ((long) mi.uordblks - (long) tracked_bytes),
 		  mi.uordblks, mi.fordblks, mi.arena, mi.ordblks);
+
+	/* Live-allocation size histogram (pico_mem_census.c). census_total should
+	   track uord closely (both are live malloc bytes). Diff the per-bucket
+	   counts across same-room revisits: the bucket that grows names the size
+	   class of the leaking allocation → its call site. Bucket b>=1 lower bound
+	   is 1<<(b+2) bytes; bucket 0 is <8 B. Only non-empty buckets printed. */
+	{
+		int b;
+		sciprintf("[mem] CENSUS nr=%d: total=%lu/%d |", nr,
+			  (unsigned long) pico_census_total_bytes,
+			  pico_census_total_count);
+		for (b = 0; b < 18; b++)
+			if (pico_census_count[b])
+				sciprintf(" %lu:%d/%lu",
+					  (unsigned long) (b == 0 ? 0 : (1u << (b + 2))),
+					  pico_census_count[b],
+					  (unsigned long) pico_census_bytes[b]);
+		sciprintf("\n");
+	}
+
+	/* Name the live 256-511 byte allocations by source line (the bucket the
+	   per-revisit leak lives in). Diff a site's count across same-room
+	   revisits → the growing site is the leak. Prints via printf to USB/UART
+	   (it carries __FILE__ strings; sciprintf's callback path is not needed). */
+	census_dump_sites();
 }
 #endif
 

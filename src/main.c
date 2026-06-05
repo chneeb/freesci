@@ -648,7 +648,11 @@ find_config(char *game_name, config_entry_t *conf, int conf_entries,
 static void
 init_console()
 {
-#ifdef WANT_CONSOLE
+#if defined(WANT_CONSOLE) && !defined(HAVE_PICO)
+	/* The gfx console scrollback (con_gfx_insert_string) stores every sciprintf
+	   line in an ever-growing, never-freed cluster list. Harmless on desktop;
+	   on Pico it's an unbounded leak and there's no on-screen console to read it,
+	   so leave _con_string_callback NULL and let sciprintf free its own buffer. */
 	con_gfx_init();
 #endif
 	con_hook_command(&c_quit, "quit", "", "console: Quits gracefully");

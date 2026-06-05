@@ -380,7 +380,39 @@ allocs on Pico, 16× more than desktop), so they trip on the damaged block first
 
 Record the root cause here once ASan pinpoints it.
 
-### DIAGNOSIS — Pico OOMs = transient peak + fragmentation, PLUS a real ~35KB/revisit accumulation
+### RESOLVED — the ~35KB/revisit accumulation was TWO caller-side leaks (cwd + console scrollback)
+
+The `--wrap` malloc census (`pico_mem_census.c`) plus the `SITES256:` call-site tag (tag every
+sci_malloc whose block lands in the 256–511 B bucket — the size class the census showed climbing — with
+its `__FILE__:__LINE__`, deregister by ptr in `__wrap_free`) named the two leaking sites outright. Both
+are pre-existing FreeSCI bugs, latent on desktop (roomy heap) and only fatal under Pico's ~444 KB ceiling:
+
+1. **`_scir_load_resource` leaked its saved cwd** (`resource.c`). It does `save_cwd = sci_getcwd()` (a
+   `sci_malloc(256)`) and both error paths `chdir(save_cwd); free(save_cwd)` — but the **success path**
+   (`close(fh)` → return) freed nothing. Every resource load (several per room) leaked one 256 B cwd
+   buffer → census site `tools.c:720` (the `sci_malloc` inside `sci_getcwd`) climbed ~+9/room, never
+   dropping. **Fix:** restore + free cwd before the success-path return too.
+2. **The gfx console scrollback grew unbounded** (`console.c` `sciprintf` → `con_gfx_insert_string`).
+   `WANT_CONSOLE` is defined unconditionally (`config.h.in`), so `con_gfx_init()` registered the string
+   callback, and every `sciprintf` line was stored forever in `con_buffer` (an ever-growing,
+   never-freed cluster list in `gfx_console.c`). With Pico's constant warning spam + message-window
+   churn this ratcheted up → census site `console.c:52`. **Fix:** skip `con_gfx_init()` on Pico
+   (`#if defined(WANT_CONSOLE) && !defined(HAVE_PICO)` in `main.c` `init_console`); `_con_string_callback`
+   stays NULL so `sciprintf` frees its own buffer. No on-screen console exists on Pico anyway.
+
+**Verified fixed (post-fix device session):** SQ3 walked + typed + bounced room 3↔4 six times, then a
+clean quit — no crash, no OOM. `untracked` held flat at ~199.7–201 K across all six room-4 revisits (no
+trend), `uord` pinned at ~266 K, arena stopped growing at 368 076, and BOTH former sites vanished from
+`SITES256:` (remaining sites are flat 1–4 block working-set entries). The census + tag are diagnostic
+build infrastructure — leave them in; `untracked` and `SITES256:` are now the regression watch for any
+future per-revisit growth.
+
+The history below is kept for context (how the leak was localized from "no leak" → untracked gfx region
+→ the two call sites). The transient-peak / fragmentation OOM (item 1 of the original diagnosis) is a
+*separate*, still-relevant pressure — a contiguous decode block can still be denied while KB remain free
+— but the baseline that pushed the heap toward that edge on every revisit is now gone.
+
+### DIAGNOSIS (HISTORICAL — leak now RESOLVED above) — transient peak + fragmentation, PLUS the (now-fixed) ~35KB/revisit accumulation
 
 Two distinct pressures, established by the per-room breakdown probe:
 
@@ -460,13 +492,40 @@ Two distinct pressures, established by the per-room breakdown probe:
    `_gfxw_unallocate_widget` (`221-228` frees `text_handle` via `gfxop_free_text`). Handle + its per-line
    pixmaps are released on dispose. The text widget itself is not the leak.
 
-   **Still untracked — the per-window-open accumulator that survives a room change.** A room change frees
-   the PIC and VIEW gfx-resource trees + `psram_reset()` (`resmgr.c:222-246`), so the leak is neither.
-   `gfxr_free_all_pics` does **not** free the FONT or CURSOR resource trees — but a font caches once, it
-   wouldn't grow *per churn*, so fonts are an unlikely sole cause. The growth tracks message-window churn
-   amount (room-3 entries after typing grow ~9-13KB; room-4 entries with no typing +1-3KB) and accumulates
-   across the room-4 round trip. Identity of the per-window-open SRAM allocation is still open — next
-   suspect to instrument is the gfx-resource sbtree / font-cache path, NOT save-unders or text widgets.
+   **SBTREE + FONT-CACHE RULED OUT (static audit).** Neither grows per window-open:
+   - **sbtree** (`sbtree.c`) is a **fixed pre-allocated cell table**. `sbtree_set` (`170-180`) writes into
+     an existing cell located by `locate()` — there is **no per-insertion `malloc`**, and the table cannot
+     grow at runtime. So the gfx-resource trees (PIC/VIEW/FONT/CURSOR, all sbtree-backed) add no SRAM as
+     entries are inserted; their only heap cost is the cell payloads, which the room-change frees already
+     account for (PIC/VIEW) or which cache once (FONT/CURSOR).
+   - **font cache** (`gfxr_get_font`, `resmgr.c:646-696`) allocates each font **once per font nr**, caches
+     it in the FONT sbtree, and returns the cached pointer on every subsequent call; built-in fonts (5x8,
+     6x10) are returned with **no allocation at all**. SQ3 uses a tiny fixed set of fonts → bounded, one-time
+     cost, **not** per-churn growth. Decisive corroboration: a one-time font alloc would also show up in
+     desktop `uord`, which was **flat** across the same room bounce — so any per-revisit growth cannot be the
+     (shared) font-cache code.
+
+   **Census now in place to catch the actual allocator (awaiting one device flash).** With save-unders,
+   text widgets, sbtree, and the font cache all ruled out by static audit, the next move is **runtime
+   instrumentation**, not more guessing. Two new probes are wired:
+   - **Untracked-gap line.** `pico_mem_breakdown` (`kgraphics.c`) now sums every category it *can* itemize
+     (scripts + objvar + clonevar + locals + tables + hunks + dynmem + pxm + grabbed save-unders) into
+     `tracked=`, and prints `untracked = uordblks − tracked` on the BREAKDOWN line. If `untracked` is what
+     climbs ~35KB/revisit, the leak is provably in allocations no category counts — confirming the gap is
+     real and sizing it precisely.
+   - **Live-allocation size histogram** (`src/platform/pico/pico_mem_census.c`, NEW). It provides its own
+     `__wrap_malloc/calloc/realloc/free`; the top-level `CMakeLists.txt` defines the `pico_malloc` target
+     itself **before** `pico_sdk_init()`, so the SDK's `if(NOT TARGET pico_malloc)` guard skips compiling
+     its own `malloc.c` (whose `WRAPPER_FUNC` would otherwise multiply-define ours, since the SDK adds
+     `malloc.c` as an INTERFACE source straight into the executable, not an archive). We re-add the
+     `-Wl,--wrap=*` flags so `__real_*` still resolve to picolibc's allocator. The census keys every
+     alloc **and** free on the block's actual `malloc_usable_size` — so the histogram is self-consistent
+     regardless of whether memory was taken via `sci_malloc` or raw `malloc` and freed via the other (the
+     drift that makes `scilive` useless). `pico_mem_breakdown` prints a `[mem] CENSUS` line of non-empty
+     buckets (`<lowerbound>:<count>/<bytes>`). **Diff a bucket across same-room revisits → the growing
+     bucket's size range points straight at the leaking call site.** Caveat: diagnostic build only — it
+     drops pico_malloc's malloc_mutex (safe here: FreeSCI allocates from core0 only) and uses a depth guard
+     so calloc/realloc calling malloc/free internally aren't double-counted.
 
 **Evidence (one flashed SQ3 session, intro → trash elevator → conveyor death):**
 - `scripts`: 15 → 18, ~35KB → ~45KB, then **plateaus** (not unbounded).
@@ -635,10 +694,11 @@ rose **427,744 → 444,136** (+16.4 KB observed; ~25 KB nominal across the first
   `.bss` (`adlib_sbi` 1152, `sci_adlib_vol_tables` 1024, `adlib_reg_L/R` 512, `KSL_TABLE`/`SL_TABLE`
   ~576, all from `opl2.c`/`adlib.c`/`fmopl.c`) is **deliberately kept** — that is the planned PWM-Adlib
   path (roadmap #3), so reclaiming it now just gets re-spent when sound lands.
-- **Static mining is now tapped out** (~28 KB total). The remaining wall is the **~35 KB/revisit
-  accumulation in the untracked gfx region** (see DIAGNOSIS above) — that is a *leak/growth* problem,
-  not a `.bss` problem, and the next move is a `--wrap malloc` census on desktop, not more static
-  conversion.
+- **Static mining is now tapped out** (~28 KB total). The ~35 KB/revisit accumulation that was the
+  remaining wall is now **RESOLVED** (two caller-side leaks: cwd + console scrollback — see the RESOLVED
+  note above). What's left is the *transient* decode peak + fragmentation OOM (a contiguous block denied
+  while KB remain free), not a steady-state baseline climb — attack it via the per-cel decode scratch or
+  control-map peak-shrink levers, not more `.bss` conversion.
 
 ### Pico roadmap (remaining work, prioritized)
 

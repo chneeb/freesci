@@ -29,6 +29,30 @@ if(PLATFORM STREQUAL "desktop")
 elseif(PLATFORM STREQUAL "pico")
     set(SCI_PLATFORM_PICO 1)
     set(HAVE_PICO 1)
+
+    # ── Memory census: provide our own pico_malloc so the SDK skips its malloc.c ──
+    # pico-sdk's pico_malloc/CMakeLists.txt is guarded by `if(NOT TARGET pico_malloc)`,
+    # so defining the target here preempts it: the SDK never compiles its
+    # WRAPPER_FUNC __wrap_malloc/calloc/realloc/free (which would multiply-define ours,
+    # since pico_malloc adds malloc.c as an INTERFACE source compiled straight into the
+    # executable, not an archive). pico_mem_census.c then owns those symbols. We re-add
+    # the --wrap linker flags pico_wrap_function would have set so __real_* still resolve
+    # to picolibc's allocator. See src/platform/pico/pico_mem_census.c for rationale.
+    # Mirror the SDK's two targets (pico_add_library would have made both): the
+    # _headers target is referenced by the SDK's header aggregate, so it must exist.
+    add_library(pico_malloc_headers INTERFACE)
+    target_include_directories(pico_malloc_headers SYSTEM INTERFACE
+        ${PICO_SDK_PATH}/src/rp2_common/pico_malloc/include)
+    add_library(pico_malloc INTERFACE)
+    target_link_libraries(pico_malloc INTERFACE pico_malloc_headers pico_sync)
+    target_sources(pico_malloc INTERFACE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/pico/pico_mem_census.c)
+    target_link_options(pico_malloc INTERFACE
+        "LINKER:--wrap=malloc"
+        "LINKER:--wrap=calloc"
+        "LINKER:--wrap=realloc"
+        "LINKER:--wrap=free")
+
     pico_sdk_init()
 
     # ── FatFS + SD SPI driver (vendored under src/platform/pico/fatfs/) ─────────

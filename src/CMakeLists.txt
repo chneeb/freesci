@@ -7,6 +7,10 @@ add_subdirectory(menu)
 if(PLATFORM STREQUAL "pico")
     add_subdirectory(platform/pico)
 
+    # pico_mem_census.c (our __wrap_malloc/calloc/realloc/free) is injected via the
+    # pico_malloc INTERFACE target preempted in the top-level CMakeLists.txt, NOT listed
+    # here — listing it would compile it twice and re-trigger a multiple-definition clash
+    # with the wrap symbols. See the file header for the leak-hunt rationale.
     add_executable(freesci main.c config.c)
     # PICO_MALLOC_PANIC=0: let pico-sdk's malloc wrapper return NULL on OOM instead
     # of panic()ing immediately, so FreeSCI's own sci_malloc can report the failing
