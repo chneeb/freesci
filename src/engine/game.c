@@ -44,6 +44,10 @@
 #include <versions.h>
 #include <kernel.h>
 #include "kernel_types.h"
+#ifdef PICO_VOCAB_PROBE
+#include <malloc.h>
+#include <string.h>
+#endif
 
 /* Structures and data from vm.c: */
 extern calls_struct_t *send_calls;
@@ -61,6 +65,70 @@ _init_vocabulary(state_t *s) /* initialize vocabulary and related resources */
 	sciprintf("Initializing vocabulary\n");
 
 #ifdef HAVE_PICO
+#ifdef PICO_VOCAB_PROBE
+	/* THROWAWAY measurement for roadmap #1 (text parser). Load the full vocab
+	   once, report its SRAM cost + the GNF-build transient peak, then free it and
+	   fall through to the normal parser-less skip so the game still runs. Decides
+	   resident-vs-rebuild for the GNF rules. Build with -DPICO_VOCAB_PROBE=ON for
+	   one flash, read the [vocab] lines from pico.log, then turn it back OFF. */
+	{
+		extern int _gnf_rule_bytes_peak;
+		extern int _allocd_rules;
+		word_t **words = NULL;
+		suffix_t **suffices = NULL;
+		parse_tree_branch_t *branches = NULL;
+		parse_rule_list_t *rules = NULL;
+		int words_nr = 0, suffices_nr = 0, branches_nr = 0;
+		int i, base, d_words, d_suff, d_branch, d_gnf;
+		size_t packed = 0, rule_resident = 0, rule_nodes = 0;
+
+		base = mallinfo().uordblks;
+		words = vocab_get_words(s->resmgr, &words_nr);
+		d_words = mallinfo().uordblks - base;
+
+		if (!words) {
+			sciprintf("[vocab] no parser vocab resource for this game\n");
+		} else {
+			for (i = 0; i < words_nr; i++)
+				packed += 4 + strlen(words[i]->word) + 1;  /* 2B class + 2B group + str */
+			packed += (size_t)words_nr * sizeof(unsigned int); /* offset table */
+
+			base = mallinfo().uordblks;
+			suffices = vocab_get_suffices(s->resmgr, &suffices_nr);
+			d_suff = mallinfo().uordblks - base;
+
+			base = mallinfo().uordblks;
+			branches = vocab_get_branches(s->resmgr, &branches_nr);
+			d_branch = mallinfo().uordblks - base;
+
+			_gnf_rule_bytes_peak = 0;
+			base = mallinfo().uordblks;
+			rules = vocab_build_gnf(branches, branches_nr);
+			d_gnf = mallinfo().uordblks - base;
+
+			{
+				parse_rule_list_t *r = rules;
+				for (; r; r = r->next) {
+					rule_nodes++;
+					if (r->rule)
+						rule_resident += sizeof(int) * (r->rule->length + 4);
+				}
+			}
+
+			sciprintf("[vocab] words=%d cur=%dB packed=%uB | suffices=%d %dB | branches=%d %dB\n",
+				  words_nr, d_words, (unsigned)packed,
+				  suffices_nr, d_suff, branches_nr, d_branch);
+			sciprintf("[vocab] GNF rules=%d nodes=%u resident=%uB (uord+%dB) build_peak=%dB\n",
+				  _allocd_rules, (unsigned)rule_nodes, (unsigned)rule_resident,
+				  d_gnf, _gnf_rule_bytes_peak);
+
+			vocab_free_rule_list(rules);
+			vocab_free_branches(branches);
+			vocab_free_suffices(s->resmgr, suffices, suffices_nr);
+			vocab_free_words(words, words_nr);
+		}
+	}
+#endif /* PICO_VOCAB_PROBE */
 	/* On Pico, skip the text parser vocab and selector name strings to save ~80KB.
 	   The game is still fully playable via keyboard shortcuts. */
 	s->parser_words    = NULL;

@@ -146,6 +146,16 @@ if(PLATFORM STREQUAL "pico")
     if(PICO_CONTROL_MAP)
         add_compile_definitions(PICO_DECODE_CONTROL_MAP=1)
     endif()
+
+    # THROWAWAY measurement build for roadmap #1 (text parser). When ON,
+    # _init_vocabulary loads the full vocab once, prints its SRAM cost + the
+    # GNF-build transient peak ([vocab] lines), then frees it and runs the game
+    # parser-less as usual. OFF by default; flip on for one flash, read pico.log,
+    # flip off. See CLAUDE.md "Pico roadmap #1".
+    option(PICO_VOCAB_PROBE "Measure text-parser vocab SRAM cost on Pico" OFF)
+    if(PICO_VOCAB_PROBE)
+        add_compile_definitions(PICO_VOCAB_PROBE=1)
+    endif()
 endif()
 
 # ── Global include directories ────────────────────────────────────────────────

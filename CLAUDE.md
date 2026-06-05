@@ -807,10 +807,29 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
      rules in a transient SRAM arena, parse into `parser_nodes`, free scratch + rules.
    - *kSaid:* unchanged. Net steady-state SRAM ≈ 0; per-command cost is a few large allocs.
 
-   **Measure first (step 1, before coding):** throwaway boot probe printing words count + packed
-   size, branches_nr, suffices count, GNF rule count (`_allocd_rules`, `grammar.c:40`) + bytes, and
-   GNF-build transient peak. Decides one tradeoff: GNF rules small (<~10 KB) → keep them resident in
-   SRAM (no per-command rebuild); large (40 KB+) → rebuild per-command as above.
+   **Measure first (step 1) — DONE. The `PICO_VOCAB_PROBE` build captured the numbers (SQ3):**
+   ```
+   [vocab] words=1489 cur=53080B packed=21419B | suffices=48 2400B | branches=60 3912B
+   [vocab] GNF rules=395 nodes=395 resident=41616B (uord+50272B) build_peak=44664B
+   ```
+   - **Words:** 1489 entries cost **53 080 B** as ~1489 separate `sci_malloc`s (a fragmentation
+     source); they **pack to 21 419 B** in one blob (offset table + `2B class + 2B group + str\0`
+     records) → ~31.7 KB saved by packing alone.
+   - **Suffices:** 48 / 2 400 B. **Branches:** 60 / 3 912 B. Both tiny → keep SRAM-resident.
+   - **GNF rules: 395 rules, 41 616 B resident, 44 664 B transient build peak.** (`uord+50272B`
+     includes the rules' own slack/alloc overhead; the byte-accurate figure is 41 616 B.)
+   - **DECISION — rebuild-per-command.** 41.6 KB resident is firmly in the "large (40 KB+)" bucket of
+     the tradeoff, so the GNF rules are **rebuilt inside each `kParse`** in a transient SRAM arena and
+     freed at the end of the call, NOT kept resident. Steady-state vocab SRAM then ≈ branches+suffices
+     (~6.3 KB) + the per-command scratch; the ~44.7 KB build peak is paid only while parsing a typed
+     command. Total all-resident would have been ~69 KB (matches the old "~80 KB" estimate).
+   - **Peak caveat to validate in code:** the ~44.7 KB GNF build peak coincides with paging the words
+     blob to an SRAM bsearch scratch (~21 KB) — those two transients must not stack badly mid-room
+     (SQ3 already runs near the ceiling). Measure the combined per-command peak before locking the
+     scratch sizes.
+   - Probe is THROWAWAY (`PICO_VOCAB_PROBE`, OFF by default): `grammar.c` `_gnf_rule_bytes[_peak]` +
+     `GNF_ACCOUNT/UNACCOUNT` macros (compiled out when off → non-probe builds byte-identical), and the
+     `_init_vocabulary` measurement block in `game.c`. Keep it for re-measuring other games; leave OFF.
 
    **File-change checklist:** `psram_alloc.{h,c}` (add `psram_set_floor()`); `game.c`
    `_init_vocabulary`/`_free_vocabulary` (Pico load→pack→floor path); `vocab.c` (pack + packed-blob

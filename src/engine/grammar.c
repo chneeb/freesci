@@ -39,6 +39,24 @@
 
  int _allocd_rules = 0;
 
+#ifdef PICO_VOCAB_PROBE
+/* Byte-accurate live/peak tracker for the GNF rule allocator. Rules are
+   variable-sized, so the _allocd_rules count alone can't size the build's
+   transient peak; this brackets it. Throwaway — only compiled for the vocab
+   probe build, so non-probe builds are byte-identical. See CLAUDE.md roadmap #1. */
+int _gnf_rule_bytes = 0;
+int _gnf_rule_bytes_peak = 0;
+#define GNF_ACCOUNT(nbytes) do { \
+		_gnf_rule_bytes += (int)(nbytes); \
+		if (_gnf_rule_bytes > _gnf_rule_bytes_peak) \
+			_gnf_rule_bytes_peak = _gnf_rule_bytes; \
+	} while (0)
+#define GNF_UNACCOUNT(nbytes) do { _gnf_rule_bytes -= (int)(nbytes); } while (0)
+#else
+#define GNF_ACCOUNT(nbytes)   do {} while (0)
+#define GNF_UNACCOUNT(nbytes) do {} while (0)
+#endif
+
 static void
 vocab_print_rule(parse_rule_t *rule)
 {
@@ -99,6 +117,7 @@ vocab_print_rule(parse_rule_t *rule)
 static void
 _vfree(parse_rule_t *rule)
 {
+  GNF_UNACCOUNT(sizeof(int) * (rule->length + 4));
   free(rule);
   --_allocd_rules;
   rule = NULL;
@@ -112,6 +131,7 @@ _vbuild(int id, int argc, ...)
   parse_rule_t *rule = (parse_rule_t*)sci_malloc(sizeof(int) * (argc + 4));
 
   ++_allocd_rules;
+  GNF_ACCOUNT(sizeof(int) * (argc + 4));
   rule->id = id;
   rule->first_special = 0;
   rule->specials_nr = 0;
@@ -143,6 +163,7 @@ _vcat(int id, parse_rule_t *a, parse_rule_t *b)
   rule->specials_nr = a->specials_nr + b->specials_nr;
   rule->first_special = a->first_special;
   ++_allocd_rules;
+  GNF_ACCOUNT(sizeof(int) * (a->length + b->length + 4));
 
   memcpy(rule->data, a->data, sizeof(int) * a->length);
   memcpy(&(rule->data[a->length]), b->data, sizeof(int) * b->length);
@@ -160,6 +181,7 @@ _vdup(parse_rule_t *a)
   rule->specials_nr = a->specials_nr;
   rule->first_special = a->first_special;
   ++_allocd_rules;
+  GNF_ACCOUNT(sizeof(int) * (a->length + 4));
 
   memcpy(rule->data, a->data, sizeof(int) * a->length);
 
@@ -186,6 +208,7 @@ _vinsert(parse_rule_t *turkey, parse_rule_t *stuffing)
   rule->first_special = firstnt + stuffing->first_special;
   rule->length = turkey->length - 1 + stuffing->length;
   ++_allocd_rules;
+  GNF_ACCOUNT(sizeof(int) * (turkey->length - 1 + stuffing->length + 4));
 
   if (firstnt > 0)
     memcpy(rule->data, turkey->data, sizeof(int) * firstnt);
@@ -235,6 +258,7 @@ _vbuild_rule(parse_tree_branch_t *branch)
   rule = (parse_rule_t*)sci_malloc(sizeof(int) * (4 + tokens));
 
   ++_allocd_rules;
+  GNF_ACCOUNT(sizeof(int) * (4 + tokens));
   rule->id = branch->id;
   rule->specials_nr = tokenpos >> 1;
   rule->length = tokens;
@@ -285,6 +309,7 @@ _vsatisfy_rule(parse_rule_t *rule, result_word_t *input)
        && ((dep & 0xffff) & input->group))) {
     parse_rule_t *retval = (parse_rule_t*)sci_malloc(sizeof(int) * (4 + rule->length));
     ++_allocd_rules;
+    GNF_ACCOUNT(sizeof(int) * (4 + rule->length));
     retval->id = rule->id;
     retval->specials_nr = rule->specials_nr - 1;
     retval->length = rule->length;
