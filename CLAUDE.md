@@ -507,30 +507,23 @@ decode fails silently (`psram_valid=0` → scan returns 0 → `onControl` always
 entered with ~82KB contiguous free it decodes and boarding works. So "the elevator worked this time" was a
 heap-state effect, not a logic change.
 
-**OPEN — elevator fails on a FRESH boot too → fragmentation is NOT the (sole) cause.** A device session
-that went *straight* to room 4 from a cold boot (heap at its roomiest, no revisit accumulation) still did
-not pick the player up. A fresh heap should satisfy the 32 KB control alloc, so this **rules out the
-fragmentation-OOM explanation as the sole cause** and points to a genuine control-map decode or `onControl`
-regression. Reframed next steps (next session):
-1. Confirm room 4's control pic (2052) actually decodes on a fresh heap — grep the next pico.log for
-   `malloc 32000 failed … decoding without collision`. If **absent**, the map decoded and the bug is
-   downstream (scan / `onControl`), not the alloc.
-2. If decoded but `ego.onControl != 3`: re-examine the nibble-packed PSRAM round-trip in
-   `_gfxop_scan_one_bitmask` and the `state->control_map`-NULL-on-Pico fallback to `pic->control_map`.
-3. Desktop A/B first (cheap, no flash): `./build/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl
-   --disable-mouse --run` — if the elevator works there, the bug is Pico-specific (control path); if it
-   fails there too, it's an engine/SQ3-version issue independent of Pico.
+**PARKED — one-time fresh-boot elevator no-pickup, NOT pursuing.** A single device session that went
+*straight* to room 4 from a cold boot once did not pick the player up. It has **not** reproduced —
+the elevator works on current code (rideable repeatedly, incl. via the multi-room path below), so this
+is treated as a non-reproducing one-off and is **not** an active investigation. If it ever recurs,
+the decider is cheap: grep that boot's pico.log for `malloc 32000 failed … decoding without collision`
+(`sci_resmgr.c:185`). If **present**, room 4's control pic (2052) didn't decode → it's the known 32 KB
+control-alloc miss (a heap/fragmentation symptom, see the WORKING-AS-DESIGNED + DIAGNOSIS notes), not a
+control-path bug. If **absent**, the map decoded and any failure is downstream (`_gfxop_scan_one_bitmask`
+PSRAM round-trip / `onControl`) — but the control path is already statically verified correct (next note),
+so absent + failure would be the only thing warranting a fresh look.
 
 **DATA POINT (55e45371 session) — elevator WORKED when room 4 was reached via a 7-room path.** A flashed
 session that walked intro → ... → trash elevator (room 4) the *long* way picked the player up, and the
 following death scene did not crash. Room 4's control pic (2052) decoded fine — the log has **no**
-`malloc 32000 failed … decoding without collision` line — reached with ~79 KB free. This is the
-**asymmetry** that breaks the pure-fragmentation story: reaching room 4 through 7 prior rooms (heap more
-fragmented, more transient churn) WORKED, while the fresh cold boot straight to room 4 (heap roomiest)
-FAILED. A pure contiguity-OOM model predicts the opposite. So the fresh-boot failure is still unexplained
-and is NOT simply "less free heap" — keep step 1 above (grep the *fresh-boot* log for the `malloc 32000
-failed` line) as the decider: if it's absent on the failing fresh boot too, the alloc succeeded and the
-bug is downstream of decode (a genuine cold-boot control/`onControl` regression), not the heap.
+`malloc 32000 failed … decoding without collision` line — reached with ~79 KB free. Combined with the
+elevator being rideable on current code, this is why the one-time fresh-boot no-pickup above is parked,
+not chased.
 
 **The Pico control path itself is CORRECT — the "elevator regression" is this same alloc failure, not a
 control bug (verified by static audit, cceae716 session).** The nibble-packed PSRAM round-trip was suspected
