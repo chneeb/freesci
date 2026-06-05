@@ -35,6 +35,34 @@
    here across same-room revisits localizes the non-seg accumulation to the
    pixmap layer (window save-unders / decoration backgrounds / view cels). */
 int gfx_pixmaps_live = 0;
+
+/* Live-pixmap registry: a singly-linked list of every gfx_pixmap_t currently
+   allocated, threaded through pxm->pico_reg_next. The BREAKDOWN probe walks it
+   to sum the bytes each pixmap actually holds (index_data, data, alpha_map,
+   colors, struct) -- the counter above only says how MANY, not how big. A
+   pixmap whose index_data was offloaded to PSRAM has index_data==NULL, so it
+   correctly contributes 0 for that buffer. Diagnostic only. */
+gfx_pixmap_t *gfx_pixmap_registry = NULL;
+
+static void
+gfx_pixmap_registry_add(gfx_pixmap_t *pxm)
+{
+	pxm->pico_reg_next = gfx_pixmap_registry;
+	gfx_pixmap_registry = pxm;
+}
+
+static void
+gfx_pixmap_registry_remove(gfx_pixmap_t *pxm)
+{
+	gfx_pixmap_t **pp = &gfx_pixmap_registry;
+	while (*pp) {
+		if (*pp == pxm) {
+			*pp = (gfx_pixmap_t *) pxm->pico_reg_next;
+			return;
+		}
+		pp = (gfx_pixmap_t **) &((*pp)->pico_reg_next);
+	}
+}
 #endif
 
 /* set optimisations for Win32: */
@@ -161,6 +189,7 @@ gfx_clone_pixmap(gfx_pixmap_t *pxm, gfx_mode_t *mode)
 
 #ifdef HAVE_PICO
 	gfx_pixmaps_live++;
+	gfx_pixmap_registry_add(clone);
 #endif
 	return clone;
 }
@@ -205,7 +234,9 @@ gfx_new_pixmap(int xl, int yl, int resid, int loop, int cel)
 	pxm->color_key = 0xff;
 
 #ifdef HAVE_PICO
+	pxm->pico_reg_next = NULL;
 	gfx_pixmaps_live++;
+	gfx_pixmap_registry_add(pxm);
 #endif
 	return pxm;
 }
@@ -250,11 +281,12 @@ gfx_free_pixmap(gfx_driver_t *driver, gfx_pixmap_t *pxm)
 	if (pxm->colors && !(pxm->flags & GFX_PIXMAP_FLAG_EXTERNAL_PALETTE))
 		free(pxm->colors);
 
-	free(pxm);
-
 #ifdef HAVE_PICO
+	gfx_pixmap_registry_remove(pxm);
 	gfx_pixmaps_live--;
 #endif
+
+	free(pxm);
 }
 
 

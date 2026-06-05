@@ -36,7 +36,9 @@
 extern sfx_softseq_t sfx_softseq_opl2;
 extern sfx_softseq_t sfx_softseq_SN76496;
 extern sfx_softseq_t sfx_softseq_pcspeaker;
+#ifndef HAVE_PICO
 extern sfx_softseq_t sfx_softseq_amiga;
+#endif
 extern sfx_softseq_t sfx_softseq_mt32;
 extern sfx_softseq_t sfx_softseq_fluidsynth;
 
@@ -45,7 +47,11 @@ static sfx_softseq_t *sw_sequencers[] = {
 /*	&sfx_softseq_mt32, */
 	&sfx_softseq_SN76496,
 	&sfx_softseq_pcspeaker,
+#ifndef HAVE_PICO
+	/* PicoCalc has no Amiga audio path; dropping the reference lets the
+	   linker discard amiga.o from scisoftseq.a (~1.5KB .bss: bank+channels). */
 	&sfx_softseq_amiga,
+#endif
 #ifdef HAVE_FLUIDSYNTH_H
 	&sfx_softseq_fluidsynth,
 #endif

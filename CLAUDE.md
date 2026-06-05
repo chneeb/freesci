@@ -83,7 +83,8 @@ PSRAM is used to offload inactive bitmap data after decode, freeing SRAM for the
 | Ordering fix: free old room's pics before decoding new room | `gfxop_new_pic` → `gfxr_free_all_pics()` | 192KB peak |
 | `visual_map->index_data` → PSRAM after decode | `sci_resmgr.c` end of `gfxr_interpreter_calculate_pic` | 64KB SRAM |
 | `priority_map->index_data` → PSRAM after `_gfxop_set_pic` | `gfxop_new_pic` in `operations.c` | 64KB SRAM |
-| `control_map->index_data` freed after decode | same | 64KB SRAM |
+| `control_map->index_data` → PSRAM after decode (graceful OOM skip) | `sci_resmgr.c` Pass 2 | 32KB SRAM |
+| View cel `index_data` → PSRAM after decode | `sci_resmgr.c` end of `gfxr_interpreter_get_view` | ~30–80KB/room |
 | `undithered_buffer` freed after decode | same | 64KB SRAM |
 | `state->control_map = NULL` (null-guarded everywhere) | `_gfxop_init_common` | 64KB SRAM |
 | `state->static_priority_map` aliased to `priority_map` | `_gfxop_init_common` | 64KB SRAM |
@@ -91,20 +92,18 @@ PSRAM is used to offload inactive bitmap data after decode, freeing SRAM for the
 `pico_blit_indexed` reads `visual_map` row-by-row from PSRAM when `pxm->psram_valid == 1`.  
 `gfx_pixmap_t` has `psram_addr` + `psram_valid` fields under `#ifdef HAVE_PICO`.
 
-**Still OOM — critical missing piece:**  
-`gfxr_pic_t::aux_map` is a 64KB array **embedded in the struct** (`gfx_resource.h:82`), so
-`sci_malloc(sizeof(gfxr_pic_t))` alone allocates 64KB. Peak during decode is still ~448KB > 388KB.
-Fix: change `byte aux_map[64000]` → `byte *aux_map`, allocate within `gfxr_draw_pic01`, free on return.
-This change is already on the `pico-mem-opts` branch and must be cherry-picked to master.
+**`aux_map` is already a heap pointer — DONE (no embedded-array bloat).**  
+`gfxr_pic_t::aux_map` is `byte *aux_map` (`gfx_resource.h:82`), so `sizeof(gfxr_pic_t)` is ~100 bytes,
+not 64KB. On Pico it's NULL at init (`sci_pic_0.c:258`) and **reuses the existing 64KB visual buffer**
+as the flood-fill aux during the control pass (`sci_resmgr.c:233`), freed right after (`256-257`) — so
+it adds zero extra peak. The old "embedded `byte aux_map[64000]`" note was stale; nothing to do here.
 
 **Remaining PSRAM candidates (not yet implemented), in priority order:**
 
-1. **`aux_map` pointer fix** — must land first; without it room transitions still OOM
-2. **Skip `control_map->index_data` allocation** in `gfxr_alloc_pic` (not just free after decode) — saves 64KB peak
-3. **View `index_data` → PSRAM** — *IN PROGRESS* (this is the death-animation OOM fix; see "Pico OOMs are
-   fragmentation + peak" below). `pico_blit_indexed` already reads cel `index_data` from PSRAM; extend the
-   same offload to view decode in `gfxr_draw_view0` — saves ~30–80KB of sprite data that turns over every room
-4. ~~**Resource data (scripts) → PSRAM**~~ — RULED OUT: `script_t.buf` is hot read-write VM working memory, not offloadable to a read-only cache (see roadmap ✗)
+1. **Skip `control_map->index_data` allocation** in `gfxr_alloc_pic` (not just free after decode) — saves 64KB peak
+2. ~~**View `index_data` → PSRAM**~~ — DONE (`sci_resmgr.c` `gfxr_interpreter_get_view`, all cels offloaded
+   after decode; `pico_blit_indexed` reads them back row-by-row). Moved to the Implemented table above.
+3. ~~**Resource data (scripts) → PSRAM**~~ — RULED OUT: `script_t.buf` is hot read-write VM working memory, not offloadable to a read-only cache (see roadmap ✗)
 
 ### SD card game selection
 Games must be in subdirectories under `0:/freesci/` on the SD card (e.g. `0:/freesci/sq3/`).
@@ -381,7 +380,7 @@ allocs on Pico, 16× more than desktop), so they trip on the damaged block first
 
 Record the root cause here once ASan pinpoints it.
 
-### DIAGNOSIS — Pico OOMs = transient peak + fragmentation, PLUS a real ~10KB/room accumulation
+### DIAGNOSIS — Pico OOMs = transient peak + fragmentation, PLUS a real ~35KB/revisit accumulation
 
 Two distinct pressures, established by the per-room breakdown probe:
 
@@ -407,14 +406,28 @@ Two distinct pressures, established by the per-room breakdown probe:
    400 656 / arena 427 744) and fragmented — the accumulation pushed the baseline up until a routine decode
    alloc could not find a contiguous block.
 
-   **Next probe — gfx-layer leak counters (in firmware, not yet flashed).** `gfx_new_pixmap`/
-   `gfx_clone_pixmap`/`gfx_free_pixmap` (`gfx_tools.c`) maintain `gfx_pixmaps_live`; `_gfxw_new_widget`/
-   `_gfxw_unallocate_widget` (`widgets.c`) maintain `gfxw_widgets_live`. Both print on the BREAKDOWN line as
-   `gfxpxm=N widgets=M`. **Read them across same-room revisits:** if `gfxpxm` climbs, the leak is in the
-   pixmap layer (window save-unders / decoration backgrounds / view cels); if `widgets` climbs, it's the
-   widget tree (ports/dynviews/text not freed on dispose); if both flat while `uord` still rises, the
-   accumulation is in resource/save-restore buffers instead. This is the localizing step now that
-   seg-manager is ruled out.
+   **LOCALIZED to the untracked gfx region — NOT pixmaps, widgets, OR resources (cceae716 session).**
+   The gfx-layer counters are now on the BREAKDOWN line (`gfxpxm=N (bytes…)`, `widgets=M`) and they decide
+   it: across SQ3 room 3→4→3 round-trips, `uord` rose room-3 **356 208 → 390 744 (+34.5 KB)** and room-4
+   **372 464 → 410 864 (+38.4 KB)**, while `gfxpxm` stayed **8**, `widgets` stayed **9**, scripts/objvar/
+   clone-node-list tables/`hunks=0`/`dynmem=0` all flat, AND `reslru=0 reslock=0` every line. Subtracting
+   every tracked category from `uord` leaves a **~287 KB untracked baseline that grows ~35 KB per revisit** —
+   essentially 100 % of the growth. So the leak is in allocations the probe is structurally blind to and
+   that are **not** the pixmap registry, the widget count, or the resource manager. Ruled out this session:
+   - **Resources** — `reslru=0 reslock=0` proves the resmgr retains nothing across rooms (read → decode →
+     free). Your original "resource-eviction" hunch is not where it hides.
+   - **Window save-unders** — `gfxw_make_snapshot` (`widgets.c`) is a ~24-byte serial marker, not a pixel
+     buffer, and its free path is balanced (`free(port->restore_snap)` on dispose).
+   - **Pic/view containers** — `gfxr_free_all_pics` frees both pic AND view trees on room change, then
+     `psram_reset()` (`resmgr.c`).
+
+   Remaining untracked suspects (short list): **fonts** (`gfx_bitmap_font_t`, cached and NOT freed on room
+   change), the gfx-resource **sbtree node** structures (kept alive across rooms), and driver-side state.
+   The decisive next step is no longer a counter but a **`--wrap` malloc census** on desktop: build with
+   `-Wl,--wrap=malloc,--wrap=free`, log size + return-address per call, bounce room 3→4→3 with
+   `--disable-mouse`, and diff allocations still-live after each round-trip — that names the leaking call
+   site directly, independent of the probe's blind spot. (`scilive`/`rawgap` on the BREAKDOWN line are the
+   known-broken counters — sci_malloc'd memory freed via raw `free()` makes `scilive` ≫ `uord`; ignore them.)
 
 **Evidence (one flashed SQ3 session, intro → trash elevator → conveyor death):**
 - `scripts`: 15 → 18, ~35KB → ~45KB, then **plateaus** (not unbounded).
@@ -441,6 +454,45 @@ decode fails silently (`psram_valid=0` → scan returns 0 → `onControl` always
 entered with ~82KB contiguous free it decodes and boarding works. So "the elevator worked this time" was a
 heap-state effect, not a logic change.
 
+**OPEN — elevator fails on a FRESH boot too → fragmentation is NOT the (sole) cause.** A device session
+that went *straight* to room 4 from a cold boot (heap at its roomiest, no revisit accumulation) still did
+not pick the player up. A fresh heap should satisfy the 32 KB control alloc, so this **rules out the
+fragmentation-OOM explanation as the sole cause** and points to a genuine control-map decode or `onControl`
+regression. Reframed next steps (next session):
+1. Confirm room 4's control pic (2052) actually decodes on a fresh heap — grep the next pico.log for
+   `malloc 32000 failed … decoding without collision`. If **absent**, the map decoded and the bug is
+   downstream (scan / `onControl`), not the alloc.
+2. If decoded but `ego.onControl != 3`: re-examine the nibble-packed PSRAM round-trip in
+   `_gfxop_scan_one_bitmask` and the `state->control_map`-NULL-on-Pico fallback to `pic->control_map`.
+3. Desktop A/B first (cheap, no flash): `./build/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl
+   --disable-mouse --run` — if the elevator works there, the bug is Pico-specific (control path); if it
+   fails there too, it's an engine/SQ3-version issue independent of Pico.
+
+**DATA POINT (55e45371 session) — elevator WORKED when room 4 was reached via a 7-room path.** A flashed
+session that walked intro → ... → trash elevator (room 4) the *long* way picked the player up, and the
+following death scene did not crash. Room 4's control pic (2052) decoded fine — the log has **no**
+`malloc 32000 failed … decoding without collision` line — reached with ~79 KB free. This is the
+**asymmetry** that breaks the pure-fragmentation story: reaching room 4 through 7 prior rooms (heap more
+fragmented, more transient churn) WORKED, while the fresh cold boot straight to room 4 (heap roomiest)
+FAILED. A pure contiguity-OOM model predicts the opposite. So the fresh-boot failure is still unexplained
+and is NOT simply "less free heap" — keep step 1 above (grep the *fresh-boot* log for the `malloc 32000
+failed` line) as the decider: if it's absent on the failing fresh boot too, the alloc succeeded and the
+bug is downstream of decode (a genuine cold-boot control/`onControl` regression), not the heap.
+
+**The Pico control path itself is CORRECT — the "elevator regression" is this same alloc failure, not a
+control bug (verified by static audit, cceae716 session).** The nibble-packed PSRAM round-trip was suspected
+but is consistent: `ctl_set` (`sci_pic_0.c`) packs odd pixels into the high nibble / even into the low
+(`b[j] = (i&1) ? (…|(v<<4)) : (…|v)`), and the scan reads them back identically
+(`v = (p&1) ? (b>>4) : (b&0x0f)`, `operations.c` `_gfxop_scan_one_bitmask` Pico branch). Geometry (the
+`ystart+10` titlebar offset, clip rects, row stride) also matches the working desktop path. So a
+*correctly-decoded* control map yields the same `onControl` result as desktop. The cceae716 log shows the
+2nd room-4 entry hit `malloc 32000 failed … decoding without collision (low heap)` (`sci_resmgr.c:185`) →
+collision off that visit → elevator can't fire. The 1st entry decoded fine. **To rule out any *separate*
+Pico-only control bug behind the alloc failure, do one desktop repro:**
+`./build/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl --disable-mouse --run` — if the elevator works
+there, the regression is purely the 32 KB alloc failure (fix the leak → fixed); if it fails there too, it's
+an engine/SQ3-version issue independent of Pico.
+
 ### Per-room SRAM breakdown probe (diagnostic, keep until OOM headroom is comfortable)
 
 `pico_mem_breakdown` (`kgraphics.c`, called at the end of `kDrawPic` under `HAVE_PICO`) walks
@@ -450,6 +502,57 @@ bytes + unlocked count, the clone/list/node tables (used/cap), seg-manager `mem_
 `[mem] room enter/ready` lines in `gfxop_new_pic` (`operations.c`), a single flashed session shows which of
 {scripts pile up, tables high-water, fragmentation climbs} is actually growing. This is what proved the
 no-leak diagnosis above — leave it in to measure before/after the view-cel offload.
+
+**`bad=N/M` on the `gfxpxm` field is a probe FALSE-POSITIVE, not a leak (55e45371 session).** The
+breakdown's per-pixmap sanity check counts a node "bad" when it can't reconcile `data_size` against
+`xl*yl*bytespp`. Across the whole 55e45371 session `bad` sat at a stable **2–3 of 7–8** every room — it
+does not grow. The flagged nodes are the **cursor pixmaps** (seen in the `[mem] PXM` dump: id=`0303e5`
+16×16 and id=`ffffffff` 17×17), which are built with an **uninitialized/garbage `data_size`** (the dump
+shows wild `dsz=` values like `1457830437`, `-554206328`). They are live, correctly registered, and freed
+on teardown — the probe just can't validate their size. **Do not chase `bad=2-3` as corruption or a leak;**
+it is constant and benign. (If `bad` ever *climbs* across same-room revisits, that's different — then it
+would indicate registry nodes accumulating.)
+
+**Clean-teardown evidence (55e45371): no working-set survives exit.** On quitting back to the SD chooser,
+`used` dropped **341,992 → 85,256** — essentially the entire game working set was reclaimed, with no
+orphaned allocation surviving the return to `freesci_main`'s caller. Combined with the gfxpxm/widgets/table
+counters staying flat, this session showed **no leak across 10 distinct rooms** (uord 288K→342K is the
+legitimate growing working set as scripts load and plateau at 17, not accumulation). Caveat: this session
+did **not** revisit any single room, so the separately-tracked ~35 KB/revisit gfx-region growth (see
+DIAGNOSIS above) was not exercised here and remains open.
+
+### Static-buffer SRAM recovery (DONE — `.bss` → lazy malloc / link-discard) — ~28 KB, now tapped out
+
+A link-time static array reserves `.bss` permanently — it lowers the `mallinfo` arena ceiling
+whether or not the feature ever runs. Converting the array to a `static T *p = NULL` pointer that is
+`sci_malloc`'d on first use costs **zero** SRAM until the code path actually fires, and on Pico that
+path never fires for the buffers below — so the recovery is pure. After this work the arena ceiling
+rose **427,744 → 444,136** (+16.4 KB observed; ~25 KB nominal across the first three), plus a later
+~2.8 KB from the bottom two rows (verified against the ELF `.bss`).
+
+| Buffer | File | Size | Why free on Pico |
+|--------|------|------|------------------|
+| `tokens[0x1004]` + `stak[0x1014]` | `decompress01.c` (alloc in `decryptinit3`) | ~20.5 KB | SCI0/SQ3 routes through `decompress0` (own decrypt1/decrypt2); the shared decrypt3 LZW scratch is never touched |
+| `said_tree[500]` + `said_tokens[128]` | `said.c` / `said.y` (alloc in `said()` under `if (s->parser_valid)`) | ~4.5 KB | `said()` only builds its tree when `parser_valid`, which needs a loaded vocab; Pico disables vocab → always 0 → dead |
+| `bank` + `channels` (in `amiga.c`) | `softseq/amiga.c`, ref in `softsequencers.c` | ~1.5 KB | PicoCalc has no Amiga audio. `&sfx_softseq_amiga` is `#ifndef HAVE_PICO`-guarded; `scisoftseq` is a STATIC lib so the linker discards `amiga.o` entirely (`.bss` **and** flash) once unreferenced — no CMake change needed |
+| `input[1024]` + `inputbuf[256]` | `main.c` `get_gets_input` / `scriptdebug.c` `_debug_get_input_default` | ~1.3 KB | Interactive debug console reads `stdin` via `fgets`; Pico has no stdin so neither runs. Lazy `sci_malloc` on first call → 0 `.bss`, 0 heap on Pico |
+
+- **adlib/`fmopl.c` — nothing to recover.** The big synth tables are *already* lazy `static int *`
+  pointers (NULL under NOSOUND, malloc'd in `OPLBuildTables`, `fmopl.c:610-627`); only ~650 B of tiny
+  lookup tables remain in `.bss`. (This corrected the stale "~34 KB `ENV_CURVE` in `.bss`" claim.)
+- **Both conversions preserve the capability** — lazy malloc ≠ deletion. If vocab/parser is
+  re-enabled (roadmap #1) or SCI01/SCI1 games are run, the buffers allocate on demand exactly as before.
+- **`said.y` was edited in lockstep with the generated `said.c`** so a future bison regen won't clobber
+  the change.
+- **The amiga link-discard is the cleanest pattern** for dead synths: guard the registration-array
+  reference under `#ifndef HAVE_PICO` and the static lib drops the whole object. The remaining sound
+  `.bss` (`adlib_sbi` 1152, `sci_adlib_vol_tables` 1024, `adlib_reg_L/R` 512, `KSL_TABLE`/`SL_TABLE`
+  ~576, all from `opl2.c`/`adlib.c`/`fmopl.c`) is **deliberately kept** — that is the planned PWM-Adlib
+  path (roadmap #3), so reclaiming it now just gets re-spent when sound lands.
+- **Static mining is now tapped out** (~28 KB total). The remaining wall is the **~35 KB/revisit
+  accumulation in the untracked gfx region** (see DIAGNOSIS above) — that is a *leak/growth* problem,
+  not a `.bss` problem, and the next move is a `--wrap malloc` census on desktop, not more static
+  conversion.
 
 ### Pico roadmap (remaining work, prioritized)
 
@@ -513,11 +616,15 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
    of the tiny_agi sine channels.
    - **CPU is fine:** OPL2 inner loop ≈ 9 voices × ~30 cyc × 22050 ≈ 4% at 150 MHz; PWM IRQ <1%.
      `OPLOpenTable` uses `pow/log10/sin` once at init (fast with the RP2350 FPU; slow on RP2040).
-   - **RAM is the gate.** Static `.bss` already costs ~34 KB (mostly `fmopl.c`'s `ENV_CURVE`,
-     present even under NOSOUND). Dynamic synth cost by profile: HQ stereo ~165 KB (**won't fit**),
-     LQ mono default tables ~70 KB, LQ mono + shrunk tables (`EG_ENT=128`, `SIN_ENT=512`, drop the
-     stereo OPL, dynamic `ENV_CURVE`) ~40 KB. Need ≥~80 KB free before enabling — gated purely on
-     measured steady-state headroom (no longer blocked on the ruled-out script cache).
+   - **RAM is the gate.** Static `.bss` is **already negligible** — the big synth tables
+     (`TL_TABLE`, `SIN_TABLE`, `AMS_TABLE`, `VIB_TABLE`, `ENV_CURVE`) are `static int *` pointers
+     **NULL until `OPLBuildTables()` malloc's them** (`fmopl.c:610-627`), so under NOSOUND they cost
+     **zero** SRAM; only ~650 B of tiny lookup tables (`KSL_TABLE` 512 B, `SL_TABLE` 64 B, `RATE_0`
+     64 B, `outd` 4 B) sit in `.bss`. (The old "~34 KB `ENV_CURVE` in `.bss`" claim was WRONG —
+     `ENV_CURVE` is `static int *ENV_CURVE = NULL`, `fmopl.c:191`.) The cost is therefore **entirely
+     dynamic, paid only when sound is enabled**: HQ stereo ~165 KB (**won't fit**), LQ mono default
+     tables ~70 KB, LQ mono + shrunk tables (`EG_ENT=128`, `SIN_ENT=512`, drop the stereo OPL) ~40 KB.
+     Need ≥~80 KB free before enabling — gated purely on measured steady-state headroom.
    - **Five deliverables:** (A) `src/sfx/pcm_device/pico_pwm.c` implementing `sfx_pcm_device_t` +
      ring buffer, downconverting the mixer's 16-bit samples to 8-bit; (B) rewrite `pwm_synth.c`'s
      IRQ to pop the PCM ring (also frees ~44 KB flash by dropping `pwm_strings.h`); (C)

@@ -261,7 +261,12 @@ init_directories(char *work_dir, char *game_id)
 const char *
 get_gets_input(void)
 {
-	static char input[1024] = "";
+	static char *input = NULL;
+
+	if (!input) {
+		input = (char *) sci_malloc(1024);
+		input[0] = 0;
+	}
 
 	putchar('>');
 

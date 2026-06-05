@@ -36,10 +36,19 @@
 #include <sci_memory.h>
 
 #ifdef HAVE_PICO
+#include <malloc.h>   /* malloc_usable_size — exact block size for leak accounting */
 /* Implemented in pico_main.c: prints the failing allocation + free heap to the
    LCD and halts (USB serial is unreliable once memory is exhausted). */
 extern void pico_oom_report(const char *what, unsigned long size,
 			    const char *file, int line, const char *funct);
+
+/* Running total of all sci_*-routed live bytes (actual block sizes via
+   malloc_usable_size, so it matches mallinfo's accounting). The BREAKDOWN probe
+   prints this; comparing its growth to mallinfo.uordblks splits an engine-side
+   leak (this grows) from a raw-malloc/driver leak (this stays flat while uord
+   rises). Raw malloc()/free() calls (control buffer, decompress, aux_map, the
+   gfx driver) are deliberately NOT counted here — that's the whole point. */
+size_t g_sci_live_bytes = 0;
 #endif
 
 /*#define POISON_MEMORY*/
@@ -70,6 +79,7 @@ _SCI_MALLOC(size_t size, const char *file, int line, const char *funct)
 #ifdef HAVE_PICO
 	res = malloc(size);
 	if (res == NULL) pico_oom_report("malloc", (unsigned long)size, file, line, funct);
+	else g_sci_live_bytes += malloc_usable_size(res);
 #else
 	ALLOC_MEM((res = malloc(size)), size, file, line, funct)
 #endif
@@ -92,6 +102,7 @@ _SCI_CALLOC(size_t num, size_t size, const char *file, int line, const char *fun
 #ifdef HAVE_PICO
 	res = calloc(num, size);
 	if (res == NULL) pico_oom_report("calloc", (unsigned long)(num * size), file, line, funct);
+	else g_sci_live_bytes += malloc_usable_size(res);
 #else
 	ALLOC_MEM((res = calloc(num, size)), num * size, file, line, funct)
 #endif
@@ -107,8 +118,12 @@ _SCI_REALLOC(void *ptr, size_t size, const char *file, int line, const char *fun
 	INFO_MEMORY("_SCI_REALLOC()", size, file, line, funct);
 #endif
 #ifdef HAVE_PICO
-	res = realloc(ptr, size);
-	if (res == NULL) pico_oom_report("realloc", (unsigned long)size, file, line, funct);
+	{
+		size_t old_usable = ptr ? malloc_usable_size(ptr) : 0;
+		res = realloc(ptr, size);
+		if (res == NULL) pico_oom_report("realloc", (unsigned long)size, file, line, funct);
+		else g_sci_live_bytes += malloc_usable_size(res) - old_usable;
+	}
 #else
 	ALLOC_MEM((res = realloc(ptr, size)), size, file, line, funct)
 #endif
@@ -129,6 +144,9 @@ _SCI_FREE(void *ptr, const char *file, int line, const char *funct)
 		fprintf(stderr, " attempt to free NULL pointer\n");
 		BREAKPOINT();
 	}
+#ifdef HAVE_PICO
+	g_sci_live_bytes -= malloc_usable_size(ptr);
+#endif
 	free(ptr);
 }
 
@@ -148,6 +166,9 @@ _SCI_MEMDUP(const void *ptr, size_t size, const char *file, int line, const char
 		BREAKPOINT();
 	}
 	ALLOC_MEM((res = malloc(size)), size, file, line, funct)
+#ifdef HAVE_PICO
+	if (res) g_sci_live_bytes += malloc_usable_size(res);
+#endif
 	memcpy(res, ptr, size);
 	return res;
 }
@@ -168,6 +189,9 @@ _SCI_STRDUP(const char *src, const char *file, int line, const char *funct)
 		BREAKPOINT();
 	}
 	ALLOC_MEM((res = strdup(src)), strlen(src), file, line, funct)
+#ifdef HAVE_PICO
+	if (res) g_sci_live_bytes += malloc_usable_size(res);
+#endif
 	return (char*)res;
 }
 
@@ -189,6 +213,9 @@ _SCI_STRNDUP(const char *src, size_t length, const char *file, int line, const c
 		BREAKPOINT();
 	}
 	ALLOC_MEM((res = malloc(rlen)), rlen, file, line, funct)
+#ifdef HAVE_PICO
+	if (res) g_sci_live_bytes += malloc_usable_size(res);
+#endif
 
 	strres = (char*)res;
 	strncpy(strres, src, rlen);

@@ -80,7 +80,7 @@ static const int MIDI_cmdlen[16] = {0, 0, 0, 0, 0, 0, 0, 0,
 int _kdebug_cheap_event_hack = 0;
 int _kdebug_cheap_soundcue_hack = -1;
 
-char inputbuf[256] = "";
+static char *inputbuf = NULL;
 
 #define LOOKUP_SPECIES(species) (\
    (species >= 1000)? species : *(s->classtable[species].scriptposp) \
@@ -90,6 +90,11 @@ const char *
 _debug_get_input_default(void)
 {
   char newinpbuf[256];
+
+  if (!inputbuf) {
+    inputbuf = (char *) sci_malloc(256);
+    inputbuf[0] = 0;
+  }
 
   printf("> ");
   fgets(newinpbuf, 254, stdin);

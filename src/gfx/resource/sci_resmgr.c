@@ -36,6 +36,7 @@
 /* Globals in operations.c consumed here during pic decode */
 extern byte *g_pico_decode_priority_buf;
 extern byte *g_pico_decode_visual_buf;
+extern int g_pico_visual_defer_failed;
 #endif
 
 int
@@ -139,25 +140,42 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		scir_evict_resource_data(resmgr, res);
 		scir_free_all_lru(resmgr);
 
-		/* Pass 1: visual map.
-		   Use the buffer pre-reserved in gfxop_new_pic to avoid a malloc
-		   that would fail due to fragmentation of the freed visual[0] block. */
-		scaled_pic->visual_map->index_data = g_pico_decode_visual_buf;
-		g_pico_decode_visual_buf = NULL;
-		if (!scaled_pic->visual_map->index_data) {
-			pico_picdec_cache_end(); return GFX_ERROR;
+		/* Pass 1: visual map (64KB).  Two modes:
+		   - Deferred (g_pico_decode_visual_buf NULL, the normal case): allocate
+		     HERE, after the resource was decompressed and evicted to PSRAM above,
+		     so the 64KB is NOT held during the decompress — frees 64KB at the
+		     decompress0 OOM moment.
+		   - Pinned (g_pico_decode_visual_buf set): the fallback retry in
+		     gfxop_new_pic pre-reserved it from the pristine room-change region
+		     because a deferred alloc just failed under fragmentation; consume it. */
+		if (g_pico_decode_visual_buf) {
+			scaled_pic->visual_map->index_data = g_pico_decode_visual_buf;
+			g_pico_decode_visual_buf = NULL;
+		} else {
+			scaled_pic->visual_map->index_data = (byte*)malloc(GFXR_AUX_MAP_SIZE);
+			if (!scaled_pic->visual_map->index_data) {
+				/* Deferred alloc failed.  Signal gfxop_new_pic to retry with an
+				   early pin from the freshly-freed region; if that also fails
+				   it's a genuine out-of-64KB OOM. */
+				g_pico_visual_defer_failed = 1;
+				pico_picdec_cache_end(); return GFX_ERROR;
+			}
 		}
 
 #ifdef PICO_DECODE_CONTROL_MAP
-		/* Pin the 32KB packed control buffer now: the resource decompress
-		   buffer is already freed (evicted to PSRAM above) and the 64KB
-		   priority hole is still pristine (priority is Pass 3), so 32KB is
-		   contiguous here.  Allocating it mid-decode (Pass 2) failed on tight
-		   rooms because fragmentation left no 32KB-contiguous block. */
+		/* Allocate the 32KB packed control buffer HERE — after the pic resource
+		   was decompressed and evicted to PSRAM (lines above) so its decompress
+		   buffer is already freed, and before Pass 1's draw churns the heap.  At
+		   this exact point the decompress hole is back and the 64KB priority hole
+		   is still pristine (priority is Pass 3), so a 32KB-contiguous block is
+		   reliably available.  Earlier attempts failed at the two extremes: pinning
+		   it back in gfxop_new_pic held 32KB through the resource decompress and
+		   worsened the decompress0 OOM; allocating it mid-decode (Pass 2) hit
+		   fragmentation and left no 32KB-contiguous block (disabling collision in
+		   tight rooms like the trash elevator). */
 		byte *control_buf = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
 		if (!control_buf) {
-			/* OOM on the 32KB control buffer — common on restore/replay, where
-			   the heap is tighter than on first room entry.  Do NOT abort the
+			/* Allocation failed (very tight/fragmented heap).  Do NOT abort the
 			   pic decode: gfxop_new_pic would return GFX_ERROR, which kDrawPic
 			   escalates to a FATAL VM error -> HardFault.  Instead degrade to
 			   no-collision for this pic — skip Pass 2 below, leaving

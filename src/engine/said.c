@@ -148,7 +148,10 @@ static char *said_parse_error;
 
 static int said_token;
 static int said_tokens_nr;
-static int said_tokens[MAX_SAID_TOKENS];
+/* Lazily allocated on first use in said() (~4.5KB total with said_tree).  Only
+   touched when s->parser_valid, which requires a loaded vocabulary; Pico disables
+   the parser, so these stay NULL there and the SRAM is never spent. */
+static int *said_tokens = NULL;
 
 static int said_blessed;  /* increminated by said_top_branch */
 
@@ -157,7 +160,7 @@ static int said_tree_pos; /* Set to 0 if we're out of space */
 
 #define VALUE_IGNORE -424242
 
-static parse_tree_node_t said_tree[VOCAB_TREE_NODES];
+static parse_tree_node_t *said_tree = NULL;
 
 typedef int wgroup_t;
 typedef int tree_t;
@@ -2525,6 +2528,11 @@ said(state_t *s, byte *spec, int verbose)
 	parse_tree_node_t *parse_tree_ptr = s->parser_nodes;
 
 	if (s->parser_valid) {
+
+		if (!said_tokens)
+			said_tokens = (int*)sci_malloc(MAX_SAID_TOKENS * sizeof(*said_tokens));
+		if (!said_tree)
+			said_tree = (parse_tree_node_t*)sci_malloc(VOCAB_TREE_NODES * sizeof(*said_tree));
 
 		if (said_parse_spec(s, spec)) {
 			sciprintf("Offending spec was: ");

@@ -38,9 +38,15 @@
 /* Filled by gfxr_interpreter_calculate_pic pass 2; consumed in gfxop_new_pic */
 byte *g_pico_decode_priority_buf = NULL;
 
-/* Reserved right after pico_free_visual to prevent small allocs from
-   fragmenting the freed visual[0] block before sci_resmgr.c needs it. */
+/* Visual decode buffer (64KB).  Normally NULL: sci_resmgr.c allocates it late
+   (after the pic resource is evicted to PSRAM) so it doesn't burden the
+   decompress.  Set non-NULL only by the fragmentation-fallback retry in
+   gfxop_new_pic, which pre-pins it from the freshly-freed room-change region. */
 byte *g_pico_decode_visual_buf = NULL;
+
+/* Raised by sci_resmgr.c when the late visual alloc fails (fragmentation);
+   signals gfxop_new_pic to retry the decode with an early-pinned buffer. */
+int g_pico_visual_defer_failed = 0;
 
 /* Declared in pico_driver.c */
 extern void pico_free_visual(gfx_driver_t *drv);
@@ -2245,15 +2251,15 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		state->priority_map->index_data = NULL;
 	}
 
-	/* Pin the freed visual[0] block before resource-manager overhead can
-	   fragment it — any small alloc between here and sci_resmgr.c's Pass 1
-	   would carve into the only 64KB block and make malloc(64000) fail. */
-	g_pico_decode_visual_buf = malloc(GFXR_AUX_MAP_SIZE);
-	if (!g_pico_decode_visual_buf) {
-		GFXERROR("Failed to reserve visual decode buffer\n");
-		pico_alloc_visual(state->driver);
-		return GFX_FATAL;
-	}
+	/* Deferred visual-buffer strategy: do NOT pin the 64KB visual buffer here.
+	   Leaving it unallocated frees 64KB during the pic-resource decompress
+	   (inside gfxr_get_pic below) — the moment decompress0 OOMs on a leak-
+	   pressured heap.  sci_resmgr.c allocates the visual buffer late, after the
+	   resource is decompressed and evicted to PSRAM, so the two 64KB demands no
+	   longer overlap.  Fallback below covers the fragmentation case. */
+	g_pico_decode_visual_buf = NULL;
+	g_pico_visual_defer_failed = 0;
+
 #endif
 
 	gfxr_tag_resources(state->resstate);
@@ -2261,6 +2267,32 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	state->palette_nr = default_palette;
 
 	state->pic = gfxr_get_pic(state->resstate, nr, GFX_MASK_VISUAL, flags, default_palette, 1);
+
+#ifdef HAVE_PICO
+	if (!state->pic && g_pico_visual_defer_failed) {
+		/* The late visual alloc failed under fragmentation (64KB total free but
+		   no 64KB-contiguous block).  gfxr_get_pic already freed the half-built
+		   pic (resmgr.c:372) without caching it, so state is clean.  Pin 64KB
+		   from the now re-coalesced room-change region — reliably contiguous
+		   before gfxr_get_pic's small allocs land — and retry the decode once.
+		   This is the early-pin path used only as a fallback, so visual alloc is
+		   never the fatal step unless the heap is genuinely out of 64KB. */
+		g_pico_visual_defer_failed = 0;
+		g_pico_decode_visual_buf = malloc(GFXR_AUX_MAP_SIZE);
+		if (g_pico_decode_visual_buf) {
+			GFXWARN("visual decode buffer: deferred alloc failed for pic %d — "
+			        "retrying with early pin\n", nr);
+			state->pic = gfxr_get_pic(state->resstate, nr, GFX_MASK_VISUAL,
+			                          flags, default_palette, 1);
+			/* If the retry consumed the pin, the global is NULL; otherwise the
+			   retry failed before Pass 1 — reclaim the unused pin. */
+			if (g_pico_decode_visual_buf) {
+				free(g_pico_decode_visual_buf);
+				g_pico_decode_visual_buf = NULL;
+			}
+		}
+	}
+#endif
 
 	if (state->driver->mode->xfact == 1 && state->driver->mode->yfact == 1)
 		state->pic_unscaled = state->pic;

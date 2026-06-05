@@ -1159,9 +1159,24 @@ pico_mem_breakdown(state_t *s, int nr)
 	int dynmem_nr = 0;
 	size_t dynmem_bytes = 0;
 	int locals_nr = 0, sysstr_nr = 0;
+	/* Buffers hanging off seg-manager objects that the sums above DON'T count:
+	   per-object/per-clone variables[] arrays, script objects[] tables, and
+	   locals blocks. This is where the invisible per-revisit growth lives. */
+	size_t objvar_bytes = 0;   /* script objects[] + their variables[] */
+	size_t clonevar_bytes = 0; /* live clones' variables[] */
+	size_t localblk_bytes = 0; /* MEM_OBJ_LOCALS locals[] blocks */
+	int objs_nr = 0, clonevar_nr = 0;
 	struct mallinfo mi;
+	extern size_t g_sci_live_bytes; /* sci_memory.c — exact sci_*-routed live bytes */
 	extern int gfx_pixmaps_live;   /* gfx_tools.c — net live pixmap count */
 	extern int gfxw_widgets_live;  /* widgets.c   — net live widget count  */
+	extern gfx_pixmap_t *gfx_pixmap_registry; /* gfx_tools.c — live pixmap list */
+	gfx_pixmap_t *rp;
+	size_t pxm_bytes = 0;
+	int big_id = 0, big_loop = 0, big_cel = 0;
+	size_t big_bytes = 0;
+	int pxm_walked = 0, pxm_bad = 0;
+	static int dumped_once = 0;
 
 	for (i = 0; i < s->seg_manager.heap_size; i++) {
 		mem_obj_t *mobj = s->seg_manager.heap[i];
@@ -1169,18 +1184,46 @@ pico_mem_breakdown(state_t *s, int nr)
 		if (!mobj)
 			continue;
 		switch (mobj->type) {
-		case MEM_OBJ_SCRIPT:
+		case MEM_OBJ_SCRIPT: {
+			script_t *scr = &mobj->data.script;
+			int o;
 			scripts++;
-			script_bytes += mobj->data.script.buf_size;
-			if (mobj->data.script.lockers == 0)
+			script_bytes += scr->buf_size;
+			if (scr->lockers == 0)
 				scripts_unlocked++;
+			/* objects[] table + each object's property variables[] */
+			if (scr->objects) {
+				objvar_bytes += (size_t)scr->objects_nr
+					* sizeof(object_t);
+				for (o = 0; o < scr->objects_nr; o++) {
+					objs_nr++;
+					if (scr->objects[o].variables)
+						objvar_bytes += (size_t)
+							scr->objects[o].variables_nr
+							* sizeof(reg_t);
+				}
+			}
 			break;
-		case MEM_OBJ_CLONES:
-			clones_used += mobj->data.clones.entries_used;
-			clones_cap  += mobj->data.clones.entries_nr;
-			table_bytes += (size_t)mobj->data.clones.entries_nr
+		}
+		case MEM_OBJ_CLONES: {
+			clone_table_t *ct = &mobj->data.clones;
+			int e;
+			clones_used += ct->entries_used;
+			clones_cap  += ct->entries_nr;
+			table_bytes += (size_t)ct->entries_nr
 				* sizeof(clone_entry_t);
+			/* live clones each carry a malloc'd variables[] array */
+			for (e = 0; e < ct->max_entry; e++) {
+				if (ct->table[e].next_free == e
+				    && ct->table[e].entry.variables) {
+					clonevar_nr++;
+					clonevar_bytes += (size_t)
+						ct->table[e].entry.variables_nr
+						* sizeof(reg_t);
+				}
+			}
 			break;
+		}
 		case MEM_OBJ_LISTS:
 			lists_used += mobj->data.lists.entries_used;
 			lists_cap  += mobj->data.lists.entries_nr;
@@ -1210,6 +1253,8 @@ pico_mem_breakdown(state_t *s, int nr)
 			break;
 		case MEM_OBJ_LOCALS:
 			locals_nr++;
+			localblk_bytes += (size_t)mobj->data.locals.nr
+				* sizeof(reg_t);
 			break;
 		case MEM_OBJ_SYS_STRINGS:
 			sysstr_nr++;
@@ -1219,23 +1264,85 @@ pico_mem_breakdown(state_t *s, int nr)
 		}
 	}
 
+	/* Walk the live-pixmap registry and sum the bytes each pixmap actually
+	   holds. gfxpxm above is only a COUNT; this is where the non-seg bytes
+	   live. index_data offloaded to PSRAM is NULL here, so it contributes 0.
+	   Also track the single biggest pixmap to name the heavy resident ones.
+
+	   Defensive: the chain has been observed to contain dangling/garbage nodes
+	   (freed pixmaps whose early fields newlib overwrote with free-list
+	   pointers). Reject any node whose dims/counts are out of sane range, count
+	   them as pxm_bad, and cap the walk so a corrupted (circular) chain can't
+	   hang. pxm_bad rising is itself a signal of a pixmap double-free/leak. */
+	for (rp = gfx_pixmap_registry; rp && pxm_walked < 512;
+	     rp = (gfx_pixmap_t *) rp->pico_reg_next) {
+		size_t b = sizeof(gfx_pixmap_t);
+		/* data_size is left uninitialized by gfx_new_pixmap and is only valid
+		   once gfx_pixmap_alloc_data has run (data != NULL); don't validate it
+		   otherwise. The geometric fields are always set at construction. */
+		int sane = (rp->index_xl  >= 0 && rp->index_xl  <= 8192 &&
+			    rp->index_yl  >= 0 && rp->index_yl  <= 8192 &&
+			    rp->xl        >= 0 && rp->xl        <= 8192 &&
+			    rp->yl        >= 0 && rp->yl        <= 8192 &&
+			    rp->colors_nr >= 0 && rp->colors_nr <= 256  &&
+			    (!rp->data || (rp->data_size >= 0 && rp->data_size <= 0x100000)));
+		pxm_walked++;
+		if (!sane) { pxm_bad++; continue; }
+		if (rp->index_data) b += (size_t) rp->index_xl * rp->index_yl;
+		if (rp->data)       b += (size_t) rp->data_size;
+		if (rp->alpha_map)  b += (size_t) rp->xl * rp->yl;
+		if (rp->colors)     b += (size_t) rp->colors_nr * sizeof(gfx_pixmap_color_t);
+		pxm_bytes += b;
+		if (b > big_bytes) {
+			big_bytes = b;
+			big_id = rp->ID; big_loop = rp->loop; big_cel = rp->cel;
+		}
+	}
+
+	/* One-shot raw dump of every registry node so the next session's log names
+	   exactly what is resident / what a bad node looks like. Printed once. */
+	if (!dumped_once) {
+		int di = 0;
+		dumped_once = 1;
+		for (rp = gfx_pixmap_registry; rp && di < 1024;
+		     rp = (gfx_pixmap_t *) rp->pico_reg_next, di++)
+			sciprintf("[mem] PXM id=%06x l=%d c=%d ixl=%d iyl=%d xl=%d yl=%d "
+				  "dsz=%d idx=%p data=%p alpha=%p col=%p/%d psram=%d nxt=%p\n",
+				  rp->ID, rp->loop, rp->cel, rp->index_xl, rp->index_yl,
+				  rp->xl, rp->yl, rp->data_size, (void *) rp->index_data,
+				  (void *) rp->data, (void *) rp->alpha_map,
+				  (void *) rp->colors, rp->colors_nr, rp->psram_valid,
+				  rp->pico_reg_next);
+	}
+
 	mi = mallinfo();
 	/* resmgr LRU is capped at 32KB on Pico (main.c) and self-evicts, so
 	   reslru should plateau near its ceiling. reslock (locked resources)
 	   bypasses the cap entirely — if it climbs across same-room revisits,
 	   resources are being locked and never unlocked = the accumulation. */
 	sciprintf("[mem] BREAKDOWN nr=%d: scripts=%d (%lu B, %d unlocked) "
+		  "objvar=%lu B (%d obj) clonevar=%lu B (%d) localblk=%lu B "
 		  "clones=%d/%d lists=%d/%d nodes=%d/%d tablemem=%lu "
 		  "hunks=%d/%d (%lu B) dynmem=%d (%lu B) locals=%d sysstr=%d "
-		  "gfxpxm=%d widgets=%d reslru=%d reslock=%d | "
+		  "gfxpxm=%d (%lu B, big=%06x/%d/%d %lu B, bad=%d/%d) widgets=%d "
+		  "reslru=%d reslock=%d | "
+		  "scilive=%lu rawgap=%ld "
 		  "uord=%d ford=%d arena=%d chunks=%d\n",
 		  nr, scripts, (unsigned long) script_bytes, scripts_unlocked,
+		  (unsigned long) objvar_bytes, objs_nr,
+		  (unsigned long) clonevar_bytes, clonevar_nr,
+		  (unsigned long) localblk_bytes,
 		  clones_used, clones_cap, lists_used, lists_cap,
 		  nodes_used, nodes_cap, (unsigned long) table_bytes,
 		  hunks_used, hunks_cap, (unsigned long) hunk_bytes,
 		  dynmem_nr, (unsigned long) dynmem_bytes, locals_nr, sysstr_nr,
-		  gfx_pixmaps_live, gfxw_widgets_live,
+		  gfx_pixmaps_live, (unsigned long) pxm_bytes,
+		  big_id, big_loop, big_cel, (unsigned long) big_bytes,
+		  pxm_bad, pxm_walked,
+		  gfxw_widgets_live,
 		  s->resmgr->memory_lru, s->resmgr->memory_locked,
+		  (unsigned long) g_sci_live_bytes,
+		  (long) ((long) mi.uordblks - (long) g_sci_live_bytes),
 		  mi.uordblks, mi.fordblks, mi.arena, mi.ordblks);
 }
 #endif

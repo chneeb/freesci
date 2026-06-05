@@ -36,12 +36,16 @@
 
 /* TODO: Clean up, re-organize, improve speed-wise */
 
-struct tokenlist {
+/* LZW decompressor scratch (~20KB). Allocated lazily on first use in
+   decryptinit3() and kept for the program lifetime. SCI0 games (e.g. SQ3) route
+   all resources through decompress0 and never call decryptinit3/decrypt3, so for
+   them these buffers are never allocated; SCI01/SCI1 games allocate once. */
+static struct tokenlist {
 	guint8 data;
 	gint16 next;
-} tokens[0x1004];
+} *tokens = NULL;
 
-static gint8 stak[0x1014] = {0};
+static gint8 *stak = NULL;
 static gint8 lastchar = 0;
 static gint16 stakptr = 0;
 static guint16 numbits, bitstring, lastbits, decryptstart;
@@ -53,6 +57,8 @@ guint32 gbits(int numbits,  guint8 * data, int dlen);
 void decryptinit3(void)
 {
 	int i;
+	if (!tokens) tokens = (struct tokenlist*)sci_malloc(0x1004 * sizeof(*tokens));
+	if (!stak) stak = (gint8*)sci_malloc(0x1014);
 	lastchar = lastbits = bitstring = stakptr = 0;
 	numbits = 9;
 	curtoken = 0x102;
