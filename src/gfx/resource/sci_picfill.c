@@ -52,10 +52,20 @@
 	)
 #endif
 
+/* On Pico the priority map can be nibble-packed (2 px/byte). When the flood-fill
+** uses the priority map as its boundary buffer (color==0xff visual-stripped fills),
+** bounds reads must go through ctl_get. bounds_packed is 0 for the (unpacked) visual
+** map and on desktop, so this is byte-identical there. */
+#ifdef HAVE_PICO
+#  define BOUNDS_AT(idx) (bounds_packed ? ctl_get(bounds, (idx)) : bounds[(idx)])
+#else
+#  define BOUNDS_AT(idx) (bounds[(idx)])
+#endif
+
 static void
 FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, byte *bounds,
 			int legalcolor, int legalmask, int color, int priority, int drawenable,
-			int sci_titlebar_size)
+			int sci_titlebar_size, int bounds_packed)
 {
 	int linewidth = pic->mode->xfact * 320;
 	int miny = pic->mode->yfact * sci_titlebar_size;
@@ -149,11 +159,11 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 		/* Now we have the projected limits, get the real ones: */
 
 		xl = (old_xl > proj_xl_bound)? old_xl : proj_xl_bound;
-		if (!IS_BOUNDARY(xl, y+1, bounds[ytotal + xl])) { /* go left as far as possible */
-			while (xl > proj_xl_bound && (!IS_BOUNDARY(xl-1, y+1, bounds[ytotal + xl - 1])))
+		if (!IS_BOUNDARY(xl, y+1, BOUNDS_AT(ytotal + xl))) { /* go left as far as possible */
+			while (xl > proj_xl_bound && (!IS_BOUNDARY(xl-1, y+1, BOUNDS_AT(ytotal + xl - 1))))
 				--xl;
 		} else /* go right until the fillable area starts */
-			while (xl < proj_xr_bound && (IS_BOUNDARY(xl, y+1, bounds[ytotal + xl])))
+			while (xl < proj_xr_bound && (IS_BOUNDARY(xl, y+1, BOUNDS_AT(ytotal + xl))))
 				++xl;
 
 
@@ -166,12 +176,12 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 		}
 
 		xr = (xl > old_xl)? xl : old_xl;
-		while (xr < proj_xr_bound && (!IS_BOUNDARY(xr+1, y+1, bounds[ytotal + xr + 1])))
+		while (xr < proj_xr_bound && (!IS_BOUNDARY(xr+1, y+1, BOUNDS_AT(ytotal + xr + 1))))
 			++xr;
 
 		PRINT_DEBUG1("%d> -> ", xr);
 
-		if (IS_BOUNDARY(xl, y+1,  bounds[ytotal + xl])) {
+		if (IS_BOUNDARY(xl, y+1,  BOUNDS_AT(ytotal + xl))) {
 			PRINT_DEBUG0("ABRT because xl illegal\n");
 			return;
 		}
@@ -194,6 +204,11 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 			memset(pic->visual_map->index_data + ytotal + xl, color, xr - xl + 1);
 
 		if (drawenable & GFX_MASK_PRIORITY)
+#ifdef HAVE_PICO
+			if (pic->priority_map->nibble_packed)
+				ctl_fill(pic->priority_map->index_data, ytotal + xl, xr - xl + 1, (byte) priority);
+			else
+#endif
 			memset(pic->priority_map->index_data + ytotal + xl, priority, xr - xl + 1);
 
 
@@ -201,14 +216,14 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 		state = 0;
 		xcont = xr + 1;
 		while (xcont <= old_xr) {
-			if (IS_BOUNDARY(xcont, y+1, bounds[ytotal + xcont]))
+			if (IS_BOUNDARY(xcont, y+1, BOUNDS_AT(ytotal + xcont)))
 				state = xcont;
 			else if (state) { /* recurse */
 				PRINT_DEBUG4("[%d[%d,%d],%d]: ", old_xl, xl, xr, old_xr);
 				PRINT_DEBUG4("rec BRANCH %d [%d,%d] l%d\n", dy, state, xcont, y - dy);
 
 				FILL_FUNCTION_RECURSIVE(pic, state, xcont, y - dy, dy, bounds, legalcolor,
-							legalmask, color, priority, drawenable, sci_titlebar_size);
+							legalmask, color, priority, drawenable, sci_titlebar_size, bounds_packed);
 				state = 0;
 			}
 			++xcont;
@@ -219,7 +234,7 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 		if (xl < old_xl - 1) {
 			state = 0;
 			for (xcont = old_xl-1; xcont >= xl; xcont--) {
-				if (IS_BOUNDARY(xcont, y, bounds[oldytotal + xcont]))
+				if (IS_BOUNDARY(xcont, y, BOUNDS_AT(oldytotal + xcont)))
 					state = xcont;
 				else if (state) { /* recurse */
 					PRINT_DEBUG4("[%d[%d,%d],%d]: ", old_xl, xl, xr, old_xr);
@@ -227,7 +242,7 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 
 					FILL_FUNCTION_RECURSIVE(pic, xcont, state, y, -dy, bounds,
 								legalcolor, legalmask, color, priority, drawenable,
-								sci_titlebar_size);
+								sci_titlebar_size, bounds_packed);
 					state = 0;
 				}
 			}
@@ -237,7 +252,7 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 		if (xr > old_xr + 1) {
 			state = 0;
 			for (xcont = old_xr + 1; xcont <= xr; xcont++) {
-				if (IS_BOUNDARY(xcont, y, bounds[oldytotal + xcont]))
+				if (IS_BOUNDARY(xcont, y, BOUNDS_AT(oldytotal + xcont)))
 					state = xcont;
 				else if (state) { /* recurse */
 					PRINT_DEBUG4("[%d[%d,%d],%d]: ", old_xl, xl, xr, old_xr);
@@ -245,7 +260,7 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 
 					FILL_FUNCTION_RECURSIVE(pic, state, xcont, y, -dy, bounds,
 								legalcolor, legalmask, color, priority, drawenable,
-								sci_titlebar_size);
+								sci_titlebar_size, bounds_packed);
 					state = 0;
 				}
 			}
@@ -269,6 +284,7 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 	int ytotal;
 	int bitmask;
 	byte *bounds = NULL;
+	int bounds_packed = 0;
 	int legalcolor, legalmask;
 #ifdef DRAW_SCALED
 	int min_x, min_y, max_x, max_y;
@@ -346,6 +362,9 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 #endif
 	} else if (drawenable & GFX_MASK_PRIORITY) {
 		bounds = pic->priority_map->index_data;
+#ifdef HAVE_PICO
+		bounds_packed = pic->priority_map->nibble_packed;
+#endif
 		legalcolor = 0;
 		legalmask = 0x0f0f;
 	} else {
@@ -353,7 +372,7 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 		legalmask = 0x0f0f;
 	}
 
-	if (!bounds || IS_BOUNDARY(x, y, bounds[ytotal + x]))
+	if (!bounds || IS_BOUNDARY(x, y, BOUNDS_AT(ytotal + x)))
 		return;
 
 	if (bounds) {
@@ -395,10 +414,10 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 		proj_xr_bound += pic->mode->xfact -1;
 #endif
 		xl = x;
-		while (xl > proj_xl_bound && (!IS_BOUNDARY(xl-1, y, bounds[ytotal + xl -1])))
+		while (xl > proj_xl_bound && (!IS_BOUNDARY(xl-1, y, BOUNDS_AT(ytotal + xl -1))))
 			--xl;
 
-		while (x < proj_xr_bound && (!IS_BOUNDARY(x+1, y, bounds[ytotal + x + 1])))
+		while (x < proj_xr_bound && (!IS_BOUNDARY(x+1, y, BOUNDS_AT(ytotal + x + 1))))
 			++x;
 		xr = x;
 
@@ -406,12 +425,17 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 			memset(pic->visual_map->index_data + ytotal + xl, color, xr - xl + 1);
 
 		if (drawenable & GFX_MASK_PRIORITY)
+#ifdef HAVE_PICO
+			if (pic->priority_map->nibble_packed)
+				ctl_fill(pic->priority_map->index_data, ytotal + xl, xr - xl + 1, (byte) priority);
+			else
+#endif
 			memset(pic->priority_map->index_data + ytotal + xl, priority, xr - xl + 1);
 
 		FILL_FUNCTION_RECURSIVE(pic, xl, xr, y, -1, bounds, legalcolor, legalmask, color, priority, drawenable,
-					sci_titlebar_size);
+					sci_titlebar_size, bounds_packed);
 		FILL_FUNCTION_RECURSIVE(pic, xl, xr, y, +1, bounds, legalcolor, legalmask, color, priority, drawenable,
-					sci_titlebar_size);
+					sci_titlebar_size, bounds_packed);
 	}
 
 	/* Now finish the aux buffer */
@@ -432,6 +456,7 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 
 #undef SCALED_CHECK
 #undef IS_BOUNDARY
+#undef BOUNDS_AT
 
 #ifndef DRAW_SCALED
 #  undef proj_xl_bound

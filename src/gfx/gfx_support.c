@@ -308,6 +308,7 @@ gfx_crossblit_pixmap(gfx_mode_t *mode, gfx_pixmap_t *pxm, int priority,
 	int xoffset = (dest_coords.x < 0)? - dest_coords.x : 0;
 	int yoffset = (dest_coords.y < 0)? - dest_coords.y : 0;
 	int revalpha = mode->flags & GFX_MODE_FLAG_REVERSE_ALPHA;
+	int _probe_dx = dest_coords.x, _probe_dy = dest_coords.y;  /* [dpblit] probe */
 
 	if (src_coords.x + src_coords.xl > xl)
 		src_coords.xl = xl - src_coords.x;
@@ -367,6 +368,31 @@ gfx_crossblit_pixmap(gfx_mode_t *mode, gfx_pixmap_t *pxm, int priority,
 		xl = src_coords.xl;
 	if (yl > src_coords.yl)
 		yl = src_coords.yl;
+
+	/* [dpblit] probe: mirror the Pico [pblit] line so desktop vs Pico priority-map
+	   values are directly comparable.  Enable with FREESCI_PRIPROBE=1.  Summarizes
+	   the background priority sampled under this cel's footprint (mode->bytespp==1
+	   only, i.e. the 8bpp path that matches Pico). */
+	if (priority_dest && priority >= 0 && priority_skip == 1
+	    && xl > 0 && yl > 0 && getenv("FREESCI_PRIPROBE")) {
+		static unsigned _dp_call = 0;
+		int pmin = 99, pmax = -1, yy, xx, drawn = 0, supp = 0;
+		byte *prow = priority_pos;
+		for (yy = 0; yy < yl; yy++) {
+			for (xx = 0; xx < xl; xx++) {
+				int v = prow[xx];
+				if (v < pmin) pmin = v;
+				if (v > pmax) pmax = v;
+				if (v <= priority) drawn++; else supp++;
+			}
+			prow += priority_line_width;
+		}
+		if (supp > 0 && (_dp_call++ & 7) == 0)
+			sciprintf("[dpblit] cel pri=%d dest=(%d,%d %dx%d) bgpri=%d..%d "
+				  "drawn=%d supp=%d\n",
+				  priority, _probe_dx, _probe_dy, xl, yl, pmin, pmax,
+				  drawn, supp);
+	}
 
 	/* now calculate alpha */
 	if (pxm->alpha_map)

@@ -223,10 +223,10 @@ gfx_new_pixmap(int xl, int yl, int resid, int loop, int cel)
 
 	pxm->index_data = NULL;
 
+	pxm->nibble_packed = 0;
 #ifdef HAVE_PICO
 	pxm->psram_addr  = 0;
 	pxm->psram_valid = 0;
-	pxm->nibble_packed = 0;
 #endif
 
 	pxm->flags = 0;

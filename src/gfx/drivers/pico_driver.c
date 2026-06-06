@@ -419,7 +419,9 @@ static int pico_draw_filled_rect(struct _gfx_driver *drv, rect_t rect,
 /* Used when pxm->data is NULL (skipped in gfx_xlate_pixmap for Pico) */
 /* ------------------------------------------------------------------ */
 
-static uint8_t s_psram_row[PICO_XSIZE]; /* scratch row for PSRAM reads */
+static uint8_t s_psram_row[PICO_XSIZE]; /* scratch row for PSRAM reads (source index) */
+static uint8_t s_pri_row[PICO_XSIZE];   /* scratch row for PSRAM reads (priority) */
+static uint8_t s_pri_pack[(PICO_XSIZE >> 1) + 1]; /* packed-nibble scratch for the priority readback */
 
 /* Map an RGB triple to the closest entry in the Pico palette. */
 static uint8_t
@@ -478,6 +480,21 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
     uint8_t *row_dst = destbuf;
     uint8_t *row_pri = pri_buf;
 
+    /* Priority source for occlusion gating.  The engine's priority_map holds the
+       background's baked-in priorities, but on Pico its index_data is offloaded to
+       PSRAM after decode (operations.c:2334), so the caller passes pri_buf=NULL.
+       When that happens, read the priority row back from PSRAM per row (read-only —
+       we never write sprite priorities back, so the PSRAM map stays the clean
+       background base and no cross-frame priority trail accumulates).  This gives
+       correct background occlusion; inter-sprite z-order is not gated. */
+    int psram_pri = (!row_pri && priority >= 0 && s_shared_priority
+                     && !s_shared_priority->index_data && s_shared_priority->psram_valid);
+    int pri_xl = psram_pri ? s_shared_priority->index_xl : 0;
+    int pri_yl = psram_pri ? s_shared_priority->index_yl : 0;
+
+    /* [pblit] probe: per-sprite occlusion summary (throttled, strip later). */
+    int pb_drawn = 0, pb_supp = 0, pb_min = 99, pb_max = -1;
+
     for (int y = 0; y < yl; y++) {
         const byte *row_src;
         if (use_psram) {
@@ -487,16 +504,76 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
         } else {
             row_src = pxm->index_data + (src.y + y) * pxm->index_xl + src.x;
         }
+
+        const uint8_t *pri_row = row_pri;  /* SRAM priority row, or NULL */
+        if (psram_pri) {
+            int py = dest.y + y;
+            if (py >= 0 && py < pri_yl && dest.x >= 0 && dest.x + xl <= pri_xl) {
+                if (s_shared_priority->nibble_packed) {
+                    /* Priority map is 2 px/byte in PSRAM (merged-decode packing).
+                       Read the packed byte span covering this row and unpack the
+                       nibbles into s_pri_row (mirrors _gfxop_scan_one_bitmask). */
+                    int pidx  = py * pri_xl + dest.x;
+                    int byte0 = pidx >> 1;
+                    int byteN = (pidx + xl - 1) >> 1;
+                    size_t nbytes = (size_t)(byteN - byte0 + 1);
+                    psram_load(s_shared_priority->psram_addr + (uint32_t)byte0,
+                               s_pri_pack, nbytes);
+                    for (int px = 0; px < xl; px++) {
+                        int p = pidx + px;
+                        uint8_t b = s_pri_pack[(p >> 1) - byte0];
+                        s_pri_row[px] = (p & 1) ? (b >> 4) : (b & 0x0f);
+                    }
+                } else {
+                    psram_load(s_shared_priority->psram_addr
+                               + (uint32_t)(py * pri_xl + dest.x),
+                               s_pri_row, (size_t)xl);
+                }
+                pri_row = s_pri_row;   /* gate against background base priority */
+            }
+            /* else: row off the priority map -> pri_row stays NULL -> write through */
+        }
+
         for (int x = 0; x < xl; x++) {
             byte idx = row_src[x];
             if (!has_alpha || idx != color_key) {
-                row_dst[x] = lut[idx];
-                if (row_pri && priority >= 0 && (int)row_pri[x] <= priority)
-                    row_pri[x] = (uint8_t)priority;
+                if (pri_row && priority >= 0) {
+                    /* Highest-priority-wins: background scenery whose baked-in
+                       priority exceeds this cel's occludes it (matches the SDL
+                       crossblit gating in gfx_crossblit.c). */
+                    int bp = pri_row[x];
+                    if (psram_pri) {
+                        if (bp < pb_min) pb_min = bp;
+                        if (bp > pb_max) pb_max = bp;
+                    }
+                    if ((int)pri_row[x] <= priority) {
+                        row_dst[x] = lut[idx];
+                        if (row_pri)  /* only the SRAM map is written back */
+                            row_pri[x] = (uint8_t)priority;
+                        if (psram_pri) pb_drawn++;
+                    } else if (psram_pri) {
+                        pb_supp++;
+                    }
+                } else {
+                    /* No priority map (background fill, text): always write. */
+                    row_dst[x] = lut[idx];
+                }
             }
         }
         row_dst += dest_stride;
         if (row_pri) row_pri += pri_stride;
+    }
+
+    /* [pblit] probe: report sprites whose pixels were occlusion-suppressed, so the
+       cel priority can be compared against the background priority under it.
+       Throttled to 1-in-8 to keep the serial log readable while walking. */
+    if (psram_pri && pb_supp > 0) {
+        static unsigned pb_call = 0;
+        if ((pb_call++ & 7) == 0)
+            sciprintf("[pblit] cel pri=%d dest=(%d,%d %dx%d) bgpri=%d..%d "
+                      "drawn=%d supp=%d\n",
+                      priority, dest.x, dest.y, xl, yl,
+                      pb_min, pb_max, pb_drawn, pb_supp);
     }
 }
 

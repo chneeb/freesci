@@ -35,9 +35,6 @@
 #include <sciresource.h>
 #include <pico/stdlib.h>
 
-/* Filled by gfxr_interpreter_calculate_pic pass 2; consumed in gfxop_new_pic */
-byte *g_pico_decode_priority_buf = NULL;
-
 /* Visual decode buffer (64KB).  Normally NULL: sci_resmgr.c allocates it late
    (after the pic resource is evicted to PSRAM) so it doesn't burden the
    decompress.  Set non-NULL only by the fragmentation-fallback retry in
@@ -2197,8 +2194,24 @@ static int
 _gfxop_set_pic(gfx_state_t *state)
 {
 	gfx_copy_pixmap_box_i(state->control_map, state->pic->control_map, gfx_rect(0, 0, 320, 200));
-	gfx_copy_pixmap_box_i(state->priority_map, state->pic_unscaled->priority_map, gfx_rect(0, 0, 320, 200)); 
+	gfx_copy_pixmap_box_i(state->priority_map, state->pic_unscaled->priority_map, gfx_rect(0, 0, 320, 200));
 	gfx_copy_pixmap_box_i(state->static_priority_map, state->pic_unscaled->priority_map, gfx_rect(0, 0, 320, 200));
+
+	/* [dpcol] ground-truth dump: the 1x priority-map column Roger walks down in
+	   SQ3 room 3 (x=82, rows 35-120), directly comparable to the Pico [pblit]
+	   bgpri readings.  One line per pic set.  Enable with FREESCI_PRIPROBE=1. */
+	if (getenv("FREESCI_PRIPROBE") && state->priority_map
+	    && state->priority_map->index_data) {
+		int _y, _xl = state->priority_map->index_xl;
+		char _buf[512];
+		int _n = 0;
+		_n += snprintf(_buf + _n, sizeof(_buf) - _n,
+			       "[dpcol] x=82 rows35-120 pri:");
+		for (_y = 35; _y <= 120 && _n < (int)sizeof(_buf) - 8; _y++)
+			_n += snprintf(_buf + _n, sizeof(_buf) - _n, " %d",
+				       state->priority_map->index_data[_y * _xl + 82]);
+		sciprintf("%s\n", _buf);
+	}
 
 	_gfxop_install_pixmap(state->driver, state->pic->visual_map);
 
@@ -2321,28 +2334,27 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	retval = _gfxop_set_pic(state);
 
 #ifdef HAVE_PICO
-	/* Wire the decoded priority buffer into state->priority_map.
-	   _gfxop_set_pic's gfx_copy_pixmap_box_i was a no-op (pic's priority NULL),
-	   so priority_map->index_data is still NULL — assign it now. */
-	if (g_pico_decode_priority_buf) {
-		state->priority_map->index_data = g_pico_decode_priority_buf;
-		/* static_priority_map is aliased to priority_map on Pico */
-		g_pico_decode_priority_buf = NULL;
-	}
-	pico_connect_engine_priority(state->priority_map);
-
-	/* Move priority buffer to PSRAM, freeing 64KB SRAM for visual[0]. */
+	/* Wire the decoded priority map into state->priority_map.  It was decoded
+	   nibble-packed and offloaded to PSRAM inside gfxr_interpreter_calculate_pic
+	   (the merged visual+priority pass), so pic->priority_map carries only the
+	   PSRAM metadata (index_data is already NULL).  _gfxop_set_pic's
+	   gfx_copy_pixmap_box_i was a no-op (pic's priority index_data NULL), so copy
+	   the metadata across here.  static_priority_map is aliased to priority_map
+	   on Pico, so this covers both.  pico_blit_indexed and gfxop_scan_bitmask read
+	   the packed map back from PSRAM, unpacking nibbles. */
 	{
-		gfx_pixmap_t *pm = state->priority_map;
-		if (pm && pm->index_data) {
-			size_t sz = (size_t)(pm->index_xl * pm->index_yl);
-			pm->psram_addr  = psram_alloc(sz);
-			pm->psram_valid = 1;
-			psram_store(pm->psram_addr, pm->index_data, sz);
-			free(pm->index_data);
-			pm->index_data = NULL;
+		gfx_pixmap_t *src = state->pic->priority_map;
+		gfx_pixmap_t *dst = state->priority_map;
+		if (dst && src && src->psram_valid) {
+			if (dst->index_data) { free(dst->index_data); dst->index_data = NULL; }
+			dst->index_xl       = src->index_xl;
+			dst->index_yl       = src->index_yl;
+			dst->psram_addr     = src->psram_addr;
+			dst->psram_valid    = src->psram_valid;
+			dst->nibble_packed  = src->nibble_packed;
 		}
 	}
+	pico_connect_engine_priority(state->priority_map);
 
 	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors.
 	   Must happen before pico_render_background calls flush_region. */

@@ -253,6 +253,32 @@ The old "Roger won't walk / freeze on landing in room 2" was **never an input bu
 undersized VM value stack (`VM_STACK_SIZE 0x400`, see correctness fixes above). A second crash
 (panic while walking / on text input) was the **clone-table OOM** fixed by `GC_INTERVAL 2048`.
 
+### RESOLVED — Roger sinks under the floor in SQ3 room 3 (priority line-tracer mismatch)
+
+On the merged/nibble-packed Pico decode, room 3 (pic 2051) painted a spurious priority band where
+desktop had none — ego walked down, hit it, and got occluded by "floor" until he left the room.
+Localized with the `[pcol]`/`[dpcol]` column probes: at x=82, rows 63-86 read **10 on Pico vs 0 on
+desktop**; every other row matched. A priority-10 flood-fill was leaking into a pocket that is sealed
+on desktop.
+
+**Root cause — NOT a nibble-packing bug.** The packed writers (`ctl_get`/`ctl_set`/`ctl_fill`, the
+clear, the fill core, `IS_BOUNDARY`/`BOUNDS_AT`) were all correct. The bug was the **line tracer**:
+`ctl_draw_line` (used for the Pico packed priority AND control maps) was a generic integer Bresenham,
+while the desktop path (`gfx_draw_line_pixmap_i` → `gfx_draw_line_buffer`, `gfx_line.c` `LINEMACRO`)
+is a **midpoint DDA**. The two algorithms pick different pixels on **~32% of segments** (measured:
+1275/4032 in a standalone diff). Where a priority *boundary* line shifts by one pixel, it opens a gap
+that the 4-connected priority flood-fill leaks through → the spurious band. Desktop never hits this
+because it only uses the midpoint tracer; Pico mixed the two.
+
+**Fix (`sci_pic_0.c` `ctl_draw_line`).** Rewrote it to mirror the desktop midpoint DDA *exactly*
+(major axis steps every iter, minor axis steps when the decision var goes negative, decision var
+seeded at `major_delta - 1`), writing via `ctl_set` for nibble-packing. Verified **pixel-identical to
+the desktop tracer across 853,760 sampled lines, 0 divergent**. Fixes both priority and control
+boundary lines. Device-confirmed: room 3 `[pcol]` rows 63-86 now read 0, ego stays visible on the
+floor. **Lesson:** any Pico packed-buffer drawing primitive must trace the *same pixels* as its
+desktop byte-buffer counterpart, not merely be "a correct line/box" — a one-pixel divergence in a
+boundary is enough to break a downstream flood-fill.
+
 ### RESOLVED — garbage rectangle during shadow/priority redraws
 Cached views survived a room change with a stale `psram_addr`. `gfxr_free_all_pics`
 (`src/gfx/resmgr.c`, called on every room change) freed the PIC tree and called `psram_reset()`

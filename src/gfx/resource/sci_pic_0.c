@@ -71,22 +71,56 @@ static inline void ctl_fill(byte *b, int i, int n, byte v) {
 	while (n-- > 0)
 		ctl_set(b, i++, v);
 }
-/* Bresenham line into the packed control buffer (replaces gfx_draw_line_pixmap_i
-   for the control map, which assumes one byte per pixel). */
+/* Line into a packed (2 px/byte) buffer (replaces gfx_draw_line_pixmap_i for the
+   control AND priority maps, which assume one byte per pixel).  This MUST trace
+   the exact same pixels as the desktop path (gfx_line.c LINEMACRO, a midpoint
+   DDA), NOT a generic Bresenham: the two algorithms disagree on ~32% of segments,
+   and a single-pixel shift in a priority boundary line opens a 4-connected gap
+   that a later priority flood-fill leaks through (Roger sinks under the floor in
+   SQ3 room 3 — a spurious priority band where desktop has none). So mirror the
+   midpoint stepping exactly: major axis steps every iter, minor axis steps when
+   the decision var goes negative, decision var seeded at (major_delta - 1). */
 static void ctl_draw_line(byte *b, point_t s, point_t e, int color) {
-	int x0 = s.x, y0 = s.y, x1 = e.x, y1 = e.y;
-	int dx = abs(x1 - x0), dy = abs(y1 - y0);
-	int sx = (x0 < x1) ? 1 : -1, sy = (y0 < y1) ? 1 : -1;
-	int err = dx - dy, e2;
-	for (;;) {
-		if (x0 >= 0 && x0 < 320 && y0 >= 0 && y0 < 200)
-			ctl_set(b, y0 * 320 + x0, (byte) color);
-		if (x0 == x1 && y0 == y1)
-			break;
-		e2 = 2 * err;
-		if (e2 > -dy) { err -= dy; x0 += sx; }
-		if (e2 <  dx) { err += dx; y0 += sy; }
+	int x = s.x, y = s.y, ex = e.x, ey = e.y;
+	int dx, dy, xstep, ystep, d, incrE, incrNE;
+	if (!b) return; /* map offloaded to PSRAM (index_data NULL) — no-op like gfx_draw_line_pixmap_i */
+	dx = ex - x; dy = ey - y;
+	xstep = (dx < 0) ? -1 : 1;
+	ystep = (dy < 0) ? -1 : 1;
+	dx = abs(dx); dy = abs(dy);
+	if (dx > dy) {
+		d = dx - 1; incrE = -2 * dy; incrNE = 2 * dx;
+		while (x != ex) {
+			if (x >= 0 && x < 320 && y >= 0 && y < 200)
+				ctl_set(b, y * 320 + x, (byte) color);
+			x += xstep;
+			if ((d += incrE) < 0) { d += incrNE; y += ystep; }
+		}
+	} else {
+		d = dy - 1; incrE = -2 * dx; incrNE = 2 * dy;
+		while (y != ey) {
+			if (x >= 0 && x < 320 && y >= 0 && y < 200)
+				ctl_set(b, y * 320 + x, (byte) color);
+			y += ystep;
+			if ((d += incrE) < 0) { d += incrNE; x += xstep; }
+		}
 	}
+	if (x >= 0 && x < 320 && y >= 0 && y < 200)
+		ctl_set(b, y * 320 + x, (byte) color);
+}
+/* Filled box into a packed buffer (replaces gfx_draw_box_pixmap_i for the
+   nibble-packed priority map).  box is in unscaled 320x200 pixel space. */
+static void ctl_draw_box(byte *b, rect_t box, int color) {
+	int yy;
+	int x0 = box.x, y0 = box.y;
+	if (!b) return; /* map offloaded to PSRAM (index_data NULL) — no-op like gfx_draw_box_pixmap_i */
+	int x1 = box.x + box.xl, y1 = box.y + box.yl;
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > 320) x1 = 320;
+	if (y1 > 200) y1 = 200;
+	for (yy = y0; yy < y1; yy++)
+		ctl_fill(b, yy * 320 + x0, x1 - x0, (byte) color);
 }
 #endif
 
@@ -314,11 +348,23 @@ gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
 		       0xff, pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size));
 	}
 	if (pic->priority_map->index_data) {
+#ifdef HAVE_PICO
+		if (pic->priority_map->nibble_packed) {
+			/* 2 px/byte.  Titlebar rows = priority 0x0a (packed byte 0xaa),
+			   below = 0x00.  xfact==yfact==1 on the packed (Pico) path. */
+			int tb_px = sci_titlebar_size * 320;
+			memset(pic->priority_map->index_data, 0xaa, tb_px >> 1);
+			memset(pic->priority_map->index_data + (tb_px >> 1), 0x00,
+			       ((200 - sci_titlebar_size) * 320 + 1) >> 1);
+		} else
+#endif
+		{
 		memset(pic->priority_map->index_data
 		       + 320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact,
 		       0x0, pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size));
 		memset(pic->priority_map->index_data, 0x0a,
 		       sci_titlebar_size * pic->mode->yfact * 320 * pic->mode->xfact);
+		}
 	}
 	if (pic->control_map->index_data)
 #ifdef HAVE_PICO
@@ -717,7 +763,7 @@ enum {
 
 static void
 _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
-		   int rad_x, int rad_y, int color, int fillstyle)
+		   int rad_x, int rad_y, int color, int fillstyle, int packed)
 {
 	int xx = 0, yy = rad_y;
 	int i, x_i, y_i;
@@ -761,16 +807,34 @@ _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
 			switch (fillstyle) {
 
 			case ELLIPSE_SOLID:
+#ifdef HAVE_PICO
+				if (packed) {
+					ctl_fill(buffer, offset0, (oldxx << 1) + 1, color);
+					if (offset1)
+						ctl_fill(buffer, offset1, (oldxx << 1) + 1, color);
+				} else
+#endif
+				{
 				memset(buffer + offset0, color, (oldxx << 1) + 1);
 				if (offset1)
 					memset(buffer + offset1, color, (oldxx << 1) + 1);
+				}
 				break;
 
 			case ELLIPSE_OR:
 				for (j=0; j < (oldxx << 1) + 1; j++) {
+#ifdef HAVE_PICO
+					if (packed) {
+						ctl_set(buffer, offset0 + j, ctl_get(buffer, offset0 + j) | color);
+						if (offset1)
+							ctl_set(buffer, offset1 + j, ctl_get(buffer, offset1 + j) | color);
+					} else
+#endif
+					{
 					buffer[offset0 + j] |= color;
 					if (offset1)
 						buffer[offset1 + j] |= color;
+					}
 				}
 				break;
 
@@ -785,7 +849,7 @@ _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
 
 static inline void
 _gfxr_auxplot_brush(gfxr_pic_t *pic, byte *buffer, int yoffset, int offset, int plot,
-		    int color, gfx_brush_mode_t brush_mode, int randseed)
+		    int color, gfx_brush_mode_t brush_mode, int randseed, int packed)
 {
 	if (!buffer) return;
 	/* yoffset 63680, offset 320, plot 1, color 34, brush_mode 0, randseed 432)*/
@@ -802,6 +866,11 @@ _gfxr_auxplot_brush(gfxr_pic_t *pic, byte *buffer, int yoffset, int offset, int 
 	case GFX_BRUSH_MODE_SCALED:
 		if (plot)
 			for (yc = 0; yc < pic->mode->yfact; yc++) {
+#ifdef HAVE_PICO
+				if (packed)
+					ctl_fill(buffer, full_offset, pic->mode->xfact, color);
+				else
+#endif
 				memset(buffer + full_offset, color, pic->mode->xfact);
 				full_offset += line_width;
 			}
@@ -813,7 +882,7 @@ _gfxr_auxplot_brush(gfxr_pic_t *pic, byte *buffer, int yoffset, int offset, int 
 			int y = (yoffset / 320) * pic->mode->yfact + ((pic->mode->yfact -1) >> 1); /* Ouch! */
 
 			_gfxr_fill_ellipse(pic, buffer, line_width, x, y, pic->mode->xfact >> 1, pic->mode->yfact >> 1,
-					   color, ELLIPSE_SOLID);
+					   color, ELLIPSE_SOLID, packed);
 		}
 		break;
 
@@ -834,7 +903,7 @@ _gfxr_auxplot_brush(gfxr_pic_t *pic, byte *buffer, int yoffset, int offset, int 
 			sizey = (int) ((sizey * rand()*1.0)/(RAND_MAX + 1.0));
 
 			_gfxr_fill_ellipse(pic, buffer, line_width, x, y, pic->mode->xfact >> 1, pic->mode->yfact >> 1,
-					   color, ELLIPSE_SOLID);
+					   color, ELLIPSE_SOLID, packed);
 			srand(time(NULL)); /* Make sure we don't accidently forget to re-init the random number generator */
 		}
 		break;
@@ -845,7 +914,16 @@ _gfxr_auxplot_brush(gfxr_pic_t *pic, byte *buffer, int yoffset, int offset, int 
 		for (yc = 0; yc < pic->mode->yfact; yc++) {
 			for (xc = 0; xc < pic->mode->xfact; xc++)
 				if ((rand() & 7) < mask)
+#ifdef HAVE_PICO
+				{
+					if (packed)
+						ctl_set(buffer, full_offset + xc, color);
+					else
+						buffer[full_offset + xc] = color;
+				}
+#else
 					buffer[full_offset + xc] = color;
+#endif
 			full_offset += line_width;
 		}
 		srand(time(NULL)); /* Make sure we don't accidently forget to re-init the random number generator */
@@ -936,7 +1014,7 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 
 			if ((mask & map_nr) && map->index_data)
 #ifdef HAVE_PICO
-				if (map_nr == GFX_MASK_CONTROL && map->nibble_packed)
+				if (map->nibble_packed)
 					ctl_fill(map->index_data, yoffset + offset + x, width, control);
 				else
 #endif
@@ -963,23 +1041,25 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 					if (mask & GFX_MASK_VISUAL)
 						_gfxr_auxplot_brush(pic, pic->visual_map->index_data,
 								    yoffset, x + offset + j,
-								    1, color, brush_mode, random_index + x);
+								    1, color, brush_mode, random_index + x, 0);
 
 					if (mask & GFX_MASK_PRIORITY)
 						_gfxr_auxplot_brush(pic, pic->priority_map->index_data,
 								    yoffset, x + offset + j,
-								    1, priority, brush_mode, random_index + x);
+								    1, priority, brush_mode, random_index + x,
+								    pic->priority_map->nibble_packed);
 
 				} else {
 					if (mask & GFX_MASK_VISUAL)
 						_gfxr_auxplot_brush(pic, pic->visual_map->index_data,
 								    yoffset, x + offset + j,
-								    0, color, brush_mode, random_index + x);
+								    0, color, brush_mode, random_index + x, 0);
 
 					if (mask & GFX_MASK_PRIORITY)
 						_gfxr_auxplot_brush(pic, pic->priority_map->index_data,
 								    yoffset, x + offset + j,
-								    0, priority, brush_mode, random_index + x);
+								    0, priority, brush_mode, random_index + x,
+								    pic->priority_map->nibble_packed);
 				}
 				random_index = (random_index + 1) & 0xff;
 			}
@@ -1056,6 +1136,11 @@ _gfxr_draw_pattern(gfxr_pic_t *pic, int x, int y, int color, int priority, int c
 				gfx_draw_box_pixmap_i(pic->visual_map, boundaries, color);
 
 			if (drawenable & GFX_MASK_PRIORITY)
+#ifdef HAVE_PICO
+				if (pic->priority_map->nibble_packed)
+					ctl_draw_box(pic->priority_map->index_data, boundaries, priority);
+				else
+#endif
 				gfx_draw_box_pixmap_i(pic->priority_map, boundaries, priority);
 		}
 
@@ -1095,12 +1180,13 @@ _gfxr_draw_pattern(gfxr_pic_t *pic, int x, int y, int color, int priority, int c
 				if (drawenable & GFX_MASK_VISUAL)
 					_gfxr_fill_ellipse(pic, pic->visual_map->index_data, 320 * pic->mode->xfact,
 							   scaled_x, scaled_y, xsize, ysize,
-							   color, ELLIPSE_SOLID);
+							   color, ELLIPSE_SOLID, 0);
 
 				if (drawenable & GFX_MASK_PRIORITY)
 					_gfxr_fill_ellipse(pic, pic->priority_map->index_data, 320 * pic->mode->xfact,
 							   scaled_x, scaled_y, xsize, ysize,
-							   priority, ELLIPSE_SOLID);
+							   priority, ELLIPSE_SOLID,
+							   pic->priority_map->nibble_packed);
 			}
 		}
 	}
@@ -1128,6 +1214,11 @@ _gfxr_draw_subline(gfxr_pic_t *pic, int x, int y, int ex, int ey, int color, int
 		gfx_draw_line_pixmap_i(pic->visual_map, start, end, color);
 
 	if (drawenable & GFX_MASK_PRIORITY)
+#ifdef HAVE_PICO
+		if (pic->priority_map->nibble_packed)
+			ctl_draw_line(pic->priority_map->index_data, start, end, priority);
+		else
+#endif
 		gfx_draw_line_pixmap_i(pic->priority_map, start, end, priority);
 
 }
@@ -1228,6 +1319,11 @@ _gfxr_draw_line(gfxr_pic_t *pic, int x, int y, int ex, int ey, int color,
 				gfx_draw_box_pixmap_i(pic->visual_map, drawrect, color);
 
 			if (drawenable & GFX_MASK_PRIORITY)
+#ifdef HAVE_PICO
+				if (pic->priority_map->nibble_packed)
+					ctl_draw_box(pic->priority_map->index_data, drawrect, priority);
+				else
+#endif
 				gfx_draw_box_pixmap_i(pic->priority_map, drawrect, priority);
 
 		} else {

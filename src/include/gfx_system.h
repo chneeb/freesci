@@ -337,10 +337,10 @@ typedef struct { /* gfx_pixmap_t: Pixel map */
 		void *info; /* initialized to NULL */
 	} internal;
 
+	unsigned char nibble_packed; /* 1 when index_data holds 2 pixels/byte; always 0 on desktop */
 #ifdef HAVE_PICO
 	uint32_t psram_addr;  /* PSRAM byte address of index_data when offloaded */
 	uint8_t  psram_valid; /* 1 when psram_addr holds live PSRAM data for index_data */
-	uint8_t  nibble_packed; /* 1 when index_data holds 2 pixels/byte (control map only) */
 	void    *pico_reg_next; /* live-pixmap registry link (gfx_tools.c), diagnostic only */
 #endif
 
