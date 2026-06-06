@@ -82,6 +82,41 @@ static int pico_ensure_visual(gfx_driver_t *drv)
     return ((struct _pico_state *)drv->state)->visual[0] != NULL;
 }
 
+/* Fixed PSRAM scratch for the parse-time visual borrow. Placed at 7MB, far
+   above the room bump arena (grows from 0, well under 1MB/room), below the 8MB
+   top. Reused every parse — only one borrow is ever live at a time (kParse is
+   synchronous and the game is paused while a typed command is parsed). */
+#define PICO_PARSE_SCRATCH_ADDR  0x700000u
+
+/* Borrow the 64KB visual back-buffer to PSRAM for the duration of a paused
+   computation (GNF text parsing, which can transiently need ~90KB). The
+   composited frame is saved so it can be restored intact — SCI redraws
+   incrementally, so we must not lose it. Returns 1 if a buffer was offloaded,
+   0 if there was nothing to borrow (already freed). */
+int pico_borrow_visual(gfx_driver_t *drv)
+{
+    struct _pico_state *ps = (struct _pico_state *)drv->state;
+    if (!ps || !ps->visual[0])
+        return 0;
+    psram_store(PICO_PARSE_SCRATCH_ADDR, ps->visual[0], PICO_XSIZE * PICO_YSIZE);
+    sci_free(ps->visual[0]);
+    ps->visual[0] = NULL;
+    return 1;
+}
+
+/* Re-acquire the visual back-buffer freed by pico_borrow_visual and restore
+   its saved contents. sci_malloc halts legibly on OOM (the residual risk: a
+   command whose parse fragments the heap so badly the 64KB can't be reclaimed),
+   rather than corrupting silently. */
+void pico_return_visual(gfx_driver_t *drv)
+{
+    struct _pico_state *ps = (struct _pico_state *)drv->state;
+    if (!ps || ps->visual[0])
+        return;  /* nothing was borrowed, or already restored */
+    ps->visual[0] = (uint8_t *)sci_malloc(PICO_XSIZE * PICO_YSIZE);
+    psram_load(PICO_PARSE_SCRATCH_ADDR, ps->visual[0], PICO_XSIZE * PICO_YSIZE);
+}
+
 #define S  ((struct _pico_state *)(drv->state))
 
 /* Scratch row for palette→RGB24 conversion (960 bytes) */

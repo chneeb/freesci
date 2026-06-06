@@ -129,13 +129,35 @@ _init_vocabulary(state_t *s) /* initialize vocabulary and related resources */
 		}
 	}
 #endif /* PICO_VOCAB_PROBE */
-	/* On Pico, skip the text parser vocab and selector name strings to save ~80KB.
-	   The game is still fully playable via keyboard shortcuts. */
-	s->parser_words    = NULL;
-	s->parser_rules    = NULL;
-	s->parser_suffices = NULL;
-	s->parser_branches = NULL;
-	sciprintf("Pico: parser vocabulary skipped to save RAM.\n");
+	/* Roadmap #1: re-enable the text parser on Pico. Words/suffices/branches are
+	   kept resident (they are read on every kParse), but the GNF rule list — the
+	   ~42KB the probe measured — is NOT built here. It is rebuilt per typed command
+	   inside kParse and freed afterwards (see kstring.c), so its cost is transient
+	   rather than a permanent resident charge. parser_rules stays NULL at init. */
+	if ((s->resmgr->sci_version < SCI_VERSION_01_VGA)
+	    && (s->parser_words = vocab_get_words(s->resmgr, &(s->parser_words_nr)))) {
+#ifdef PICO_PACK_VOCAB
+		/* Stage 2: collapse the ~1489 per-word blocks into one packed
+		   allocation. Must be freed with a single free() in _free_vocabulary. */
+		s->parser_words    = vocab_pack_words(s->parser_words, s->parser_words_nr);
+#endif
+		s->parser_suffices = vocab_get_suffices(s->resmgr, &(s->parser_suffices_nr));
+		s->parser_branches = vocab_get_branches(s->resmgr, &(s->parser_branches_nr));
+		s->parser_rules    = NULL;  /* rebuilt per-command in kParse */
+#ifdef PICO_PACK_VOCAB
+		sciprintf("Pico: parser vocab loaded, %d words PACKED (GNF rebuilt per command).\n",
+			  s->parser_words_nr);
+#else
+		sciprintf("Pico: parser vocab loaded, %d words unpacked (GNF rebuilt per command).\n",
+			  s->parser_words_nr);
+#endif
+	} else {
+		s->parser_words    = NULL;
+		s->parser_rules    = NULL;
+		s->parser_suffices = NULL;
+		s->parser_branches = NULL;
+		sciprintf("Pico: no parser vocabulary for this game.\n");
+	}
 
 	s->opcodes = vocabulary_get_opcodes(s->resmgr);
 
@@ -188,10 +210,14 @@ _free_vocabulary(state_t *s)
 	sciprintf("Freeing vocabulary\n");
 
 	if (s->parser_words) {
+#ifdef PICO_PACK_VOCAB
+		free(s->parser_words);  /* Stage 2: packed into one allocation */
+#else
 		vocab_free_words(s->parser_words, s->parser_words_nr);
+#endif
 		vocab_free_suffices(s->resmgr, s->parser_suffices, s->parser_suffices_nr);
 		vocab_free_branches(s->parser_branches);
-		vocab_free_rule_list(s->parser_rules);
+		vocab_free_rule_list(s->parser_rules);  /* NULL on Pico, safe */
 	}
 
 	vocabulary_free_snames(s->selector_names);

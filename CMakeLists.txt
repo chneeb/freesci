@@ -156,6 +156,15 @@ if(PLATFORM STREQUAL "pico")
     if(PICO_VOCAB_PROBE)
         add_compile_definitions(PICO_VOCAB_PROBE=1)
     endif()
+
+    # Roadmap #1 Stage 2: pack the ~1489 per-word parser blocks into one
+    # allocation (drops resident vocab ~53KB → ~33KB). OFF during bring-up so
+    # Stage 1 (unpacked, GNF rebuilt per command) can be measured first; flip ON
+    # to A/B the packed layout. See CLAUDE.md "Pico roadmap #1".
+    option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" OFF)
+    if(PICO_PACK_VOCAB)
+        add_compile_definitions(PICO_PACK_VOCAB=1)
+    endif()
 endif()
 
 # ── Global include directories ────────────────────────────────────────────────

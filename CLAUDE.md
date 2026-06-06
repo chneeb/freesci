@@ -768,7 +768,45 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
    bursty-access PSRAM cache. Consequence: the items below are independent; there is no shared
    read-cache infrastructure and no ordering dependency on this item.
 
-1. **Vocab loading → re-enable the text parser. (DESIGN DONE — code not started.)**
+1. **Vocab loading → re-enable the text parser. (DONE — device-validated on SQ3.)**
+
+   **The text parser works on Pico.** Walk around, type "Look"/"stand up"/etc. in multiple rooms,
+   ride the trash elevator + conveyor — eight+ parses in one session, no OOM, no fault, clean teardown
+   (`free=399936 used=15748` back at the chooser → no leak). What it took:
+
+   - **Re-enable the load** (`game.c` `_init_vocabulary`, `HAVE_PICO` branch): load
+     words/suffices/branches resident; `parser_rules = NULL` (GNF rebuilt per command, NOT resident).
+   - **Rebuild GNF per command** (`kstring.c` `kParse`, `HAVE_PICO`): `vocab_build_gnf` from the
+     resident branches at the top of each parse, `vocab_free_rule_list` after — so the ~50KB rule list
+     is a transient, not a permanent resident charge. (`s->parser_rules` stays NULL → no aliasing.)
+   - **THE FIX that actually mattered — borrow the visual buffer to PSRAM during the parse**
+     (`pico_driver.c` `pico_borrow_visual`/`pico_return_visual`, called from `kParse`). The GNF *build*
+     (~50KB) plus the per-word candidate expansion in `vocab_gnf_parse` (`grammar.c:646-710`, the
+     `_vinsert` double-loop at :690→:205) is a stacked transient that hit **~97KB for ambiguous commands
+     like "stand up"** and OOM-halted at `grammar.c:205` (`_vinsert`, clean `[OOM]`, not corruption).
+     The game is paused with the input window up and nothing draws during a parse, so `kParse` saves the
+     64KB visual back-buffer to a fixed PSRAM scratch (`0x700000`, clear of the room bump arena), frees
+     the SRAM, parses with **+64KB headroom**, then restores the frame byte-for-byte before returning to
+     the VM. Device: room-2 `[gnf]` free-after-build went **23912 → 87264 B**; "stand up" (room 10) went
+     **47800 B → OOM** → **117992 B, parses fine**. Cost: ~30ms PSRAM round-trip per parsed command (a
+     paused moment, imperceptible). Residual risk (accepted): if a parse fragments the heap so the 64KB
+     can't be reclaimed after, `pico_return_visual`'s `sci_malloc` halts with a legible `[OOM]` naming
+     `pico_driver.c` — degrades loudly, never corrupts.
+   - **Stage 2 word-packing** (`vocab_pack_words`, `vocab.c`; CMake `PICO_PACK_VOCAB`, default OFF):
+     collapses the ~1489 per-word `sci_malloc`s into one allocation. **On device it bought only ~3KB**
+     (vs the ~26KB the probe predicted — `vocab_get_words`' per-record malloc overhead was far smaller
+     than estimated), so packing is NOT what made parsing fit — the PSRAM visual-borrow is. Kept as a
+     cheap, harmless baseline trim behind its flag; not load-bearing.
+   - **Stage 3 (PSRAM-resident words behind a `psram_set_floor()`) is NOT needed and was abandoned** —
+     it would have saved roughly what packing did (~little), and the real lever was the transient parse
+     peak, not the resident word baseline.
+
+   The diagnostic `[gnf]` line (`kstring.c`, `HAVE_PICO`) prints the per-command rebuild's transient
+   bytes + free heap. Leave it until the parser has more device mileage, then strip with the other probes.
+
+   ---
+   *Original design notes (kept for context / re-measuring other games):*
+
    `_init_vocabulary` (`game.c:63-85`, under `HAVE_PICO`) NULLs `parser_words`/`parser_rules`/
    `parser_suffices`/`parser_branches` to save ~80KB, so `kParse` matches an empty vocab and "look
    around" etc. do nothing. Re-enabling just means running the existing `#else` branch

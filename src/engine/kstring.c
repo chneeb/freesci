@@ -29,6 +29,13 @@
 #include <sciresource.h>
 #include <engine.h>
 #include "message.h"
+#ifdef HAVE_PICO
+#include <malloc.h>   /* mallinfo() for the [gnf] per-command rebuild probe */
+/* Borrow/restore the 64KB visual back-buffer to PSRAM around a paused parse
+   (defined in gfx/drivers/pico_driver.c). */
+extern int  pico_borrow_visual(gfx_driver_t *drv);
+extern void pico_return_visual(gfx_driver_t *drv);
+#endif
 
 /* Diagnostic probe (no behavior change, no truncation): the SCI string kernels
    write into a script-provided buffer whose real size the seg-manager knows
@@ -314,6 +321,28 @@ kParse(state_t *s, int funct_nr, int argc, reg_t *argv)
 	if (words) {
 
 		int syntax_fail = 0;
+		parse_rule_list_t *rules = s->parser_rules;
+#ifdef HAVE_PICO
+		/* Roadmap #1: the GNF rule list is ~42KB, too large to keep resident on
+		   the Pico's near-ceiling heap, so it is rebuilt here from the resident
+		   branches for this one command and freed below. The desktop keeps it
+		   resident (s->parser_rules) and skips the rebuild.
+
+		   The build (~50KB) plus the per-word candidate expansion in
+		   vocab_gnf_parse (~47KB for ambiguous commands like "stand up") can
+		   together exceed free SRAM. The game is paused with the input window up
+		   while we parse, so borrow the 64KB visual back-buffer to PSRAM for the
+		   duration and restore it before returning to the VM (no drawing happens
+		   in between). */
+		int pico_borrowed_visual =
+			(s->gfx_state && s->gfx_state->driver)
+			? pico_borrow_visual(s->gfx_state->driver) : 0;
+		int gnf_uord0 = mallinfo().uordblks;
+		if (s->parser_branches)
+			rules = vocab_build_gnf(s->parser_branches, s->parser_branches_nr);
+		sciprintf("[gnf] rebuilt rules: +%dB transient, free=%dB\n",
+			  mallinfo().uordblks - gnf_uord0, mallinfo().fordblks);
+#endif
 
 		vocab_synonymize_tokens(words, words_nr, s->synonyms, s->synonyms_nr);
 
@@ -329,8 +358,15 @@ kParse(state_t *s, int funct_nr, int argc, reg_t *argv)
 		}
 
 		if (vocab_build_parse_tree(&(s->parser_nodes[0]), words, words_nr, s->parser_branches,
-					   s->parser_rules))
+					   rules))
 			syntax_fail = 1; /* Building a tree failed */
+
+#ifdef HAVE_PICO
+		if (s->parser_branches)
+			vocab_free_rule_list(rules);  /* transient: gone until the next command */
+		if (pico_borrowed_visual)
+			pico_return_visual(s->gfx_state->driver);
+#endif
 
 #ifdef SCI_SIMPLE_SAID_CODE
 		vocab_build_simple_parse_tree(&(s->parser_nodes[0]), words, words_nr);

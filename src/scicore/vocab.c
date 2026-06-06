@@ -175,6 +175,54 @@ vocab_free_words(word_t **words, int words_nr)
 }
 
 
+#ifdef HAVE_PICO
+/* Pico roadmap #1, Stage 2: repack the per-word array from vocab_get_words (a
+   sorted word_t* table plus ~1489 individually sci_malloc'd records, ~53KB and
+   a fragmentation source) into ONE allocation — the pointer table followed by
+   the records, each 4-byte aligned. The table keeps the sorted order, so the
+   bsearch in vocab_lookup_word is unchanged; every reader just dereferences a
+   word_t* that now points into the blob. Free the whole thing with a single
+   free(parser_words); do NOT call vocab_free_words on a packed array (it would
+   free into the middle of the blob). On allocation failure the original array
+   is returned untouched, so the caller still has a working (unpacked) vocab. */
+word_t **
+vocab_pack_words(word_t **words, int words_nr)
+{
+	size_t tbl = (size_t) words_nr * sizeof(word_t *);
+	size_t recs = 0;
+	int i;
+	char *blob, *rp;
+	word_t **out;
+
+	if (!words || words_nr <= 0)
+		return words;
+
+	for (i = 0; i < words_nr; i++) {
+		size_t hdr = (char *) &words[i]->word[0] - (char *) words[i];
+		size_t rec = hdr + strlen(words[i]->word) + 1;
+		recs += (rec + 3) & ~(size_t) 3;   /* keep records 4-byte aligned */
+	}
+
+	blob = (char *) sci_malloc(tbl + recs);
+	if (!blob)
+		return words;   /* pack failed; keep the unpacked array */
+
+	out = (word_t **) blob;
+	rp = blob + tbl;
+	for (i = 0; i < words_nr; i++) {
+		size_t hdr = (char *) &words[i]->word[0] - (char *) words[i];
+		size_t rec = hdr + strlen(words[i]->word) + 1;
+		memcpy(rp, words[i], rec);
+		out[i] = (word_t *) rp;
+		rp += (rec + 3) & ~(size_t) 3;
+	}
+
+	vocab_free_words(words, words_nr);   /* drop the ~1489 small blocks */
+	return out;
+}
+#endif /* HAVE_PICO */
+
+
 const char *
 vocab_get_any_group_word(int group, word_t **words, int words_nr)
 {

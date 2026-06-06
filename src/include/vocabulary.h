@@ -253,6 +253,16 @@ vocab_free_words(word_t **words, int words_nr);
 ** Returns   : (void)
 */
 
+#ifdef HAVE_PICO
+word_t **
+vocab_pack_words(word_t **words, int words_nr);
+/* Pico-only: repacks a vocab_get_words result into a single allocation (pointer
+** table + 4-byte-aligned records) to drop ~1489 small blocks to one. The result
+** must be freed with a single free(), NOT vocab_free_words. Returns the original
+** array unchanged if the packed allocation fails.
+*/
+#endif
+
 
 suffix_t **
 vocab_get_suffices(resource_mgr_t *resmgr, int *suffices_nr);
