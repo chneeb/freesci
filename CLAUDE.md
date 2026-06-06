@@ -198,6 +198,55 @@ Two fast ways to debug Pico issues without the slow flash cycle:
    ./build/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl --disable-mouse --run
    ```
 
+3. **Enable engine debug flags on the *device* via a config file — no firmware change.** Drop a
+   file named `freesci.cfg` at the **SD card root** (`0:/freesci.cfg`, NOT inside `0:/freesci/`)
+   with one line, e.g. the parser/Said trace:
+   ```
+   debug_mode = pS
+   ```
+   It works because on Pico `sci_get_homedir()` is NULL (`tools.c`) and the hardcoded argv has no
+   `-f`, so `config_init` (`config.l`) falls back to the relative DOS path `freesci.cfg`; FatFS
+   mounts drive 0 and never chdirs, so cwd at config-init is the SD root → resolves to
+   `0:/freesci.cfg`. A header-less option lands in `conf[0]`, which is exactly what `active_conf`
+   falls back to (game_name is NULL on Pico → `find_config` returns 0, `main.c`), and
+   `set_debug_mode(gamestate, 1, "pS")` fires at `main.c`. Confirm it loaded: pico.log shows
+   `Reading configuration...` (vs `No configuration file found; using defaults.`). `p` = bit 10
+   (`SCIkPARSER`), `S` = bit 12 (Said specs); areas table at `scriptdebug.c`. The trace comes over
+   serial: `kSaid` prints `Said block: <spec>` per call and `Match.` when one matches (`kstring.c`).
+   **Desktop equivalent:** same line in `~/.freesci/config`.
+
+   The disassembler (item 1) is now persisted as `src/tools/scidisasm_safe.c` — a hardened copy
+   that NEVER writes the game dir (output goes to `$DISASM_OUT`, default `/tmp/sq3_disasm`; env
+   `DISASM_SCRIPT=N` limits to one script). Build/run instructions are in its header comment.
+
+### OPEN — PARKED — SQ3 conveyor "jump" fails (Said matcher over-matches the stand spec)
+
+The conveyor-shredder puzzle ("stand up" then "jump") is unwinnable: "stand up" works, but "jump"
+→ narrator "Check again" until Roger dies in the shredder. **Reproduces on desktop too** (shared
+engine code), so it's a FreeSCI bug, not Pico-specific. Diagnosed via the device parser trace
+(`debug_mode = pS`, see Debugging item 3) + the rm10 disassembly (`/tmp/sq3_disasm/010.script`).
+
+**Root cause:** bare "jump" spuriously **FULL-matches** rm10's **stand** Said-spec `0f2d`
+(`(acquire<up),stand [<up] [/belt,conveyer]`, handler #9 of 13). Full match + no `>` marker →
+`dontclaim=0` → `SAID_FULL_MATCH` → `PUT_SEL32V(parser_event, claimed, 1)` (`said.c`
+`augment_parse_nodes`, `kstring.c` `kSaid`). The claim stops the handler chain, so the **real**
+bare-jump handler `0f74` (`jump,leap[...] [/banister]`, handler #13, which calls `setScript
+railJump`) is never reached.
+
+**Mechanism:** both "stand up" AND "jump" match 0f2d via the identical
+`augment_match_expression_p(): Empty condition` → `return 1` path (`said.c`). The matcher treats
+0f2d as a verb-independent wildcard — correct for "stand", wrong for "jump". Upstream,
+`said_parse_spec` (bison `said.y`) builds a **degenerate said-tree** for that spec (dump shows
+`belt` landing in the required clause as `Error(0924)`); the required-word check never verifies
+"stand"/"acquire" is present and bottoms out on an empty-condition node.
+
+**Why NOT a one-line fix:** legit "stand up" relies on the SAME `Empty condition → return 1` path,
+so flipping that `return 1` to `0` would break standing up (and likely other commands). The real
+target is `said_parse_spec`/`said.y` mis-parsing specs with nested parens + comma-alternatives +
+optional brackets — needs desktop iteration and interactive validation (type "stand up" then
+"jump" in SQ3 room 10). **PARKED (2026-06-06)** per user: regression risk to the whole parser vs.
+other roadmap work.
+
 ### RESOLVED — SQ3 plays on Pico (keyboard control + room-2 freeze)
 SQ3 boots, reaches the first playable room, Roger walks, and gameplay runs without crashes.
 The old "Roger won't walk / freeze on landing in room 2" was **never an input bug** — it was the
