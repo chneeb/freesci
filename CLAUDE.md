@@ -572,6 +572,70 @@ succeeds (the "transient peak + fragmentation OOM" roadmap work: per-cel decode 
 peak-shrink). Until then, hitting a room whose pic can't decode on a fragmented heap halts cleanly with an
 `[OOM]` dump naming `operations.c` rather than HardFaulting.
 
+**DEVICE-CONFIRMED working (log f3fa5b3f, 2026-06-07).** The mitigation behaves exactly as designed: after
+a restore (into room 12) + walking 12→9→10→11→8→11, the *second* entry to room 11 hit
+`malloc 32000 failed` and produced a clean `[OOM]` LCD dump (`pic decode (no contiguous heap)`,
+`size=0xfa00`=64000 nominal, `free=0x15520`=87328, `operations.c`/`gfxop_new_pic`) instead of the prior
+HardFault. (Cosmetic: the LCD `size` is the nominal 64 KB decode-buffer constant I hardcoded; the *actual*
+failing alloc was the 32 KB priority buffer, correctly named by the serial `malloc 32000 failed` line.)
+
+### DIAGNOSIS — the post-restore OOM is FRAGMENTATION + arena ratchet, NOT a leak or a high live-set (log f3fa5b3f)
+
+The same f3fa5b3f session pins down *why* a 32 KB decode fails post-restore while fresh boot decodes every
+room fine. The `[mem] BREAKDOWN` progression is decisive:
+
+| phase | room | uord | ford | arena | chunks |
+|---|---|---|---|---|---|
+| fresh boot | 2 | 310192 | 72232 | 382424 | **29** |
+| post-restore | 12 | 309152 | 106040 | **415192** | **192** |
+| post-restore | 8 | 325736 | 89456 | 415192 | 126 |
+| post-restore | 11 (2nd) | — | — | 415192 | → `malloc 32000 failed` |
+
+- **`uord` (live bytes) is FLAT across the restore (~310→326 K).** The live set does NOT grow per revisit —
+  this is **not** a leak. The (RESOLVED) ~35 KB/revisit cwd+console leak is confirmed still fixed: post-
+  restore `untracked` holds at 237–248 K (oscillating ~10 K), not climbing 35 K/revisit.
+- **Arena ratcheted +33 KB (382424 → 415192) and pinned.** picolibc `sbrk`'d during the restore's 2×
+  working-set peak and never returns it. This quantitatively **confirms the parked arena-ratchet
+  hypothesis** (restore note above): the prime suspect is `pico_reserve_restore_priority()`'s 32 KB held
+  across `gamestate_restore` forcing a fixed sbrk increment.
+- **Fragmentation exploded: chunks 29 → 192.** Post-restore the heap is shattered into 100+ free holes, so
+  a 32 KB *contiguous* decode block can't be found even with ~90–100 K *total* free (`ford`). Contiguity,
+  not total free bytes, is the limiting resource — same conclusion as the historical fragmentation note,
+  now isolated to the **restore rebuild** as the fragmenting event (fresh-boot chunks stay ≤29).
+
+**Baseline composition (CENSUS, room 2 fresh boot) — where the ~310 K actually lives:**
+`32768: 1/64004` = **visual[0] 64 KB** · `16384: 3/71636` = the three-block lump, **now fully named** (below)
+· `1024+2048: 38 blk/~65 KB` · `8: 1933/23196` = **23 KB across 1933 eight-byte blocks** (a fragmentation
+source in itself).
+
+**The ~71636-byte 16384-bucket lump is NAMED (SITES16K one-flash, log a71d552a) — three irreducible
+resident costs, NOT a leak and NOT cheaply reclaimable:**
+
+| Site | Bytes | What it is | Reclaim verdict |
+|---|---|---|---|
+| `resource_map.c:309` | 25404 | **Resource directory** — `sci_realloc(resources, sizeof(resource_t)*N)`, one `resource_t` per game resource (type/number/file/offset). Read-only after `_scir_read_resource_map`. | Only genuine PSRAM-offload candidate, but looked up on every resource load (random access on the hot load path) — see investigation below. |
+| `vocab.c:206` | 29844 | **Packed vocab words** — the `vocab_pack_words` blob (offset table + packed records); the re-enabled parser's resident word list. | PSRAM-resident-words behind `psram_set_floor()` was already **ABANDONED** (roadmap #1): device measured packing saving only ~3 KB, real lever was the transient parse peak (solved via visual-borrow). Pulling to PSRAM adds per-`kParse` bsearch paging for a feature that already fits. Low value. |
+| `seg_manager.c:1348` | 16388 | **VM value stack** — `sci_calloc(VM_STACK_SIZE=0x1000, sizeof(reg_t))` = 4096×4 + 4 hdr. | **OFF LIMITS.** Shrinking to 0x400 caused the SQ3 room-2 recursive-`run_vm` overflow HardFault (correctness fix above). Hot read-write (PUSH/POP every instruction) → can't go to PSRAM either. |
+
+Sum = 71636, exact. The `SITES16K` line was **identical across all four rooms** (777/900/2/3) — stable
+resident baseline, not per-room growth. **Conclusion: the baseline is "high" because it is three irreducible
+costs (VM stack must stay, vocab already optimized, resource directory on the hot read path); none is a leak;
+none moves cheaply.** This confirms the diagnosis — the post-restore OOM is fragmentation + the arena ratchet,
+NOT a fat trimmable baseline. The census tagger has been reverted from `[16384,32768)`/SITES16K back to its
+default `[32,128)`/SITES256 watch.
+
+**Two levers, possibly one fix.** (1) The "keep playing" decode fix (fix B-1): a **permanent 32 KB priority
+decode scratch** allocated once at boot from pristine heap, reused every decode, never freed — mirrors the
+existing `visual_borrowed` skip-free pattern (the 64 KB visual already borrows resident visual[0], so the
+32 KB priority is the *only* remaining fresh per-decode malloc). NB priority MUST be SRAM (drawn into with
+random-access fills/lines in `gfxr_draw_pic01`) — it canNOT be decoded into PSRAM (SPI-only, not mapped);
+the earlier "decode priority into PSRAM" idea is **retracted**. (2) The arena-ratchet fix: if B-1's
+permanent scratch exists, the restore path no longer needs `pico_reserve_restore_priority()`, so the 32 KB
+isn't held across reconstruction → the +33 KB sbrk ratchet may disappear. So **B-1 may fix both the decode
+OOM and the post-restore baseline ratchet in one change** — at a cost of +32 KB always-resident SRAM
+(decode *peak* ~unchanged since that 32 KB is live during every decode anyway; the *valley* between decodes
+drops ~32 KB, e.g. room-8 free 89 K → ~57 K, still positive but tighter for heavy-clone scenes).
+
 ### OPEN — top priority — heap corruption surfacing as a GC fault ("aspb")
 
 Three HardFaults, all the same root cause — **heap allocator metadata smashed by an overflow** — caught

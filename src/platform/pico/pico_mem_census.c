@@ -54,25 +54,31 @@ int    pico_census_total_count = 0;          /* live blocks, all buckets */
 /* Suppresses inner accounting when calloc/realloc call malloc/free internally. */
 static int census_depth = 0;
 
-/* ── Call-site tagging for the 32-127 byte buckets (the per-restore leaker) ──
- * The histogram above localizes the leak to a size class; this names the
- * source line. sci_memory.c calls census_site_register() after every
- * successful sci_malloc/sci_calloc, passing the block's __FILE__/__LINE__ (it
- * already carries them). We record {ptr -> site} only for blocks whose usable
- * size lands in [32,128). Every free routes through __wrap_free (raw free()
- * too, which is how the gfx layer releases sci_malloc'd blocks), so
- * deregistration by ptr there is symmetric regardless of which API freed it.
- * Diff a site's live_count across same-room restores → the growing site is the
- * leak. The measured restore leak is ~15 blocks/restore in [32,64) plus ~3 in
- * [64,128), so this window brackets it. Many more distinct call sites emit
- * small blocks than 256B blocks, hence the larger site table.
+/* ── Call-site tagging — window [32,128) (the per-restore clone-variables leaker).
+ * Retarget SITE_LO/HI to another size class to name a different bucket's blocks;
+ * the one-flash [16384,32768) run that named the ~71KB baseline lump (resource
+ * directory / packed vocab / VM stack — CLAUDE.md "DIAGNOSIS — the post-restore
+ * OOM is FRAGMENTATION + arena ratchet") has been reverted back to [32,128).
+ *
+ * The histogram (CENSUS line) localizes the lump to a size class; this names the
+ * source line. sci_memory.c calls census_site_register() after every successful
+ * sci_malloc/sci_calloc, passing the block's __FILE__/__LINE__ (it already
+ * carries them). We record {ptr -> site} only for blocks whose usable size lands
+ * in [SITE_LO,SITE_HI). Every free routes through __wrap_free (raw free() too,
+ * which is how the gfx layer releases sci_malloc'd blocks), so deregistration by
+ * ptr is symmetric regardless of which API freed it.
+ *
+ * CAVEAT: only sci_malloc/sci_calloc blocks are tagged (those carry __FILE__/
+ * __LINE__). A block allocated via RAW malloc (e.g. visual[0], the transient
+ * decode buffers) will appear in the CENSUS bucket count but NOT in this SITES
+ * line — its absence is itself a signal that the block is a raw allocation.
  *
  * Site identity is the (file-pointer, line) pair: __FILE__ is a string literal
  * with a stable address, so comparing the pointer is enough and avoids strcmp. */
 #define SITE_LO 32
 #define SITE_HI 128
-#define CENSUS_NSITES   192
-#define CENSUS_NPTRS    2048   /* power of two; > peak live 32-127 byte blocks */
+#define CENSUS_NSITES   96
+#define CENSUS_NPTRS    2048   /* power of two; > peak live tagged blocks */
 
 struct census_site { const char *file; int line; int live_count; size_t live_bytes; };
 struct census_ptr  { void *ptr; int site; unsigned usable; };
@@ -180,8 +186,9 @@ census_site_deregister(void *ptr)
 	}
 }
 
-/* Prints the live [256,512)-byte sites, most blocks first, for offline
-   resolution against the source. Called from pico_mem_breakdown. */
+/* Prints the live tagged-bucket sites ([SITE_LO,SITE_HI), currently
+   [16384,32768)), most blocks first, for offline resolution against the source.
+   Called from pico_mem_breakdown. */
 void
 census_dump_sites(void)
 {
