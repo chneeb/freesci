@@ -962,6 +962,21 @@ kRestoreGame(state_t *s, int funct_nr, int argc, reg_t *argv)
 
 	if (savedir_nr > -1) {
 		char *savedir_name = _k_get_savedir_name(savedir_nr);
+#ifdef HAVE_PICO
+		/* Defer the restore to _game_run, which first tears the running game
+		   down to a fresh state so the rebuild happens on a coalesced heap.
+		   Building the new state in place here (while the old one is still fully
+		   resident) fragments the ~388KB heap below the contiguous block the
+		   restored room's pic decode needs — the documented restore-time OOM.
+		   Stash the name and abort; _game_run consumes and frees it. */
+		if (g_pico_restore_pending_name)
+			free(g_pico_restore_pending_name);
+		g_pico_restore_pending_name = (char*)malloc(strlen(savedir_name) + 1);
+		strcpy(g_pico_restore_pending_name, savedir_name);
+		free(savedir_name);
+		script_abort_flag = SCRIPT_ABORT_WITH_REPLAY; /* Abort current game */
+		s->execution_stack_pos = s->execution_stack_base;
+#else
 		state_t *newstate = gamestate_restore(s, savedir_name);
 
 		free(savedir_name);
@@ -976,6 +991,7 @@ kRestoreGame(state_t *s, int funct_nr, int argc, reg_t *argv)
 			s->r_acc = make_reg(0, 1);
 			sciprintf("Restoring failed (game_id = '%s').\n", game_id);
 		}
+#endif
 
 	} else {
 		s->r_acc = make_reg(0, 1);

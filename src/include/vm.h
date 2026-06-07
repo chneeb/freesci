@@ -442,6 +442,17 @@ extern DLLEXTERN int script_abort_flag;
 */
 
 #ifdef HAVE_PICO
+/* When non-NULL, an in-game kRestoreGame deferred the actual restore to _game_run
+** so it can first tear the running game down to a fresh state (coalescing the
+** heap) and rebuild the saved state on a clean heap — the in-place equivalent of
+** quit→relaunch→restore.  Building the new state in-place while the old one is
+** still resident fragments the ~388KB heap below the contiguous block the room
+** pic decode needs, which is the documented restore-time OOM. Holds the savegame
+** directory name; _game_run frees it after consuming it. */
+extern char *g_pico_restore_pending_name;
+#endif
+
+#ifdef HAVE_PICO
 /* kDisposeClone only flags clones OBJECT_FLAG_FREED; their seg-manager table
    entries are reclaimed only when run_gc() fires, every GC_INTERVAL kernel calls.
    The clone/node/list tables (heapmgr.h) grow by realloc and never shrink, so a

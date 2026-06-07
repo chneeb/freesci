@@ -36,6 +36,35 @@ cmake --build build-pico -j$(nproc)
 
 Requires: `pico-sdk`, PicoCalc hardware library (`i2ckbd` + `lcdspi`), FatFS SD SPI driver.
 
+## Diagnostic probe toggles
+
+The leftover instrumentation from the SQ3 bring-up is kept in the tree for debugging OTHER games,
+gated behind compile-time CMake `option()`s so default builds are clean. They are **top-level**
+(not Pico-scoped) so the desktop mirror probes compile on desktop too; Pico-only probes also require
+`HAVE_PICO` in their own `#if`. Default OFF for clean builds, **except `FSCI_PROBE_STR`** (default ON,
+it guards the still-open "aspb" heap-corruption bug).
+
+| Option (default) | Define | Probes gated | Where |
+|---|---|---|---|
+| `FSCI_PROBE_STR` (**ON**) | `FSCI_PROBE_STR` | `[strprobe]` — SCI string kernels writing past the dest buffer's real size; `kFormat` overflow check in `CHECK_OVERFLOW1` | `kstring.c` |
+| `FSCI_PROBE_GFX` (OFF) | `FSCI_PROBE_GFX` | `[pcol]`/`[ctl]` (priority/control decode), `[oc]` (onControl scans), `[pblit]` (occlusion) + desktop mirrors `[dpcol]`/`[dpblit]` (env `FREESCI_PRIPROBE=1`) | `sci_resmgr.c`, `kgraphics.c`, `pico_driver.c`, `operations.c`, `gfx_support.c` |
+| `FSCI_PROBE_MEM` (OFF) | `FSCI_PROBE_MEM` | `[mem] BREAKDOWN`/`PXM`/`room enter`/`room ready` lines; desktop `desktop_mem_probe` (env `FREESCI_MEMPROBE=1`) | `kgraphics.c`, `operations.c` |
+| `FSCI_PROBE_MEM_CENSUS` (OFF) | `FSCI_PROBE_MEM_CENSUS` | `[mem] CENSUS`/`SITES` + the `--wrap` malloc histogram & call-site tagger (~27.6KB `.bss`). **Implies `FSCI_PROBE_MEM`** (the dump prints inside the breakdown). | `kgraphics.c`, `pico_mem_census.c` |
+| `FSCI_PROBE_PARSER` (OFF) | `FSCI_PROBE_PARSER` | `[gnf]` per-command GNF-rebuild transient byte size | `kstring.c` |
+
+Notes:
+- **Census file is always compiled**: `pico_mem_census.c` owns the `__wrap_*` symbols (top-level CMake
+  defines `pico_malloc` + `-Wl,--wrap=*`), so even with the census OFF it provides thin pass-through
+  wrappers (preserving the `<fn> N failed` OOM log) plus no-op `census_site_register`/`census_dump_sites`
+  stubs — only the 27.6KB of bookkeeping arrays drop. Turning census OFF is what gives a true SRAM
+  headroom reading.
+- `PICO_VOCAB_PROBE` (the throwaway boot-time `[vocab]` vocab-cost measurement, `game.c`/`grammar.c`) is
+  **separate** — it has its own `option()` in the Pico block and is not folded into `FSCI_PROBE_PARSER`.
+- **Memory-test build** (per-room breakdown + leak histogram, e.g. for save/restore headroom checks):
+  `cmake -B build-pico -DPLATFORM=pico -DPICO_SDK_PATH=~/Source/pico-sdk -DPICO_BOARD=pico2 -DFSCI_PROBE_MEM_CENSUS=ON`
+  (census auto-enables mem). Watch the `[mem] SITES256:` line for `kscripts.c:212` (the known
+  clone-`variables` leak) climbing across same-room restores.
+
 ### Pico architecture
 
 | File | Purpose |
@@ -300,6 +329,41 @@ the arena the next room's offloads then overwrote → black box, then cycling me
 free the VIEW tree alongside the PIC tree before `psram_reset()`, so `gfxr_get_view` re-decodes
 fresh. Trade-off: views re-decode per room change instead of staying cached — correct call on Pico,
 and SQ3's per-room view set is small.
+
+### RESOLVED (restore #1) / OPEN (restore #2) — in-game savegame restore rebuilt on a coalesced heap
+
+In-game `kRestoreGame` on Pico no longer rebuilds the new gamestate in place. The old in-place rebuild
+peaked at (old state + new state) co-resident and shattered the ~388KB heap into sub-32KB fragments, so
+the restored room's pic decode could not find a 32KB-contiguous block → fatal `kDrawPic` abort →
+HardFault. The restore is now **deferred** to `_game_run` and run on a torn-down, coalesced heap:
+
+- **`kRestoreGame`** (`kfile.c`, `HAVE_PICO`): stash the savedir name in `g_pico_restore_pending_name`,
+  set `script_abort_flag = SCRIPT_ABORT_WITH_REPLAY`, unwind the exec stack — do NOT call
+  `gamestate_restore` here.
+- **`_game_run`** (`vm.c`, `HAVE_PICO`): on the pending name, tear the running game all the way down
+  (`game_exit` → `script_free_engine` → `script_init_engine` → `game_init` → `sfx_reset_player`) so the
+  heap coalesces, **reserve the 32KB priority decode buffer NOW** (`pico_reserve_restore_priority`,
+  `operations.c`; consumed in `sci_resmgr.c` priority alloc) while a large contiguous run exists, THEN
+  `gamestate_restore`. The reserved block survives the re-fragmentation `gamestate_restore` causes and
+  feeds the first post-restore pic decode, so that decode can't fail.
+
+**Resources stay resident (by design):** `game_exit` keeps gfx_state + resmgr alive, so there is NO slow
+resource reload on restore. A full **relaunch** (quit `freesci_main`, re-enter cold) was tried and
+**rejected** — it dumped the player to the chooser AND forced a full resource reload. Keep the in-engine
+path.
+
+**Device status (log 4954c969):**
+- **Restore #1 WORKS.** `Restarting with replay() [clean-heap restore]` → room 2 re-enters, `free=110008`
+  after — healthy, no crash.
+- **Restore #2 still OOMs, but cleanly (`[OOM]` halt, NOT a HardFault/corruption).** `calloc 16384
+  failed` in `read_mem_obj_t` (`savegame.c`) during `gamestate_restore`'s own *reconstruction*
+  (free=40600 but no 16KB-contiguous run; arena grew 349656→382424→415192 across restores, chunks=204).
+  The reservation protects the pic *decode*, but the seg-table rebuild then hits the fragmented heap.
+  The arena grows each restore because the in-engine teardown can't reset the long-lived survivors
+  (gfx_state/resmgr/vocab/driver) to the chooser baseline. A legible halt is a strict improvement over
+  the prior HardFault.
+- **Next lever for #2 (not done):** shrink the reconstruction peak in `read_mem_obj_t` (seg-table/clone
+  rebuild), or pre-reserve its largest blocks the way the priority buffer is reserved — NOT a relaunch.
 
 ### FIXED (pending device retest) — restore HardFault was a control-map OOM, not corruption
 

@@ -82,6 +82,15 @@ static int pico_ensure_visual(gfx_driver_t *drv)
     return ((struct _pico_state *)drv->state)->visual[0] != NULL;
 }
 
+/* Ensure visual[0] is allocated and return it, for the pic-decode visual[0]-reuse
+   path (gfxop_new_pic borrows this 64KB display buffer as the decode-visual so the
+   decode needs no fresh 64KB alloc). Returns NULL only if the alloc itself OOMs. */
+byte *pico_get_visual(gfx_driver_t *drv)
+{
+    pico_alloc_visual(drv);
+    return ((struct _pico_state *)drv->state)->visual[0];
+}
+
 /* Fixed PSRAM scratch for the parse-time visual borrow. Placed at 7MB, far
    above the room bump arena (grows from 0, well under 1MB/room), below the 8MB
    top. Reused every parse — only one borrow is ever live at a time (kParse is
@@ -567,6 +576,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
     /* [pblit] probe: report sprites whose pixels were occlusion-suppressed, so the
        cel priority can be compared against the background priority under it.
        Throttled to 1-in-8 to keep the serial log readable while walking. */
+#ifdef FSCI_PROBE_GFX
     if (psram_pri && pb_supp > 0) {
         static unsigned pb_call = 0;
         if ((pb_call++ & 7) == 0)
@@ -575,6 +585,9 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                       priority, dest.x, dest.y, xl, yl,
                       pb_min, pb_max, pb_drawn, pb_supp);
     }
+#else
+    (void)pb_drawn; (void)pb_supp; (void)pb_min; (void)pb_max;
+#endif /* FSCI_PROBE_GFX */
 }
 
 /* Blit the full background from PSRAM into visual[0].

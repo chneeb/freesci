@@ -134,6 +134,44 @@ add_compile_definitions(X_DISPLAY_MISSING=1)
 # where implicit declarations became errors (not just warnings) — -w alone is insufficient.
 add_compile_options(-fgnu89-inline -w -Wno-implicit-function-declaration)
 
+# ── Diagnostic probe toggles ──────────────────────────────────────────────────
+# Compile-time gates for the leftover instrumentation kept in the tree for
+# bringing up OTHER games. Top-level (not Pico-scoped) so the desktop mirror
+# probes ([dpcol]/[dpblit] in gfx_support.c/operations.c, desktop_mem_probe in
+# kgraphics.c) are reachable on desktop builds too. Pico-only probes additionally
+# require HAVE_PICO in their own #if. Default OFF for clean builds, EXCEPT the
+# string-overflow probe which guards the still-open "aspb" heap-corruption bug.
+#   FSCI_PROBE_STR        — [strprobe]: SCI string kernels writing past dest size
+#   FSCI_PROBE_GFX        — [pcol]/[ctl]/[oc]/[pblit] + desktop [dpcol]/[dpblit]
+#   FSCI_PROBE_MEM        — [mem] BREAKDOWN/PXM/room lines (+ desktop_mem_probe)
+#   FSCI_PROBE_MEM_CENSUS — [mem] CENSUS/SITES + the --wrap malloc histogram
+#                           (~27.6KB .bss; implies FSCI_PROBE_MEM for the dump)
+#   FSCI_PROBE_PARSER     — [gnf] per-command GNF-rebuild transient size
+option(FSCI_PROBE_STR        "Probe: SCI string-kernel buffer overflows"        ON)
+option(FSCI_PROBE_GFX        "Probe: priority/control/occlusion gfx tracing"    OFF)
+option(FSCI_PROBE_MEM        "Probe: per-room SRAM/heap breakdown lines"        OFF)
+option(FSCI_PROBE_MEM_CENSUS "Probe: live-alloc size histogram + call sites"    OFF)
+option(FSCI_PROBE_PARSER     "Probe: per-command GNF-rebuild transient size"    OFF)
+if(FSCI_PROBE_MEM_CENSUS AND NOT FSCI_PROBE_MEM)
+    message(STATUS "FSCI_PROBE_MEM_CENSUS implies FSCI_PROBE_MEM (census dumps in the breakdown) — enabling it")
+    set(FSCI_PROBE_MEM ON)
+endif()
+if(FSCI_PROBE_STR)
+    add_compile_definitions(FSCI_PROBE_STR=1)
+endif()
+if(FSCI_PROBE_GFX)
+    add_compile_definitions(FSCI_PROBE_GFX=1)
+endif()
+if(FSCI_PROBE_MEM)
+    add_compile_definitions(FSCI_PROBE_MEM=1)
+endif()
+if(FSCI_PROBE_MEM_CENSUS)
+    add_compile_definitions(FSCI_PROBE_MEM_CENSUS=1)
+endif()
+if(FSCI_PROBE_PARSER)
+    add_compile_definitions(FSCI_PROBE_PARSER=1)
+endif()
+
 if(PLATFORM STREQUAL "pico")
     add_compile_definitions(HAVE_PICO=1 HAVE_FNMATCH=1 HAVE_FNMATCH_H=1)
 

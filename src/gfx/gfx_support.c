@@ -308,7 +308,9 @@ gfx_crossblit_pixmap(gfx_mode_t *mode, gfx_pixmap_t *pxm, int priority,
 	int xoffset = (dest_coords.x < 0)? - dest_coords.x : 0;
 	int yoffset = (dest_coords.y < 0)? - dest_coords.y : 0;
 	int revalpha = mode->flags & GFX_MODE_FLAG_REVERSE_ALPHA;
+#ifdef FSCI_PROBE_GFX
 	int _probe_dx = dest_coords.x, _probe_dy = dest_coords.y;  /* [dpblit] probe */
+#endif
 
 	if (src_coords.x + src_coords.xl > xl)
 		src_coords.xl = xl - src_coords.x;
@@ -373,6 +375,7 @@ gfx_crossblit_pixmap(gfx_mode_t *mode, gfx_pixmap_t *pxm, int priority,
 	   values are directly comparable.  Enable with FREESCI_PRIPROBE=1.  Summarizes
 	   the background priority sampled under this cel's footprint (mode->bytespp==1
 	   only, i.e. the 8bpp path that matches Pico). */
+#ifdef FSCI_PROBE_GFX
 	if (priority_dest && priority >= 0 && priority_skip == 1
 	    && xl > 0 && yl > 0 && getenv("FREESCI_PRIPROBE")) {
 		static unsigned _dp_call = 0;
@@ -393,6 +396,7 @@ gfx_crossblit_pixmap(gfx_mode_t *mode, gfx_pixmap_t *pxm, int priority,
 				  priority, _probe_dx, _probe_dy, xl, yl, pmin, pmax,
 				  drawn, supp);
 	}
+#endif /* FSCI_PROBE_GFX */
 
 	/* now calculate alpha */
 	if (pxm->alpha_map)

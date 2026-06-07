@@ -58,6 +58,10 @@ extern int _weak_validations; /* scriptdebug.c */
 
 calls_struct_t *send_calls = NULL;
 int send_calls_allocated = 0;
+#ifdef HAVE_PICO
+char *g_pico_restore_pending_name = NULL;
+extern void pico_reserve_restore_priority(void); /* operations.c */
+#endif
 int bp_flag = 0;
 static reg_t _dummy_register = NULL_REG_INITIALIZER;
 
@@ -2274,6 +2278,73 @@ _game_run(state_t *s, int restoring)
 	do {
 		s->execution_stack_pos_changed = 0;
 		run_vm(s, (successor || restoring)? 1 : 0);
+#ifdef HAVE_PICO
+		if (g_pico_restore_pending_name) {
+			/* In-game restore on a CLEAN heap.  kRestoreGame deferred the actual
+			   gamestate_restore to here instead of building it in place, because
+			   in-place restore peaks at (old state + new state) co-resident and
+			   shatters the ~388KB heap into sub-32KB fragments — after which the
+			   restored room's pic decode can't find even a 32KB contiguous block
+			   (measured: 32KB malloc fails with 82KB free).  Tear the running game
+			   all the way down to a fresh, light gamestate first (game_exit keeps
+			   gfx_state + resmgr alive — proven by the restart path below), so the
+			   heap coalesces; THEN rebuild the saved state with only the light
+			   state resident, exactly like the cold quit→relaunch→restore that
+			   never fragments. */
+			char *rname = g_pico_restore_pending_name;
+			g_pico_restore_pending_name = NULL;
+
+			sci_free(s->execution_stack);
+			s->execution_stack = NULL;
+			s->execution_stack_pos = -1;
+			s->execution_stack_pos_changed = 0;
+
+			game_exit(s);
+			script_free_engine(s);
+			script_init_engine(s, s->version);
+			game_init(s);
+			sfx_reset_player();
+
+			/* Heap is coalesced here (old game fully torn down, only the light
+			   game_init'd state resident).  Grab the 32KB priority decode buffer
+			   NOW, while a large contiguous run exists; gamestate_restore below
+			   re-fragments the heap, but this block survives and is consumed by
+			   the first post-restore pic decode (sci_resmgr.c) — otherwise that
+			   decode malloc's 32KB into the shattered heap and faults. */
+			pico_reserve_restore_priority();
+
+			{
+				state_t *rs = gamestate_restore(s, rname);
+				free(rname);
+				if (rs) {
+					game_exit(s);
+					script_free_vm_memory(s);
+					sci_free(s);
+					s = rs;
+
+					if (!send_calls_allocated)
+						send_calls = (calls_struct_t*)sci_calloc(sizeof(calls_struct_t),
+									send_calls_allocated = 16);
+
+					sciprintf("Restarting with replay() [clean-heap restore]\n");
+					s->execution_stack_pos = -1;
+					_init_stack_base_with_selector(s, s->selector_map.replay);
+					send_selector(s, s->game_obj, s->game_obj,
+						      s->stack_base, 2, s->stack_base);
+				} else {
+					sciprintf("Clean-heap restore failed; continuing fresh game.\n");
+					_init_stack_base_with_selector(s, s->selector_map.play);
+					send_selector(s, s->game_obj, s->game_obj,
+						      s->stack_base, 2, s->stack_base);
+				}
+			}
+
+			script_abort_flag = 0;
+			s->restarting_flags = 0;
+			restoring = 1; /* preserve execution_stack_base on the next run_vm */
+			continue;
+		}
+#endif
 		if (s->restarting_flags & SCI_GAME_IS_RESTARTING_NOW) { /* Restart was requested? */
 
 			sci_free(s->execution_stack);

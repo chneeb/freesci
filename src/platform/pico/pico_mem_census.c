@@ -40,6 +40,8 @@ extern void *__real_calloc(size_t count, size_t size);
 extern void *__real_realloc(void *mem, size_t size);
 extern void  __real_free(void *mem);
 
+#ifdef FSCI_PROBE_MEM_CENSUS
+
 /* Bucket b (b>=1) covers [1<<(b+2), 1<<(b+3)); bucket 0 is < 8 bytes.
    18 buckets reach 1<<20 = 1 MB, more than enough for SCI0's 64KB peaks. */
 #define CENSUS_NBUCKETS 18
@@ -296,5 +298,54 @@ __wrap_free(void *mem)
 		census_site_deregister(mem);
 	__real_free(mem);
 }
+
+#else /* !FSCI_PROBE_MEM_CENSUS — census off: thin pass-throughs + no-op stubs */
+
+/* The top-level CMake adds -Wl,--wrap=* whenever this file is compiled (it owns
+   pico_malloc), so __wrap_* must stay defined even with the census disabled.
+   Keep the PICO_DEBUG_MALLOC "<fn> N failed" log so OOM diagnostics are intact;
+   drop only the histogram/site bookkeeping (and its ~27.6KB of .bss arrays). */
+
+/* Called unconditionally from sci_memory.c under HAVE_PICO; no-op when off. */
+void census_site_register(void *ptr, const char *file, int line)
+{ (void)ptr; (void)file; (void)line; }
+
+void census_dump_sites(void) {}
+
+void *
+__wrap_malloc(size_t size)
+{
+	void *rc = __real_malloc(size);
+	if (!rc)
+		printf("malloc %u failed to allocate memory\n", (unsigned) size);
+	return rc;
+}
+
+void *
+__wrap_calloc(size_t count, size_t size)
+{
+	void *rc = __real_calloc(count, size);
+	if (!rc)
+		printf("calloc %u failed to allocate memory\n",
+		       (unsigned) (count * size));
+	return rc;
+}
+
+void *
+__wrap_realloc(void *mem, size_t size)
+{
+	void *rc = __real_realloc(mem, size);
+	if (!rc)
+		printf("realloc %u failed to allocate memory\n", (unsigned) size);
+	return rc;
+}
+
+void
+__wrap_free(void *mem)
+{
+	__real_free(mem);
+}
+
+#endif /* FSCI_PROBE_MEM_CENSUS */
 
 #endif /* HAVE_PICO */

@@ -41,13 +41,50 @@
    gfxop_new_pic, which pre-pins it from the freshly-freed room-change region. */
 byte *g_pico_decode_visual_buf = NULL;
 
-/* Raised by sci_resmgr.c when the late visual alloc fails (fragmentation);
-   signals gfxop_new_pic to retry the decode with an early-pinned buffer. */
+/* Priority decode buffer (32KB nibble-packed).  Mirrors the visual buffer: NULL
+   in the normal deferred path (sci_resmgr.c malloc's it mid-decode), set
+   non-NULL only by the fallback retry so BOTH maps are pinned from the
+   re-coalesced region — the priority malloc is what fails under restore-time
+   fragmentation, and pinning only the visual left it to malloc into the still-
+   shattered heap. */
+byte *g_pico_decode_priority_buf = NULL;
+
+/* Raised by sci_resmgr.c when a late decode-buffer alloc fails (fragmentation);
+   signals gfxop_new_pic to retry the decode with early-pinned buffers. */
 int g_pico_visual_defer_failed = 0;
+
+/* visual[0]-REUSE flag: when set, g_pico_decode_visual_buf points at the driver's
+   resident 64KB display buffer (visual[0]) rather than a throwaway decode buffer.
+   sci_resmgr.c then SKIPS every free of that buffer (the offload-to-PSRAM reuse,
+   the control-pass aux_map, and the priority-fail error path) so the display
+   buffer survives the decode intact and is repainted by pico_render_background. */
+int g_pico_decode_visual_borrowed = 0;
+
+/* Restore-time priority reservation (32KB nibble-packed).  Set by
+   pico_reserve_restore_priority() from the clean-heap-restore path in vm.c,
+   AFTER the running game is torn down (heap coalesced) but BEFORE
+   gamestate_restore rebuilds the saved state and re-fragments the heap.  The
+   block is grabbed while a large contiguous run still exists, then survives
+   restore's scattering and is consumed by the first post-restore pic decode in
+   sci_resmgr.c — which would otherwise malloc 32KB into the shattered heap and
+   fail (the restore crash).  Distinct from g_pico_decode_priority_buf so it is
+   NOT wiped by gfxop_new_pic's per-call reset. */
+byte *g_pico_reserved_priority_buf = NULL;
+
+/* Pre-reserve the 32KB priority decode buffer from the (currently coalesced)
+   heap, for the clean-heap-restore path.  Idempotent; a NULL result is left
+   NULL and the decode falls back to its normal late malloc. */
+void
+pico_reserve_restore_priority(void)
+{
+	if (!g_pico_reserved_priority_buf)
+		g_pico_reserved_priority_buf = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
+}
 
 /* Declared in pico_driver.c */
 extern void pico_free_visual(gfx_driver_t *drv);
 extern void pico_alloc_visual(gfx_driver_t *drv);
+extern byte *pico_get_visual(gfx_driver_t *drv);
 extern void pico_connect_engine_priority(gfx_pixmap_t *priority_map);
 extern void pico_render_background(gfx_driver_t *drv);
 extern void pico_setup_sci0_palette(gfx_driver_t *drv);
@@ -2200,6 +2237,7 @@ _gfxop_set_pic(gfx_state_t *state)
 	/* [dpcol] ground-truth dump: the 1x priority-map column Roger walks down in
 	   SQ3 room 3 (x=82, rows 35-120), directly comparable to the Pico [pblit]
 	   bgpri readings.  One line per pic set.  Enable with FREESCI_PRIPROBE=1. */
+#ifdef FSCI_PROBE_GFX
 	if (getenv("FREESCI_PRIPROBE") && state->priority_map
 	    && state->priority_map->index_data) {
 		int _y, _xl = state->priority_map->index_xl;
@@ -2212,6 +2250,7 @@ _gfxop_set_pic(gfx_state_t *state)
 				       state->priority_map->index_data[_y * _xl + 82]);
 		sciprintf("%s\n", _buf);
 	}
+#endif /* FSCI_PROBE_GFX */
 
 	_gfxop_install_pixmap(state->driver, state->pic->visual_map);
 
@@ -2240,11 +2279,13 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   decline room-over-room = a real leak; saturate-then-recover = healthy
 	   but GC-starved. Logged before any freeing so it reflects the low-water
 	   mark reached during the prior room. */
+#ifdef FSCI_PROBE_MEM
 	{
 		struct mallinfo _mi = mallinfo();
 		sciprintf("[mem] room enter nr=%d: free=%d arena=%d used=%d\n",
 			  nr, _mi.fordblks, _mi.arena, _mi.uordblks);
 	}
+#endif /* FSCI_PROBE_MEM */
 
 	/* Free all cached pics and reset PSRAM before decoding the new room. */
 	gfxr_free_all_pics(state->driver, state->resstate);
@@ -2257,21 +2298,40 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		scir_evict_resource_data(resmgr, old_res);
 	}
 
-	/* Free visual[0] (64KB) and priority_map->index_data to make room for decode. */
-	pico_free_visual(state->driver);
-	if (state->priority_map && state->priority_map->index_data) {
-		free(state->priority_map->index_data);
-		state->priority_map->index_data = NULL;
+	g_pico_decode_visual_buf = NULL;
+	g_pico_decode_priority_buf = NULL;
+	g_pico_visual_defer_failed = 0;
+	g_pico_decode_visual_borrowed = 0;
+
+	/* visual[0]-REUSE: decode straight into the resident 64KB display buffer
+	   rather than freeing it and allocating a fresh decode-visual.  This cuts the
+	   ONLY fresh per-decode allocation down to the 32KB priority map — the decode
+	   no longer needs a contiguous 64KB block at all, which is what failed on the
+	   fragmented restore heap (one ~64KB chunk could not also yield 32KB; see v4).
+	   sci_resmgr consumes g_pico_decode_visual_buf as the decode-visual and, with
+	   g_pico_decode_visual_borrowed set, skips every free of it (the PSRAM-offload
+	   reuse_aux_buf, the control-pass aux_map, and the priority-fail error path) so
+	   the display buffer survives intact; pico_render_background repaints it after.
+
+	   TRADEOFF (the experiment): visual[0] now stays resident DURING the pic-
+	   resource decompress inside gfxr_get_pic, so decompress0 no longer inherits
+	   the 64KB that freeing visual[0] used to hand it.  If decompress is the
+	   tighter peak this relocates the OOM onto decompress0 — confirming the
+	   decompress-vs-decode competition on device. */
+	{
+		byte *vis = pico_get_visual(state->driver);  /* ensures alloc, returns visual[0] */
+		if (vis) {
+			g_pico_decode_visual_buf = vis;
+			g_pico_decode_visual_borrowed = 1;
+		}
+		/* If visual[0] itself can't be allocated, leave both NULL: sci_resmgr
+		   falls back to the deferred late malloc path (which will then also fail,
+		   but legibly). */
 	}
 
-	/* Deferred visual-buffer strategy: do NOT pin the 64KB visual buffer here.
-	   Leaving it unallocated frees 64KB during the pic-resource decompress
-	   (inside gfxr_get_pic below) — the moment decompress0 OOMs on a leak-
-	   pressured heap.  sci_resmgr.c allocates the visual buffer late, after the
-	   resource is decompressed and evicted to PSRAM, so the two 64KB demands no
-	   longer overlap.  Fallback below covers the fragmentation case. */
-	g_pico_decode_visual_buf = NULL;
-	g_pico_visual_defer_failed = 0;
+	/* Priority stays DEFERRED (g_pico_decode_priority_buf NULL): sci_resmgr.c
+	   mallocs the 32KB late, after the resource is decompressed and evicted to
+	   PSRAM, so the priority alloc and decompress0 don't overlap. */
 
 #endif
 
@@ -2282,6 +2342,17 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	state->pic = gfxr_get_pic(state->resstate, nr, GFX_MASK_VISUAL, flags, default_palette, 1);
 
 #ifdef HAVE_PICO
+	if (g_pico_decode_visual_borrowed) {
+		/* visual[0] was borrowed as the decode-visual.  It is owned by the driver
+		   (do NOT free it — that's the live display buffer).  Whether the decode
+		   consumed the pin (NULLed in sci_resmgr) or aborted early (still pointing
+		   at visual[0]), just detach our reference so the retry/failure cleanup
+		   below never frees it.  pico_render_background repaints visual[0] on the
+		   success path; on failure kDrawPic aborts but visual[0] stays valid. */
+		g_pico_decode_visual_buf = NULL;
+		g_pico_decode_visual_borrowed = 0;
+	}
+
 	if (!state->pic && g_pico_visual_defer_failed) {
 		/* The late visual alloc failed under fragmentation (64KB total free but
 		   no 64KB-contiguous block).  gfxr_get_pic already freed the half-built
@@ -2291,18 +2362,30 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		   This is the early-pin path used only as a fallback, so visual alloc is
 		   never the fatal step unless the heap is genuinely out of 64KB. */
 		g_pico_visual_defer_failed = 0;
-		g_pico_decode_visual_buf = malloc(GFXR_AUX_MAP_SIZE);
-		if (g_pico_decode_visual_buf) {
-			GFXWARN("visual decode buffer: deferred alloc failed for pic %d — "
-			        "retrying with early pin\n", nr);
+		/* Pin BOTH maps from the now re-coalesced region.  Priority is normally
+		   pinned up front (above) and held across gfxr_free_pic, so re-malloc it
+		   only if that pin was already consumed or never taken — otherwise we'd
+		   leak the surviving 32KB pin.  The visual is what failed late here, so
+		   pin it now.  Retry only if both pins are in hand; a partial pin can't
+		   rescue the decode and would just burn a decompress cycle. */
+		g_pico_decode_visual_buf   = malloc(GFXR_AUX_MAP_SIZE);
+		if (!g_pico_decode_priority_buf)
+			g_pico_decode_priority_buf = malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
+		if (g_pico_decode_visual_buf && g_pico_decode_priority_buf) {
+			GFXWARN("decode buffers: deferred alloc failed for pic %d — "
+			        "retrying with early pin (visual+priority)\n", nr);
 			state->pic = gfxr_get_pic(state->resstate, nr, GFX_MASK_VISUAL,
 			                          flags, default_palette, 1);
-			/* If the retry consumed the pin, the global is NULL; otherwise the
-			   retry failed before Pass 1 — reclaim the unused pin. */
-			if (g_pico_decode_visual_buf) {
-				free(g_pico_decode_visual_buf);
-				g_pico_decode_visual_buf = NULL;
-			}
+		}
+		/* Reclaim any pin the retry didn't consume (retry skipped on a partial
+		   pin, or failed before Pass 1).  Consumed pins are already NULL. */
+		if (g_pico_decode_visual_buf) {
+			free(g_pico_decode_visual_buf);
+			g_pico_decode_visual_buf = NULL;
+		}
+		if (g_pico_decode_priority_buf) {
+			free(g_pico_decode_priority_buf);
+			g_pico_decode_priority_buf = NULL;
 		}
 	}
 #endif
@@ -2325,6 +2408,7 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		state->pic = state->pic_unscaled = NULL;
 #ifdef HAVE_PICO
 		if (g_pico_decode_visual_buf) { free(g_pico_decode_visual_buf); g_pico_decode_visual_buf = NULL; }
+		if (g_pico_decode_priority_buf) { free(g_pico_decode_priority_buf); g_pico_decode_priority_buf = NULL; }
 #endif
 		return GFX_ERROR;
 	}
@@ -2368,11 +2452,13 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	/* Post-decode baseline: free heap once the new room is fully resident.
 	   Compare against the next room's "room enter" line — if this baseline
 	   drifts down over many rooms, something allocated per room is not freed. */
+#ifdef FSCI_PROBE_MEM
 	{
 		struct mallinfo _mi = mallinfo();
 		sciprintf("[mem] room ready nr=%d: free=%d arena=%d used=%d\n",
 			  nr, _mi.fordblks, _mi.arena, _mi.uordblks);
 	}
+#endif /* FSCI_PROBE_MEM */
 #endif
 
 	return retval;

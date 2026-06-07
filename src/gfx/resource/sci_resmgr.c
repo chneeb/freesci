@@ -35,7 +35,10 @@
 #include <pico/stdlib.h>
 /* Globals in operations.c consumed here during pic decode */
 extern byte *g_pico_decode_visual_buf;
+extern byte *g_pico_decode_priority_buf;
+extern byte *g_pico_reserved_priority_buf;
 extern int g_pico_visual_defer_failed;
+extern int g_pico_decode_visual_borrowed;
 #endif
 
 int
@@ -147,6 +150,12 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   - Pinned (g_pico_decode_visual_buf set): the fallback retry in
 		     gfxop_new_pic pre-reserved it from the pristine room-change region
 		     because a deferred alloc just failed under fragmentation; consume it. */
+		int visual_pinned = (g_pico_decode_visual_buf != NULL);
+		/* When set, the pinned visual buffer is the driver's resident display
+		   buffer (visual[0]), NOT a throwaway decode buffer.  Every free of it
+		   below must be skipped — it is owned by the driver and repainted after
+		   the decode by pico_render_background. */
+		int visual_borrowed = g_pico_decode_visual_borrowed;
 		if (g_pico_decode_visual_buf) {
 			scaled_pic->visual_map->index_data = g_pico_decode_visual_buf;
 			g_pico_decode_visual_buf = NULL;
@@ -169,10 +178,38 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   sparse priority map itself rather than the visual outlines and
 		   over-spread.  With both maps live the flood fill uses the visual map as
 		   its boundary (sci_picfill.c), giving correct priority-region edges. */
-		scaled_pic->priority_map->index_data = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
+		/* Priority (32KB nibble-packed).  Consume an early pin if the fallback
+		   retry placed one (both maps pinned together from the re-coalesced
+		   region); otherwise malloc it late like the visual. */
+		if (g_pico_decode_priority_buf) {
+			scaled_pic->priority_map->index_data = g_pico_decode_priority_buf;
+			g_pico_decode_priority_buf = NULL;
+		} else if (g_pico_reserved_priority_buf) {
+			/* Clean-heap restore reserved this 32KB from the coalesced heap
+			   before gamestate_restore re-fragmented it; consume it for the
+			   first post-restore decode instead of malloc'ing into the now-
+			   shattered heap (which is the restore crash). */
+			scaled_pic->priority_map->index_data = g_pico_reserved_priority_buf;
+			g_pico_reserved_priority_buf = NULL;
+		} else {
+			scaled_pic->priority_map->index_data = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
+		}
 		if (!scaled_pic->priority_map->index_data) {
-			free(scaled_pic->visual_map->index_data);
+			/* Priority (32KB nibble) couldn't find a contiguous block after the
+			   visual (64KB) took its share — a fragmentation OOM, not a true
+			   out-of-memory.  Free the visual and, when it was the *deferred*
+			   alloc (not an already-pinned retry), signal gfxop_new_pic to retry
+			   with BOTH maps early-pinned from the freshly re-coalesced room-
+			   change region.  If the visual was already pinned, this is a genuine
+			   OOM — fall through to GFX_ERROR. */
+			if (!visual_borrowed)
+				free(scaled_pic->visual_map->index_data);
+			/* Detach either way: if borrowed, visual[0] is owned by the driver
+			   and must survive; NULLing prevents the half-built-pic teardown in
+			   gfxr_get_pic from double-freeing the display buffer. */
 			scaled_pic->visual_map->index_data = NULL;
+			if (!visual_pinned)
+				g_pico_visual_defer_failed = 1;
 			pico_picdec_cache_end(); return GFX_ERROR;
 		}
 		scaled_pic->priority_map->nibble_packed = 1;
@@ -217,6 +254,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   the desktop [dpcol] line so the two priority maps can be diffed
 		   value-for-value.  Strip with the other Pico probes once z-layering
 		   is resolved. */
+#ifdef FSCI_PROBE_GFX
 		{
 			gfx_pixmap_t *pmap = scaled_pic->priority_map;
 			if (pmap->index_data) {
@@ -233,6 +271,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 				sciprintf("%s\n", _buf);
 			}
 		}
+#endif /* FSCI_PROBE_GFX */
 
 #ifdef PICO_DECODE_CONTROL_MAP
 		/* Pass 2: control map.
@@ -273,6 +312,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 				/* Probe: count non-background control nibbles the decode produced,
 				   so a blank map (e.g. after restore) is distinguishable from a
 				   stale/wrong-address read on the scan side ([oc] probe). */
+#ifdef FSCI_PROBE_GFX
 				{
 					size_t _i, _nz = 0;
 					for (_i = 0; _i < sz; _i++) {
@@ -284,10 +324,14 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 						  (int)res->id, (unsigned)_nz, (unsigned)npix,
 						  (unsigned long)cmap->psram_addr);
 				}
+#endif /* FSCI_PROBE_GFX */
 				free(cmap->index_data); /* frees the reused 32KB priority buffer */
 				cmap->index_data = NULL;
 			}
-			free(scaled_pic->aux_map); /* frees the 64KB visual buffer */
+			/* The 64KB aux_map IS the borrowed visual[0] when reuse is active —
+			   skip the free (driver owns it; pico_render_background repaints it). */
+			if (!visual_borrowed)
+				free(scaled_pic->aux_map); /* frees the 64KB visual buffer */
 			scaled_pic->aux_map = NULL;
 		}
 		pico_picdec_cache_end();
@@ -296,7 +340,10 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   PSRAM) and the 64KB visual buffer (held as reuse_aux_buf). */
 		free(scaled_pic->priority_map->index_data);
 		scaled_pic->priority_map->index_data = NULL;
-		free(reuse_aux_buf);
+		/* reuse_aux_buf IS the borrowed visual[0] when reuse is active — skip the
+		   free (driver owns it; pico_render_background repaints it). */
+		if (!visual_borrowed)
+			free(reuse_aux_buf);
 		reuse_aux_buf = NULL;
 		pico_picdec_cache_end();
 #endif /* PICO_DECODE_CONTROL_MAP */

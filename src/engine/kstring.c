@@ -47,6 +47,7 @@ extern void pico_return_visual(gfx_driver_t *drv);
 static void
 str_overflow_probe(state_t *s, const char *kfunc, reg_t dest, int need)
 {
+#ifdef FSCI_PROBE_STR
 	int bufsize = 0;
 	if (!dest.segment)
 		return;
@@ -56,11 +57,13 @@ str_overflow_probe(state_t *s, const char *kfunc, reg_t dest, int need)
 		sciprintf("[strprobe] %s writes %d bytes into a %d-byte buffer "
 			  PREG" (overflow by %d)\n",
 			  kfunc, need, bufsize, PRINT_REG(dest), need - bufsize);
+#endif
 }
 
 /* The kformat_* locals are supplied by kFormat (the only user of this macro);
-   the first clause is a one-shot probe against the real dest size, the second is
-   the original (unchanged) 4096 hard stop. */
+   the first clause is a one-shot probe against the real dest size (FSCI_PROBE_STR),
+   the second is the original (unchanged) 4096 hard stop. */
+#ifdef FSCI_PROBE_STR
 #define CHECK_OVERFLOW1(pt, size, rv) \
 	if (kformat_real_size > 0 && !kformat_overflow_warned \
 	    && ((pt) - (str_base)) + (size) > kformat_real_size) { \
@@ -73,6 +76,13 @@ str_overflow_probe(state_t *s, const char *kfunc, reg_t dest, int need)
 		SCIkwarn(SCIkERROR, "String expansion exceeded heap boundaries\n"); \
 		return rv;\
 	}
+#else
+#define CHECK_OVERFLOW1(pt, size, rv) \
+	if (((pt) - (str_base)) + (size) > maxsize) { \
+		SCIkwarn(SCIkERROR, "String expansion exceeded heap boundaries\n"); \
+		return rv;\
+	}
+#endif
 
 char *
 kernel_lookup_text(state_t *s, reg_t address, int index)
@@ -337,11 +347,15 @@ kParse(state_t *s, int funct_nr, int argc, reg_t *argv)
 		int pico_borrowed_visual =
 			(s->gfx_state && s->gfx_state->driver)
 			? pico_borrow_visual(s->gfx_state->driver) : 0;
+#ifdef FSCI_PROBE_PARSER
 		int gnf_uord0 = mallinfo().uordblks;
+#endif
 		if (s->parser_branches)
 			rules = vocab_build_gnf(s->parser_branches, s->parser_branches_nr);
+#ifdef FSCI_PROBE_PARSER
 		sciprintf("[gnf] rebuilt rules: +%dB transient, free=%dB\n",
 			  mallinfo().uordblks - gnf_uord0, mallinfo().fordblks);
+#endif
 #endif
 
 		vocab_synonymize_tokens(words, words_nr, s->synonyms, s->synonyms_nr);

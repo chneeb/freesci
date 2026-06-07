@@ -1132,7 +1132,7 @@ kOnControl(state_t *s, int funct_nr, int argc, reg_t *argv)
 	{
 		int _oc = gfxop_scan_bitmask(s->gfx_state,
 					     gfx_rect(xstart, ystart + 10, xlen, ylen), map);
-#ifdef HAVE_PICO
+#if defined(HAVE_PICO) && defined(FSCI_PROBE_GFX)
 		/* Elevator-pickup probe: rm004::doit gates the trash-bucket scoop on
 		   (ego onControl == 3).  Log control-mask scans whenever the bitmask
 		   changes so pico.log shows what value the script actually sees as
@@ -1162,7 +1162,7 @@ _k_view_list_free_backgrounds(state_t *s, view_object_t *list, int list_nr);
 
 int sci01_priority_table_flags = 0;
 
-#if !defined(HAVE_PICO) && defined(__linux__)
+#if !defined(HAVE_PICO) && defined(__linux__) && defined(FSCI_PROBE_MEM)
 /* Desktop per-room mallinfo probe (gated behind FREESCI_MEMPROBE=1).
    Mirrors the Pico [mem] BREAKDOWN line so room 3->4->3 churn runs can be
    diffed against device logs. Small-block accumulation (the suspected
@@ -1182,7 +1182,7 @@ desktop_mem_probe(int nr)
 }
 #endif
 
-#ifdef HAVE_PICO
+#if defined(HAVE_PICO) && defined(FSCI_PROBE_MEM)
 /* Per-room SRAM breakdown probe: where do the live bytes go?
    Walks the seg-manager heap to tally loaded scripts (and their hot buf
    bytes), the grow-never-shrink clone/list/node tables (live vs capacity),
@@ -1219,11 +1219,13 @@ pico_mem_breakdown(state_t *s, int nr)
 	extern int pico_grab_sram_live, pico_grab_sram_total; /* pico_driver.c save-unders */
 	extern int pico_free_sram_total, pico_grab_psram_total;
 	extern size_t pico_grab_sram_bytes;
+#ifdef FSCI_PROBE_MEM_CENSUS
 	extern size_t pico_census_bytes[];   /* pico_mem_census.c — live bytes per size bucket */
 	extern int    pico_census_count[];
 	extern size_t pico_census_total_bytes;
 	extern int    pico_census_total_count;
 	extern void   census_dump_sites(void);  /* live [256,512) call sites */
+#endif
 	size_t tracked_bytes;
 	gfx_pixmap_t *rp;
 	size_t pxm_bytes = 0;
@@ -1420,6 +1422,7 @@ pico_mem_breakdown(state_t *s, int nr)
 	   counts across same-room revisits: the bucket that grows names the size
 	   class of the leaking allocation → its call site. Bucket b>=1 lower bound
 	   is 1<<(b+2) bytes; bucket 0 is <8 B. Only non-empty buckets printed. */
+#ifdef FSCI_PROBE_MEM_CENSUS
 	{
 		int b;
 		sciprintf("[mem] CENSUS nr=%d: total=%lu/%d |", nr,
@@ -1439,6 +1442,7 @@ pico_mem_breakdown(state_t *s, int nr)
 	   revisits → the growing site is the leak. Prints via printf to USB/UART
 	   (it carries __FILE__ strings; sciprintf's callback path is not needed). */
 	census_dump_sites();
+#endif /* FSCI_PROBE_MEM_CENSUS */
 }
 #endif
 
@@ -1535,9 +1539,9 @@ kDrawPic(state_t *s, int funct_nr, int argc, reg_t *argv)
 	s->pic_not_valid = 1;
 	s->pic_is_new = 1;
 
-#ifdef HAVE_PICO
+#if defined(HAVE_PICO) && defined(FSCI_PROBE_MEM)
 	pico_mem_breakdown(s, pic_nr);
-#elif defined(__linux__)
+#elif !defined(HAVE_PICO) && defined(__linux__) && defined(FSCI_PROBE_MEM)
 	desktop_mem_probe(pic_nr);
 #endif
 
