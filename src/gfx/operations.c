@@ -2409,6 +2409,21 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 #ifdef HAVE_PICO
 		if (g_pico_decode_visual_buf) { free(g_pico_decode_visual_buf); g_pico_decode_visual_buf = NULL; }
 		if (g_pico_decode_priority_buf) { free(g_pico_decode_priority_buf); g_pico_decode_priority_buf = NULL; }
+		/* On Pico, returning GFX_ERROR here escalates to a fatal VM abort
+		   (kDrawPic's GFX_ASSERT -> vm_handle_fatal_error -> longjmp).  The
+		   global vm_error_address jmp_buf is stale across nested run_vm calls,
+		   so the longjmp lands in a dead frame and HardFaults with a garbage
+		   state_t* -- an unreadable crash.  The real cause here is always a
+		   decode-buffer OOM (the 64KB visual / 32KB priority map could not find
+		   a contiguous block on the fragmented heap).  Report it legibly on the
+		   LCD and halt instead of the silent longjmp HardFault. */
+		{
+			extern void pico_oom_report(const char *what, unsigned long size,
+			                            const char *file, int line, const char *funct);
+			pico_oom_report("pic decode (no contiguous heap)",
+			                (unsigned long)GFXR_AUX_MAP_SIZE,
+			                __FILE__, __LINE__, __FUNCTION__);
+		}
 #endif
 		return GFX_ERROR;
 	}

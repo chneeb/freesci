@@ -527,6 +527,51 @@ kernel + buffer. **Next device session: grep pico.log for `[strprobe]`** — if 
 `[FAULT]`, that kernel/buffer is the overflow source; then fix with a real bounds clamp (the size is
 already in hand). If none fires, the corruptor is elsewhere (not these three string kernels).
 
+### MITIGATED (legible halt) — `run_vm`-entry HardFault was a fragmentation-OOM cascade, NOT corruption (grabber/motivator/button, IMG_1682 + log 40355e01, 2026-06-07)
+
+**Earlier theory RETRACTED.** The IMG_1682 LCD dump was first read as independent heap corruption (a
+reg_t-shaped value smashing `state_t *s`). The follow-up session **captured a pico.log (40355e01)** of the
+*identical* fault, and it proves the opposite: the garbage `s` is the **downstream symptom of a fatal
+GFX-OOM longjmp into a dead frame**, not a bad write. Root trigger = **fragmentation OOM at a pic decode**.
+
+The captured LCD dump (same as IMG_1682):
+```
+HardFault PC=0x1001e774   → run_vm, vm.c:754
+LR  =0x1001e75e           → run_vm, vm.c:746
+CFSR=0x00008200           → BFSR = 0x82 = BFARVALID | PRECISERR
+HFSR=0x40000000           → FORCED
+BFAR=0x0005021a  MMFAR=0x0005021a   → s=0x00050002, +0x218 (script_000) faults
+```
+
+**The cascade (log-confirmed).** Player restored (into room 12), walked 12→9→10→11→8. Entering room 8 the
+background pic decode needed a 32 KB-contiguous priority buffer; heap was `free=75664` but fragmented
+(arena pinned 415192, high chunk count) → **`malloc 32000 failed`**. The deferred/early-pin retry
+(`operations.c` `gfxop_new_pic`) also couldn't find the block → `GFXERROR("Could not retreive background
+pic 8")` → `return GFX_ERROR`. `kDrawPic`'s `GFX_ASSERT` (`kgraphics.c:1493`) treats `GFX_ERROR` as fatal
+→ `vm_handle_fatal_error` (`vm.c:642`) → `longjmp(vm_error_address, 0)`. **The global `vm_error_address`
+jmp_buf is stale across nested `run_vm` calls**, so the longjmp restores a *dead/returned* frame; back at
+the `run_vm` prologue (`vm.c:754`) the reloaded `s` (`[sp,#44]`) is garbage (`0x00050002`) and
+`s->script_000` derefs `0x0005021a` → HardFault. So `s` was never *written* — it's stale spilled-locals
+from a frame that already returned. (`0x00050002` looking reg_t-shaped was a coincidence.)
+
+**Classification: fragmentation OOM → fatal GFX abort → longjmp-into-dead-frame.** NOT the "aspb"
+overflow family, NOT the clone-`variables` UAF. The `malloc 32000 failed` line in the log is the tell;
+absence of an `[OOM]` LCD halt was only because the fatal-GFX path bypassed `pico_oom_report`.
+
+**MITIGATION DONE (option A, legible halt).** `gfxop_new_pic` (`operations.c`, the `if (!state->pic ||
+!state->pic_unscaled)` failure block, `HAVE_PICO`): instead of `return GFX_ERROR` — which on Pico
+escalates to the unrecoverable longjmp-into-dead-frame HardFault — it now calls `pico_oom_report("pic
+decode (no contiguous heap)", GFXR_AUX_MAP_SIZE, …)` and halts. A decode that genuinely can't find its
+buffer now shows the failing decode + free heap on the LCD (same channel as every other OOM) instead of a
+mystery HardFault. This does **not** keep the game running — it makes the failure *legible*. The
+longjmp-into-dead-frame (a latent shared-engine bug: global jmp_buf clobbered by recursive `run_vm`) is
+left as-is; on Pico the fatal GFX path is unrecoverable anyway.
+
+**Still OPEN — the real "keep playing" fix is reducing the decode peak/fragmentation** so the 32 KB alloc
+succeeds (the "transient peak + fragmentation OOM" roadmap work: per-cel decode scratch, control/priority
+peak-shrink). Until then, hitting a room whose pic can't decode on a fragmented heap halts cleanly with an
+`[OOM]` dump naming `operations.c` rather than HardFaulting.
+
 ### OPEN — top priority — heap corruption surfacing as a GC fault ("aspb")
 
 Three HardFaults, all the same root cause — **heap allocator metadata smashed by an overflow** — caught

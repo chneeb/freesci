@@ -191,6 +191,19 @@ int main(void)
         MEMPRINT("after chooser");
         printf("Selected: %s\n", game_dir);
 
+        /* Tell the user what's happening while resources load -- this is the
+           long, screen-blank phase. The message survives until graphics init
+           clears the LCD and the first room draws (no LCD writes happen during
+           resource loading). */
+        {
+            const char *name = game_dir, *q = game_dir;
+            while (*q) { if (*q == '/') name = q + 1; q++; }
+            char msg[96];
+            snprintf(msg, sizeof(msg), "Loading %s...\nPlease wait.", name);
+            lcd_clear();
+            lcd_print_string(msg);
+        }
+
         /* Use short options: -d gamedir, -g graphics, -q no-sound.
            HAVE_GETOPT_LONG is not enabled for the pico build so
            main.c falls back to plain getopt which needs short forms. */
