@@ -41,16 +41,8 @@
    gfxop_new_pic, which pre-pins it from the freshly-freed room-change region. */
 byte *g_pico_decode_visual_buf = NULL;
 
-/* Priority decode buffer (32KB nibble-packed).  Mirrors the visual buffer: NULL
-   in the normal deferred path (sci_resmgr.c malloc's it mid-decode), set
-   non-NULL only by the fallback retry so BOTH maps are pinned from the
-   re-coalesced region — the priority malloc is what fails under restore-time
-   fragmentation, and pinning only the visual left it to malloc into the still-
-   shattered heap. */
-byte *g_pico_decode_priority_buf = NULL;
-
 /* Raised by sci_resmgr.c when a late decode-buffer alloc fails (fragmentation);
-   signals gfxop_new_pic to retry the decode with early-pinned buffers. */
+   signals gfxop_new_pic to retry the decode with an early-pinned visual. */
 int g_pico_visual_defer_failed = 0;
 
 /* visual[0]-REUSE flag: when set, g_pico_decode_visual_buf points at the driver's
@@ -60,26 +52,16 @@ int g_pico_visual_defer_failed = 0;
    buffer survives the decode intact and is repainted by pico_render_background. */
 int g_pico_decode_visual_borrowed = 0;
 
-/* Restore-time priority reservation (32KB nibble-packed).  Set by
-   pico_reserve_restore_priority() from the clean-heap-restore path in vm.c,
-   AFTER the running game is torn down (heap coalesced) but BEFORE
-   gamestate_restore rebuilds the saved state and re-fragments the heap.  The
-   block is grabbed while a large contiguous run still exists, then survives
-   restore's scattering and is consumed by the first post-restore pic decode in
-   sci_resmgr.c — which would otherwise malloc 32KB into the shattered heap and
-   fail (the restore crash).  Distinct from g_pico_decode_priority_buf so it is
-   NOT wiped by gfxop_new_pic's per-call reset. */
-byte *g_pico_reserved_priority_buf = NULL;
-
-/* Pre-reserve the 32KB priority decode buffer from the (currently coalesced)
-   heap, for the clean-heap-restore path.  Idempotent; a NULL result is left
-   NULL and the decode falls back to its normal late malloc. */
-void
-pico_reserve_restore_priority(void)
-{
-	if (!g_pico_reserved_priority_buf)
-		g_pico_reserved_priority_buf = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
-}
+/* B-1: permanent 32KB nibble-packed priority decode scratch.  Allocated ONCE from
+   the still-pristine heap on the first pic decode and reused by every decode
+   thereafter — NEVER freed (mirrors the visual[0]-borrow skip-free pattern).
+   This eliminates the only remaining fresh per-decode allocation (the 32KB
+   priority map; the 64KB visual already borrows the resident visual[0]), so a
+   fragmented heap can no longer deny the priority alloc mid-game or post-restore.
+   Because the scratch survives a clean-heap restore (it is not part of gamestate),
+   the restore path no longer pre-reserves 32KB — removing the held block that
+   ratcheted the picolibc arena +33KB per restore. */
+byte *g_pico_priority_scratch = NULL;
 
 /* Declared in pico_driver.c */
 extern void pico_free_visual(gfx_driver_t *drv);
@@ -2299,9 +2281,15 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	}
 
 	g_pico_decode_visual_buf = NULL;
-	g_pico_decode_priority_buf = NULL;
 	g_pico_visual_defer_failed = 0;
 	g_pico_decode_visual_borrowed = 0;
+
+	/* B-1: ensure the permanent priority scratch exists.  The first decode runs
+	   while the heap is still pristine, so this 32KB grab is contiguous; every
+	   later decode reuses it.  If it somehow fails, sci_resmgr falls back to a
+	   per-decode malloc (the old behaviour) — legibly, not fatally. */
+	if (!g_pico_priority_scratch)
+		g_pico_priority_scratch = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
 
 	/* visual[0]-REUSE: decode straight into the resident 64KB display buffer
 	   rather than freeing it and allocating a fresh decode-visual.  This cuts the
@@ -2329,9 +2317,9 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		   but legibly). */
 	}
 
-	/* Priority stays DEFERRED (g_pico_decode_priority_buf NULL): sci_resmgr.c
-	   mallocs the 32KB late, after the resource is decompressed and evicted to
-	   PSRAM, so the priority alloc and decompress0 don't overlap. */
+	/* Priority comes from the permanent scratch (g_pico_priority_scratch, taken
+	   above): sci_resmgr.c reuses that resident 32KB every decode — no late malloc,
+	   no overlap with decompress0, and nothing to fail under fragmentation. */
 
 #endif
 
@@ -2362,30 +2350,22 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		   This is the early-pin path used only as a fallback, so visual alloc is
 		   never the fatal step unless the heap is genuinely out of 64KB. */
 		g_pico_visual_defer_failed = 0;
-		/* Pin BOTH maps from the now re-coalesced region.  Priority is normally
-		   pinned up front (above) and held across gfxr_free_pic, so re-malloc it
-		   only if that pin was already consumed or never taken — otherwise we'd
-		   leak the surviving 32KB pin.  The visual is what failed late here, so
-		   pin it now.  Retry only if both pins are in hand; a partial pin can't
-		   rescue the decode and would just burn a decompress cycle. */
-		g_pico_decode_visual_buf   = malloc(GFXR_AUX_MAP_SIZE);
-		if (!g_pico_decode_priority_buf)
-			g_pico_decode_priority_buf = malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
-		if (g_pico_decode_visual_buf && g_pico_decode_priority_buf) {
-			GFXWARN("decode buffers: deferred alloc failed for pic %d — "
-			        "retrying with early pin (visual+priority)\n", nr);
+		/* Only the 64KB visual can fail to find a contiguous block now — the 32KB
+		   priority comes from the permanent scratch (always resident).  Pin the
+		   visual from the freshly re-coalesced room-change region and retry the
+		   decode once. */
+		g_pico_decode_visual_buf = malloc(GFXR_AUX_MAP_SIZE);
+		if (g_pico_decode_visual_buf) {
+			GFXWARN("decode buffers: deferred visual alloc failed for pic %d — "
+			        "retrying with early pin\n", nr);
 			state->pic = gfxr_get_pic(state->resstate, nr, GFX_MASK_VISUAL,
 			                          flags, default_palette, 1);
 		}
-		/* Reclaim any pin the retry didn't consume (retry skipped on a partial
-		   pin, or failed before Pass 1).  Consumed pins are already NULL. */
+		/* Reclaim the pin if the retry didn't consume it (failed before Pass 1).
+		   A consumed pin is already NULL. */
 		if (g_pico_decode_visual_buf) {
 			free(g_pico_decode_visual_buf);
 			g_pico_decode_visual_buf = NULL;
-		}
-		if (g_pico_decode_priority_buf) {
-			free(g_pico_decode_priority_buf);
-			g_pico_decode_priority_buf = NULL;
 		}
 	}
 #endif
@@ -2408,7 +2388,6 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		state->pic = state->pic_unscaled = NULL;
 #ifdef HAVE_PICO
 		if (g_pico_decode_visual_buf) { free(g_pico_decode_visual_buf); g_pico_decode_visual_buf = NULL; }
-		if (g_pico_decode_priority_buf) { free(g_pico_decode_priority_buf); g_pico_decode_priority_buf = NULL; }
 		/* On Pico, returning GFX_ERROR here escalates to a fatal VM abort
 		   (kDrawPic's GFX_ASSERT -> vm_handle_fatal_error -> longjmp).  The
 		   global vm_error_address jmp_buf is stale across nested run_vm calls,

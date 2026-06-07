@@ -60,7 +60,6 @@ calls_struct_t *send_calls = NULL;
 int send_calls_allocated = 0;
 #ifdef HAVE_PICO
 char *g_pico_restore_pending_name = NULL;
-extern void pico_reserve_restore_priority(void); /* operations.c */
 #endif
 int bp_flag = 0;
 static reg_t _dummy_register = NULL_REG_INITIALIZER;
@@ -2305,13 +2304,10 @@ _game_run(state_t *s, int restoring)
 			game_init(s);
 			sfx_reset_player();
 
-			/* Heap is coalesced here (old game fully torn down, only the light
-			   game_init'd state resident).  Grab the 32KB priority decode buffer
-			   NOW, while a large contiguous run exists; gamestate_restore below
-			   re-fragments the heap, but this block survives and is consumed by
-			   the first post-restore pic decode (sci_resmgr.c) — otherwise that
-			   decode malloc's 32KB into the shattered heap and faults. */
-			pico_reserve_restore_priority();
+			/* The first post-restore pic decode uses the permanent priority scratch
+			   (B-1, operations.c), allocated once at boot and resident across the
+			   restore — so no 32KB needs pre-reserving from the coalesced heap here
+			   (that held block was what ratcheted the arena +33KB per restore). */
 
 			{
 				state_t *rs = gamestate_restore(s, rname);

@@ -35,8 +35,7 @@
 #include <pico/stdlib.h>
 /* Globals in operations.c consumed here during pic decode */
 extern byte *g_pico_decode_visual_buf;
-extern byte *g_pico_decode_priority_buf;
-extern byte *g_pico_reserved_priority_buf;
+extern byte *g_pico_priority_scratch;
 extern int g_pico_visual_defer_failed;
 extern int g_pico_decode_visual_borrowed;
 #endif
@@ -178,19 +177,15 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   sparse priority map itself rather than the visual outlines and
 		   over-spread.  With both maps live the flood fill uses the visual map as
 		   its boundary (sci_picfill.c), giving correct priority-region edges. */
-		/* Priority (32KB nibble-packed).  Consume an early pin if the fallback
-		   retry placed one (both maps pinned together from the re-coalesced
-		   region); otherwise malloc it late like the visual. */
-		if (g_pico_decode_priority_buf) {
-			scaled_pic->priority_map->index_data = g_pico_decode_priority_buf;
-			g_pico_decode_priority_buf = NULL;
-		} else if (g_pico_reserved_priority_buf) {
-			/* Clean-heap restore reserved this 32KB from the coalesced heap
-			   before gamestate_restore re-fragmented it; consume it for the
-			   first post-restore decode instead of malloc'ing into the now-
-			   shattered heap (which is the restore crash). */
-			scaled_pic->priority_map->index_data = g_pico_reserved_priority_buf;
-			g_pico_reserved_priority_buf = NULL;
+		/* Priority (32KB nibble-packed).  Use the permanent scratch (B-1):
+		   allocated once from the pristine boot heap, reused every decode, never
+		   freed — so the priority alloc can't be denied by fragmentation mid-game
+		   or post-restore, and the restore path no longer pre-reserves 32KB.  Fall
+		   back to a per-decode malloc only if the scratch was somehow not taken. */
+		int priority_is_scratch = 0;
+		if (g_pico_priority_scratch) {
+			scaled_pic->priority_map->index_data = g_pico_priority_scratch;
+			priority_is_scratch = 1;
 		} else {
 			scaled_pic->priority_map->index_data = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
 		}
@@ -325,7 +320,10 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 						  (unsigned long)cmap->psram_addr);
 				}
 #endif /* FSCI_PROBE_GFX */
-				free(cmap->index_data); /* frees the reused 32KB priority buffer */
+				/* The reused 32KB buffer is the permanent priority scratch (B-1)
+				   when priority_is_scratch — never free it, just detach. */
+				if (!priority_is_scratch)
+					free(cmap->index_data); /* frees the reused 32KB priority buffer */
 				cmap->index_data = NULL;
 			}
 			/* The 64KB aux_map IS the borrowed visual[0] when reuse is active —
@@ -337,8 +335,11 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		pico_picdec_cache_end();
 #else
 		/* No control pass: free the priority 32KB buffer (already offloaded to
-		   PSRAM) and the 64KB visual buffer (held as reuse_aux_buf). */
-		free(scaled_pic->priority_map->index_data);
+		   PSRAM) and the 64KB visual buffer (held as reuse_aux_buf).  The priority
+		   buffer is the permanent scratch (B-1) when priority_is_scratch — never
+		   free it, just detach. */
+		if (!priority_is_scratch)
+			free(scaled_pic->priority_map->index_data);
 		scaled_pic->priority_map->index_data = NULL;
 		/* reuse_aux_buf IS the borrowed visual[0] when reuse is active — skip the
 		   free (driver owns it; pico_render_background repaints it). */

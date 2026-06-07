@@ -636,6 +636,45 @@ OOM and the post-restore baseline ratchet in one change** — at a cost of +32 K
 (decode *peak* ~unchanged since that 32 KB is live during every decode anyway; the *valley* between decodes
 drops ~32 KB, e.g. room-8 free 89 K → ~57 K, still positive but tighter for heavy-clone scenes).
 
+### DONE (device-confirmed, log ce81217b) — B-1 permanent priority scratch fixes the pic-decode OOM
+
+Fix B-1 is implemented and device-confirmed. `g_pico_priority_scratch` (32 KB nibble-packed) is `malloc`'d
+**once** on the first pic decode from the still-pristine heap (`operations.c` `gfxop_new_pic` prologue) and
+reused by every decode thereafter — never freed, mirroring the `visual_borrowed` skip-free pattern. The
+priority alloc in `gfxr_interpreter_calculate_pic` (`sci_resmgr.c`) now points at the scratch instead of a
+fresh per-decode `malloc`, and both priority free sites are guarded `if (!priority_is_scratch)`. The old
+`pico_reserve_restore_priority()` reservation (and its `vm.c` `_game_run` call) is removed — no longer needed
+since the scratch is permanent. **Result (log ce81217b):** after 6 post-restore room transitions with
+chunks=196 (heavily fragmented), NO `malloc 32000 failed`, NO pic-decode `[OOM]`; player progressed (inserted
+the motivator into the ship). The decode-OOM lever (lever 1) is closed.
+
+- **Arena ratchet (lever 2) NOT fully eliminated** — it was a "may", and the log says no: arena still
+  ratcheted 347100 → 379868 → 412636 → 424924 → 425948 across restores. Removing the priority reservation did
+  not kill the +~33 KB/restore sbrk creep, so the ratchet's cause is elsewhere (still parked — not a blocker
+  while ~100 K stays free after each restore).
+
+### FIXED (pending device retest) — second-restore vocab OOM is the SAME fragmentation class, one layer up
+
+Log ce81217b hit a NEW OOM on the **second** restore: `malloc 29844 failed` at `vocab.c:206` inside
+`vocab_pack_words`, during "Initializing vocabulary" (free=119032 total but arena=425948 fragmented → no
+29844-byte **contiguous** run). Decoded: the restore path tears down + rebuilds the engine
+(`script_free_engine` → `_free_vocabulary` frees the packed-words blob; `script_init_engine` →
+`_init_vocabulary` → `vocab_pack_words` re-packs it, `game.c:142`). The re-pack needs one contiguous 29844
+block — the same fragmentation-OOM class B-1 just fixed for priority, now for the packed vocab. (`vocab.c:206`
+*already* has a graceful unpacked fallback on malloc-NULL, but on Pico `sci_malloc` → `pico_oom_report`
+**halts before** the NULL return is reached.)
+
+**Fix (lead + C, mirrors B-1 and the resmgr-stays-resident restore design):**
+1. **Keep the packed-words blob resident across restore.** Vocab is input-independent (identical all game) and
+   the 29844 blob is *already* a permanent baseline cost — so pack it **once** into a static
+   `g_pico_vocab_blob`, never free it (`_free_vocabulary` skips it on Pico), and on a later `_init_vocabulary`
+   (restore) reuse it (re-point `s->parser_words`, no malloc). ~0 extra steady-state SRAM; eliminates the
+   re-pack contiguous malloc entirely. Suffices/branches stay re-loaded (small ~6 KB contiguous allocs that
+   fit even fragmented — left as-is to keep the change minimal).
+2. **(C) belt-and-suspenders:** route `vocab_pack_words`' own alloc through raw `malloc` (not `sci_malloc`) so
+   its existing graceful unpacked-fallback can actually fire on any *other* large vocab alloc instead of
+   halting — degrades to unpacked (parser still works) rather than `[OOM]`.
+
 ### OPEN — top priority — heap corruption surfacing as a GC fault ("aspb")
 
 Three HardFaults, all the same root cause — **heap allocator metadata smashed by an overflow** — caught
