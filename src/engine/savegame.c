@@ -4772,6 +4772,42 @@ gamestate_restore(state_t *s, char *dirname)
 	retval->sound_mute = s->sound_mute;
 	retval->sound_volume = s->sound_volume;
 
+#ifdef HAVE_PICO
+	/* Pico clean-heap restore: open the largest possible contiguous hole BEFORE
+	   the deserialization peak. read_mem_obj_t (inside _cfsml_read_state_t below)
+	   calloc's the new state's 16KB VM stack and other segments while the outgoing
+	   state `s` is still fully resident; on the tight Pico heap that 2x working set
+	   OOMs there. `s` is discarded after _game_run returns and nothing between here
+	   and that teardown reads these buffers, so free them now:
+	     - the resmgr's decompressed-resource LRU cache (reloads on demand),
+	     - every outgoing script's bytecode buf (~30KB, the 2x script working set),
+	     - the 16KB VM value stack (one contiguous malloc -> a guaranteed 16KB hole),
+	     - visual[0], the 64KB display back-buffer (re-allocated after fclose, before
+	       _reset_graphics_input repaints it).
+	   Freed pointers are NULLed; the matching _sm_deallocate cases are null-guarded
+	   under HAVE_PICO so the later game_exit teardown skips them cleanly. */
+	{
+		extern void pico_free_visual(gfx_driver_t *drv);
+		int _si;
+		scir_free_all_lru(s->resmgr);
+		for (_si = 0; _si < s->seg_manager.heap_size; _si++) {
+			mem_obj_t *_m = s->seg_manager.heap[_si];
+			if (!_m)
+				continue;
+			if (_m->type == MEM_OBJ_SCRIPT && _m->data.script.buf) {
+				sci_free(_m->data.script.buf);
+				_m->data.script.buf = NULL;
+				_m->data.script.buf_size = 0;
+			} else if (_m->type == MEM_OBJ_STACK && _m->data.stack.entries) {
+				sci_free(_m->data.stack.entries);
+				_m->data.stack.entries = NULL;
+			}
+		}
+		if (s->gfx_state && s->gfx_state->driver)
+			pico_free_visual(s->gfx_state->driver);
+	}
+#endif
+
 /* Auto-generated CFSML data reader code */
   {
     int _cfsml_line_ctr = 0;
@@ -4796,7 +4832,17 @@ gamestate_restore(state_t *s, char *dirname)
 
 	fclose(fh);
 
-	if ((retval->savegame_version < FREESCI_MINIMUM_SAVEGAME_VERSION) || 
+#ifdef HAVE_PICO
+	/* Re-allocate the 64KB visual back-buffer freed before deserialization, so it
+	   is live again before _reset_graphics_input repaints it below. */
+	{
+		extern void pico_alloc_visual(gfx_driver_t *drv);
+		if (s->gfx_state && s->gfx_state->driver)
+			pico_alloc_visual(s->gfx_state->driver);
+	}
+#endif
+
+	if ((retval->savegame_version < FREESCI_MINIMUM_SAVEGAME_VERSION) ||
 	    (retval->savegame_version > FREESCI_CURRENT_SAVEGAME_VERSION)) {
 
 		if (retval->savegame_version < FREESCI_MINIMUM_SAVEGAME_VERSION)
@@ -4832,47 +4878,6 @@ gamestate_restore(state_t *s, char *dirname)
 
 	_reset_graphics_input(retval);
 	reconstruct_stack(retval);
-#ifdef HAVE_PICO
-	/* Free the shared resmgr's decompressed-resource cache before the heap peak:
-	   reconstruct_scripts re-decompresses every script of the restored state while
-	   the outgoing state `s` is still fully resident (it is freed only later, in
-	   _game_run after we return). On the tight Pico heap that 2x VM working set plus
-	   a full resource cache exhausts memory in decompress0. The cache reloads on
-	   demand, so flushing it here is free. */
-	scir_free_all_lru(retval->resmgr);
-
-	/* Free the OUTGOING state's large, restore-unneeded buffers before the heap
-	   peak in reconstruct_scripts. `s` is discarded after we return (game_exit +
-	   script_free_vm_memory in _game_run), and nothing between here and that
-	   teardown reads them: the rest of this function only copies scalars, adopts
-	   the shared static tables (parser/selector/kernel), and reads sys_strings (a
-	   separate segment) + the script-0 segment number; game_exit merely tears down
-	   structures without running VM code. We NULL each freed pointer; the matching
-	   _sm_deallocate cases are null-guarded (under HAVE_PICO) so the later teardown
-	   skips them cleanly.
-
-	   Two buffers matter: every script's bytecode buf (~30KB total, the 2x script
-	   working set), and the 16KB VM value stack. The stack is a single contiguous
-	   malloc, so freeing it guarantees a 16KB contiguous hole for decompress0's
-	   peak (compressed input + decompressed output, both live at once) -- which is
-	   why ~42KB of scattered free was still not enough on its own. */
-	{
-		int _si;
-		for (_si = 0; _si < s->seg_manager.heap_size; _si++) {
-			mem_obj_t *_m = s->seg_manager.heap[_si];
-			if (!_m)
-				continue;
-			if (_m->type == MEM_OBJ_SCRIPT && _m->data.script.buf) {
-				sci_free(_m->data.script.buf);
-				_m->data.script.buf = NULL;
-				_m->data.script.buf_size = 0;
-			} else if (_m->type == MEM_OBJ_STACK && _m->data.stack.entries) {
-				sci_free(_m->data.stack.entries);
-				_m->data.stack.entries = NULL;
-			}
-		}
-	}
-#endif
 	reconstruct_scripts(retval, &retval->seg_manager);
 	reconstruct_clones(retval, &retval->seg_manager);
 	retval->game_obj = s->game_obj;

@@ -330,7 +330,7 @@ free the VIEW tree alongside the PIC tree before `psram_reset()`, so `gfxr_get_v
 fresh. Trade-off: views re-decode per room change instead of staying cached — correct call on Pico,
 and SQ3's per-room view set is small.
 
-### RESOLVED (restore #1) / OPEN (restore #2) — in-game savegame restore rebuilt on a coalesced heap
+### RESOLVED — in-game savegame restore rebuilt on a coalesced heap (multi-restore device-confirmed 2026-06-07)
 
 In-game `kRestoreGame` on Pico no longer rebuilds the new gamestate in place. The old in-place rebuild
 peaked at (old state + new state) co-resident and shattered the ~388KB heap into sub-32KB fragments, so
@@ -352,18 +352,31 @@ resource reload on restore. A full **relaunch** (quit `freesci_main`, re-enter c
 **rejected** — it dumped the player to the chooser AND forced a full resource reload. Keep the in-engine
 path.
 
-**Device status (log 4954c969):**
-- **Restore #1 WORKS.** `Restarting with replay() [clean-heap restore]` → room 2 re-enters, `free=110008`
-  after — healthy, no crash.
-- **Restore #2 still OOMs, but cleanly (`[OOM]` halt, NOT a HardFault/corruption).** `calloc 16384
-  failed` in `read_mem_obj_t` (`savegame.c`) during `gamestate_restore`'s own *reconstruction*
-  (free=40600 but no 16KB-contiguous run; arena grew 349656→382424→415192 across restores, chunks=204).
-  The reservation protects the pic *decode*, but the seg-table rebuild then hits the fragmented heap.
-  The arena grows each restore because the in-engine teardown can't reset the long-lived survivors
-  (gfx_state/resmgr/vocab/driver) to the chooser baseline. A legible halt is a strict improvement over
-  the prior HardFault.
-- **Next lever for #2 (not done):** shrink the reconstruction peak in `read_mem_obj_t` (seg-table/clone
-  rebuild), or pre-reserve its largest blocks the way the priority buffer is reserved — NOT a relaunch.
+**The restore #2 OOM fix — open the contiguous hole BEFORE deserialization, not after** (`gamestate_restore`,
+`savegame.c`, `HAVE_PICO`). The earlier code freed the outgoing state's large buffers at the *bottom* of
+`gamestate_restore` (just before `reconstruct_scripts`), but the OOM was `calloc 16384 failed` in
+`read_mem_obj_t` *inside* `_cfsml_read_state_t` — the savegame **deserialization**, which runs *earlier*,
+while the outgoing state `s` is still fully resident → 2× working set, no 16KB-contiguous run. Fix: relocate
+the heap-relief to run right after the `state` file opens, *before* the CFSML read:
+- flush the resmgr LRU resource cache (`scir_free_all_lru(s->resmgr)`, reloads on demand),
+- free every outgoing script's bytecode `buf` (~30KB) and the 16KB VM value stack (one contiguous malloc →
+  guaranteed 16KB hole), NULLing each (the `_sm_deallocate` cases are null-guarded under HAVE_PICO),
+- **free `visual[0]`, the 64KB display back-buffer** (`pico_free_visual(s->gfx_state->driver)`), re-allocated
+  right after `fclose` (`pico_alloc_visual`) before `_reset_graphics_input` repaints it.
+This opens a ≥64KB contiguous hole exactly when `read_mem_obj_t` needs its 16KB calloc.
+
+**Device status (log 67bbb55d, 2026-06-07) — THREE consecutive in-game restores all succeed.** Restores into
+rooms 2 → 10 → 9, each `Restarting with replay() [clean-heap restore]` → room re-enters with `free` ≈
+100–109KB after, no `[OOM]`, no `[FAULT]`. Clean teardown to the chooser at quit: `free=396856 used=26528`
+(no leak across the whole multi-restore session). The undersized-hole OOM is gone.
+
+**Residual (not a blocker, parked):** the arena still ratchets ~+32KB per restore
+(349656 → 382424 → 415192 → 423384) and `chunks` climbs (17 → 204 → 241 → 282), because the in-engine
+teardown can't reset the long-lived survivors (gfx_state/resmgr/vocab/driver) to the chooser baseline. With
+~100KB free after each restore there is comfortable headroom for several restores, so this is **not** chased
+now. If a *very* long restore chain eventually OOMs, the lever is the arena ratchet — likely the 32KB priority
+reservation held across reconstruction forcing a fixed picolibc sbrk increment — not the deserialization hole
+(now fixed). NOT a relaunch.
 
 ### FIXED (pending device retest) — restore HardFault was a control-map OOM, not corruption
 
