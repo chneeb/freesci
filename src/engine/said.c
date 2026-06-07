@@ -1561,7 +1561,7 @@ yyreduce:
 
   case 19:
 #line 198 "said.y"
-    { (yyval) = (yyvsp[(1) - (3)]); }
+    { (yyval) = (yyvsp[(2) - (3)]); }
     break;
 
   case 20:

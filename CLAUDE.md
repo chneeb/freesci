@@ -219,33 +219,45 @@ Two fast ways to debug Pico issues without the slow flash cycle:
    that NEVER writes the game dir (output goes to `$DISASM_OUT`, default `/tmp/sq3_disasm`; env
    `DISASM_SCRIPT=N` limits to one script). Build/run instructions are in its header comment.
 
-### OPEN — PARKED — SQ3 conveyor "jump" fails (Said matcher over-matches the stand spec)
+### RESOLVED — SQ3 conveyor "jump" fails (bison `wordset` paren rule discarded the group)
 
-The conveyor-shredder puzzle ("stand up" then "jump") is unwinnable: "stand up" works, but "jump"
-→ narrator "Check again" until Roger dies in the shredder. **Reproduces on desktop too** (shared
-engine code), so it's a FreeSCI bug, not Pico-specific. Diagnosed via the device parser trace
-(`debug_mode = pS`, see Debugging item 3) + the rm10 disassembly (`/tmp/sq3_disasm/010.script`).
+The conveyor-shredder puzzle ("stand up" then "jump") was unwinnable: "stand up" worked, but "jump"
+→ narrator "Check again" until Roger died in the shredder. **Not Pico-specific** — a shared-engine
+FreeSCI bug. Diagnosed via the device parser trace (`debug_mode = pS`, see Debugging item 3) + the
+rm10 disassembly (`/tmp/sq3_disasm/010.script`).
 
-**Root cause:** bare "jump" spuriously **FULL-matches** rm10's **stand** Said-spec `0f2d`
+**Symptom mechanism:** bare "jump" spuriously **FULL-matched** rm10's **stand** Said-spec `0f2d`
 (`(acquire<up),stand [<up] [/belt,conveyer]`, handler #9 of 13). Full match + no `>` marker →
-`dontclaim=0` → `SAID_FULL_MATCH` → `PUT_SEL32V(parser_event, claimed, 1)` (`said.c`
-`augment_parse_nodes`, `kstring.c` `kSaid`). The claim stops the handler chain, so the **real**
-bare-jump handler `0f74` (`jump,leap[...] [/banister]`, handler #13, which calls `setScript
-railJump`) is never reached.
+`SAID_FULL_MATCH` → `PUT_SEL32V(parser_event, claimed, 1)` claimed the event, stopping the handler
+chain before the **real** bare-jump handler `0f74` (`jump,leap[...] [/banister]`, handler #13 →
+`setScript railJump`). Both "stand up" AND "jump" hit the identical
+`augment_match_expression_p(): Empty condition → return 1` wildcard path, so the matcher could not
+be fixed there (legit "stand" depends on it too) — the bug was upstream in the parser.
 
-**Mechanism:** both "stand up" AND "jump" match 0f2d via the identical
-`augment_match_expression_p(): Empty condition` → `return 1` path (`said.c`). The matcher treats
-0f2d as a verb-independent wildcard — correct for "stand", wrong for "jump". Upstream,
-`said_parse_spec` (bison `said.y`) builds a **degenerate said-tree** for that spec (dump shows
-`belt` landing in the required clause as `Error(0924)`); the required-word check never verifies
-"stand"/"acquire" is present and bottoms out on an empty-condition node.
+**Root cause — `said.y` / generated `said.c`, the `wordset` grammar production.** The rule
+`wordset : YY_PARENO expr YY_PARENC` assigned **`$$ = $1`** (the open-paren *token's* `yylval`)
+instead of `$$ = $2` (the parsed inner expression). Operator tokens never set `yylval` (`yylex`
+only assigns it for `WGROUP` words, `said.y:267`), so `$1` was a **stale word value left over from a
+prior parse** — a garbage tree index. This discarded the entire `(acquire<up)` group from the
+required clause; with cross-parse `yylval` residue (belt = 0x924 from an earlier spec) it planted
+the `(141 14f Error(0924))` degenerate node the device dump showed, emptying the required-word check
+→ the empty-condition wildcard → "jump" matched.
 
-**Why NOT a one-line fix:** legit "stand up" relies on the SAME `Empty condition → return 1` path,
-so flipping that `return 1` to `0` would break standing up (and likely other commands). The real
-target is `said_parse_spec`/`said.y` mis-parsing specs with nested parens + comma-alternatives +
-optional brackets — needs desktop iteration and interactive validation (type "stand up" then
-"jump" in SQ3 room 10). **PARKED (2026-06-06)** per user: regression risk to the whole parser vs.
-other roadmap work.
+**Fix (one rule, two files in lockstep):** `src/engine/said.y:201` `{ $$ = $1; }` → `{ $$ = $2; }`,
+and the generated reduction `src/engine/said.c` case 19 `(yyvsp[(1) - (3)])` → `(yyvsp[(2) - (3)])`.
+The required clause now correctly contains `acquire`/`stand`/`<up`; bare "jump" no longer matches
+0f2d, "stand"/"stand up" still does. Because `$2` is a real node, the fix is immune to the
+cross-parse residue that made the device case worse than a single isolated parse.
+
+**Validated three ways:** (1) standalone harness feeding the exact 0f2d spec bytes through
+`said_parse_spec` + `vocab_dump_parse_tree` — before/after trees confirm the required clause goes
+from `Error(0924)` to `acquire/stand/<up`; (2) the same harness with case 19 reverted reproduces the
+broken tree; (3) **device-confirmed (2026-06-07)** — pico.log `pS` trace shows "jump" now skips the
+stand spec 0f2d (no "Match.") and the chain continues to the rail-jump spec, `railJump` fires, Roger
+grabs the rail. **Blast radius:** affects every parenthesized word-group `(…)` in every SCI game's
+Said specs (previously all silently dropped) — strictly more correct. The two analogous `<(…)` paren
+rules (`said.y:234`, `248`, `wordrefset`/`recref`) share the same stale-operator pattern but were
+left untouched (rarer, untested, not implicated here).
 
 ### RESOLVED — SQ3 plays on Pico (keyboard control + room-2 freeze)
 SQ3 boots, reaches the first playable room, Roger walks, and gameplay runs without crashes.
