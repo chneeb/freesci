@@ -401,9 +401,9 @@ byte *
 kmem(state_t *s, reg_t handle)
 {
 	mem_obj_t *mobj = GET_SEGMENT(s->seg_manager, handle.segment, MEM_OBJ_HUNK);
-	hunk_table_t *ht = &(mobj->data.hunks);
+	hunk_table_t *ht;
 
-	if (!mobj || !ENTRY_IS_VALID(ht, handle.offset)) {
+	if (!mobj || !ENTRY_IS_VALID((ht = &(mobj->data.hunks)), handle.offset)) {
 		SCIkwarn(SCIkERROR, "Error: kmem() with invalid handle\n");
 		return NULL;
 	}
