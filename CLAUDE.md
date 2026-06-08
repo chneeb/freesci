@@ -462,15 +462,22 @@ blocks (~48 B each) were orphaned.
   ~10 B/restore. (Note: freeing `sci_malloc`'d memory via raw `free` drifts the known-broken `scilive`
   counter but not `uordblks` — consistent with existing accepted behaviour.)
 
-- **OPEN but PARKED (stable) — clone-`variables` leak (`kscripts.c:212`, the dominant ~15-block/restore
-  leaker).** `kClone` `sci_malloc`s `clone_obj->variables` separately from the clone table slot.
-  `kDisposeClone` only flags `OBJECT_FLAG_FREED`; `run_gc()` reclaims the **table slot** but (apparently)
-  not the `variables` block, so orphans accumulate through play/restores and are swept only by the final
-  `sm_destroy` at quit (the session ends clean: `used` 274 K → **17 K** at the chooser — no orphan
-  survives process teardown). **Left unfixed per user (2026-06-05): stable.** Each orphan is ~48 B and GC
-  cadence keeps the heap under the ceiling for normal sessions. If a future session OOMs the control
-  decode again after heavy cloning/restores, fix here: free `clone->variables` when GC reclaims a
-  `FREED` clone (check the GC clone-reclaim path vs `sm_destroy`'s `_sm_deallocate` MEM_OBJ_CLONES case).
+- **FIXED (pending device retest) — clone-`variables` leak on engine teardown (`seg_manager.c`
+  `_sm_deallocate` MEM_OBJ_CLONES, the dominant ~77-block/restore leaker).** The earlier "GC apparently
+  doesn't free variables" guess was WRONG: the GC clone-reclaim path `free_at_address_clones`
+  (`seg_manager.c:1772-1796`) **does** `sci_free(victim_obj->variables)` before `sm_free_clone`, so
+  disposed clones during play are reclaimed cleanly. The actual leak was the **teardown** path: at
+  savegame-restore (`game_exit` → `script_free_engine` → `sm_destroy` → `_sm_deallocate`) the
+  MEM_OBJ_CLONES case freed `mobj->data.clones.table` but never iterated to free each **still-live**
+  clone's separately-`sci_malloc`'d `entry.variables`. SQ3's death scene holds ~77 live clones at
+  restore time → ~77 variables blocks leaked per restore (the `kscripts.c:212` SITES climb 25→65 across
+  restores), a per-restore heap-fragmentation driver feeding the post-restore decompress OOM
+  (`decompress0.c:324`). **Fix:** `_sm_deallocate` MEM_OBJ_CLONES now walks the table
+  (`ENTRY_IS_VALID`) and `sci_free`s each live `entry.variables` (NULLing it) before freeing the table.
+  Safe vs the GC path (which NULLs `variables` before `sm_free_clone`, so a reclaimed slot is never
+  re-walked). Both configs build clean. Process teardown was already clean at quit (`sm_destroy` frees
+  the table; the leak only mattered *across* in-session restores where the same fragmented arena is
+  reused).
 
 **Diagnostic probes left in the tree (all `HAVE_PICO`-gated, strip when the clone leak is closed):**
 `[oc]` (`kgraphics.c` `kOnControl`, logs control-mask scans on transition), `[ctl]` (`sci_resmgr.c`,
@@ -653,7 +660,13 @@ the motivator into the ship). The decode-OOM lever (lever 1) is closed.
   not kill the +~33 KB/restore sbrk creep, so the ratchet's cause is elsewhere (still parked — not a blocker
   while ~100 K stays free after each restore).
 
-### FIXED (pending device retest) — second-restore vocab OOM is the SAME fragmentation class, one layer up
+### RESOLVED (device-confirmed, log e8d3f32a) — second-restore vocab OOM is the SAME fragmentation class, one layer up
+
+**Device-confirmed fixed (log e8d3f32a):** three consecutive in-game restores all printed `Pico: parser
+vocab REUSED resident, 1489 words` (`game.c` `_init_vocabulary` Pico/PACK branch) — the packed blob is now
+allocated once and reused across restores, so the `vocab.c:206` re-pack never runs on the fragmented heap.
+No `malloc 29844 failed`, no vocab `[OOM]`. (That session later HardFaulted on an unrelated heap/stack
+collision — see next note — but the vocab path itself is solved.)
 
 Log ce81217b hit a NEW OOM on the **second** restore: `malloc 29844 failed` at `vocab.c:206` inside
 `vocab_pack_words`, during "Initializing vocabulary" (free=119032 total but arena=425948 fragmented → no
@@ -674,6 +687,108 @@ block — the same fragmentation-OOM class B-1 just fixed for priority, now for 
 2. **(C) belt-and-suspenders:** route `vocab_pack_words`' own alloc through raw `malloc` (not `sci_malloc`) so
    its existing graceful unpacked-fallback can actually fire on any *other* large vocab alloc instead of
    halting — degrades to unpacked (parser still works) rather than `[OOM]`.
+
+### FIXED (pending device retest) — `decrypt1` HardFault is a HEAP/STACK COLLISION, not heap corruption (IMG_1683 + log e8d3f32a; RECURRED IMG_1685 + log b2a2b59f, 2026-06-08)
+
+After the vocab + B-1 fixes, a session restored several saves, transitioned rooms (777→900→2, restore→9,
+restore→12, restore→11→10→9→12→13) and HardFaulted in **room 13** with **plenty of free heap** (last
+breakdown: `free=55672 arena=412628 chunks=206`) and **no `[OOM]` / no `malloc N failed`** anywhere near the
+crash. LCD dump (IMG_1683):
+
+```
+HardFault PC=0x1006b858   → decrypt1, decompress0.c:153 (strh tokenlengthlist[tokenctr]=...)
+LR  =0x00001019           → garbage (points into bootrom) — corrupted frame
+xPSR=0x09100000
+CFSR=0x00008200           → BFSR = 0x82 = BFARVALID | PRECISERR (precise data bus fault)
+HFSR=0x40000000           → FORCED
+BFAR=MMFAR=0x22ea52ea     → wild faulting address (not SRAM, not any mapped region)
+```
+
+**Root cause — the main stack is 8 KB but `decrypt1`'s frame is 16.4 KB, so it overflows into the heap.**
+Linker layout (`arm-none-eabi-nm`): heap `__end__=0x2001742c` grows **up** to `__StackLimit=0x20080000`;
+core0 stack `__StackTop=0x20082000` grows **down** — only **8 KB** of main stack
+(`0x20080000`→`0x20082000`), **no MPU guard**. `decrypt1` (`decompress0.c`) puts `guint16 tokenlist[4096]` +
+`guint16 tokenlengthlist[4096]` = **16384 B on the stack** (epilogue `add sp,sp,#16384`+`add sp,#28` ≈
+16.4 KB) — the **single largest stack frame in the program, 2× the entire main stack**. Every decompress
+drops SP ~16 KB *below* `__StackLimit`, straight into the heap region; it only works while the heap top is
+far enough down. Disassembly of the faulting store:
+```
+add.w r4, sp, #8192 ; adds r4,#24   → r4 = tokenlengthlist base (SP-relative)
+ldr.w ip, [sp, #20]                  → ip (tokenctr) reloaded from a SPILLED stack slot near frame bottom
+strh.w r5, [r4, ip, lsl #1]          → tokenlengthlist[ip] = r5  (ip used UNMASKED; uxth is AFTER)
+```
+The spilled `tokenctr` at `[sp,#20]` sits near the frame bottom; once the **arena ratcheted** the heap top up
+into that range, live heap data overwrote it → garbage `ip` → `(SP+0x2018)+ip*2 = 0x22ea52ea` → wild store.
+`decrypt1` is the **victim/canary** (deepest frame), not the cause; the corruptor is the heap growing into
+the stack.
+
+**Why now, not at boot — the arena ratchet (the lever B-1 did NOT fix).** Heap top over the session: boot
+room 777 arena 347092 → top ≈ `0x2006bfe0` (~80 KB clear of the stack, safe); room 13 arena 412628 → top ≈
+`0x2007c080`, leaving **<16 KB** to `__StackLimit` — less than `decrypt1`'s frame → collision. No `[OOM]`
+because nothing called `malloc` and failed; the stack silently overlapped live heap. **This is likely also
+the real mechanism behind some of the open "aspb" corruption faults** — large frames (`decrypt1`, recursive
+`run_vm`) overflowing the 8 KB stack into the heap, and vice-versa.
+
+**RECURRED + CONFIRMED (IMG_1685 + log b2a2b59f, 2026-06-08).** After the view-RLE "aspb" fix (which DID
+land — that room-13 fault is gone), a second restore into room 13 reproduced the *decrypt1* fault exactly:
+LCD dump `PC=0x1006b87c` (= `decrypt1`, `decompress0.c:153`, instr `strh.w r5,[r4, ip, lsl #1]`),
+`CFSR=0x8200` (BFARVALID|PRECISERR), `BFAR=MMFAR=0x4e468a2a` (wild — corrupted `tokenctr`). The log's own
+breakdown predicted it: restore #2 arena=420820 → heap top `__end__`(0x2001742c)+0x66c04 = **0x2007e030**,
+only **0x3FD0 ≈ 16.3 KB** below `__StackTop` 0x20082000 — just under `decrypt1`'s 16.4 KB frame. Same
+instruction, same signature as IMG_1683. Decisive confirmation of the collision.
+
+**FIX APPLIED (`decompress0.c`, `HAVE_PICO`-gated).** `tokenlist[4096]` + `tokenlengthlist[4096]` are now
+`static guint16 *` file-scope-lifetime pointers, lazy-`sci_malloc`'d once on the first `decrypt1` call and
+reused forever (never freed — game-independent scratch; `decrypt1` is core0-serial so non-reentrancy is
+fine). Desktop keeps the on-stack arrays (`#else`) — its stack is huge and a perpetual 16 KB heap charge
+there is pointless. **Verified in the Pico ELF:** `decrypt1`'s frame dropped `sub sp,#16384`+28 →
+**`sub sp,#28`**, and **no 16 KB+ stack frame remains anywhere** in the binary; the largest is now **4128 B**
+(~4 KB, well under the 8 KB stack) — so the heap must ratchet ~12 KB *further* before even those are at
+risk. Lazy-malloc preferred over static `.bss` (which would permanently lower the arena ceiling even when
+not decompressing). **Awaiting device retest.** The arena ratchet remains the underlying pressure (a
+separate, secondary lever — see the arena-ratchet diagnosis); this fix removes the *largest* frame so the
+collision is closed for the foreseeable arena range, but if the arena keeps climbing the next-largest frames
+(the two ~4 KB ones) would eventually need the same treatment. **Also audit** `kpathing.c` and deep
+`run_vm` recursion if it ever recurs at a ~4 KB frame.
+
+**DEVICE-CONFIRMED FIXED (log 3396e873, 2026-06-08).** Same restore-into-room-13 + robot-ZOT-death
+sequence that HardFaulted at `decrypt1` before now produces **no HardFault** — instead a clean `[OOM]`
+halt at `decompress0.c:324` (`result->data = sci_malloc(11127)`), `free=30472 arena=424908`. The
+stack/heap collision is gone (the off-stack arrays did their job); what surfaced underneath is the
+*fragmentation* OOM (next note), which is the real remaining wall — NOT a regression of this fix.
+
+### FIXED (pending device retest) — "aspb" corruptor found: mirrored view-RLE branch overruns index_data (room-13 fault, log 8b21d51a + IMG_1684)
+
+A room-13 HardFault that is the **heap-corruption ("aspb") family**, NOT the decrypt1 stack collision
+(this run had ~27 KB stack headroom, arena 400340). LCD dump (IMG_1684):
+```
+HardFault PC=0x10089cd8  → _malloc_r (_mallocr.c:2597), faulting instr str r3,[r2,#4]
+CFSR=0x00008200          → BFSR = BFARVALID|PRECISERR (precise data bus WRITE)
+HFSR=0x40000000          → FORCED
+BFAR=MMFAR=0x200bdd64     → ~244 KB ABOVE SRAM top (0x20082000) — wild remainder-chunk pointer
+```
+Decode: the faulting store writes a **split-remainder chunk header** (`str r3,[r2,#4]`, r2≈0x200bdd60)
+where `r2` was computed from a **corrupted chunk size field** → wild address → fault. So malloc is the
+*canary*; an earlier OOB write smashed a chunk header. The room-13 `[mem] BREAKDOWN` confirms it:
+`gfxpxm … big=ffffffff … 983147 B` — a `gfx_pixmap_t` size field smashed from ~2596 → 983147 B, plus
+`gfxr_draw_cel0() L125 … writes RLE data over its designated end`, `invalid view 901`, `Gray magic 0202`.
+
+**Root cause — `gfxr_draw_cel0` (`sci_view_0.c`), the MIRRORED branch lacks the bound check the
+non-mirrored branch has.** The non-mirrored path (≈L113-131) guards every run with
+`if (writepos + count > pixmap_size) { GFXERROR("…over its designated end…"); return NULL; }`. The
+mirrored path's inner fill was `while (count)` — it checks **only `count`, never `yl`**. The fill wraps
+lines backward (`writepos`/`line_base` advance by `xl` each line); once the last line is consumed
+(`yl`→0) those pointers march **past `dest = index_data` (sized `xl*yl`)**, and a run with leftover
+`count` `memset`s off the end into the adjacent heap chunk's header → the smash malloc later trips on.
+Shared-engine code (no `HAVE_PICO` guard), so desktop survives the same write on slack — textbook "aspb".
+
+**Fix (`sci_view_0.c`, shared, mirrored branch):** bound the inner loop on `yl` too
+(`while (count && yl)`), then after it, leftover `count` is a genuine overrun → `gfx_free_pixmap` +
+`GFXERROR(...over its designated end...)` + `return NULL`, exactly mirroring the non-mirrored branch
+(it additionally frees the partial pixmap to avoid a leak on the corrupt path, like the `xl<=0` guard).
+Builds clean desktop + pico. **Awaiting device retest** to confirm the room-13 fault is gone. If a
+HardFault with a garbage/ASCII BFAR still appears after this, there is a *second* overflow source (the
+string-kernel suspects below remain the next ASan target).
 
 ### OPEN — top priority — heap corruption surfacing as a GC fault ("aspb")
 
