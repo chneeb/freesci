@@ -91,7 +91,12 @@ gfxr_draw_cel0(int id, int loop, int cel, byte *resource, int size, gfxr_view_t 
 			if (color == color_key)
 				color = retval->color_key;
 
-			while (count) {
+			/* Bound on yl as well as count: once the last line is
+			   consumed (yl==0) the writepos/line_base advance marches
+			   past dest, so a run with leftover count would memset off
+			   the end of index_data and smash the adjacent heap chunk.
+			   The non-mirrored branch below already guards this case. */
+			while (count && yl) {
 				int pixels = writepos - line_base;
 
 				if (pixels > count)
@@ -106,6 +111,12 @@ gfxr_draw_cel0(int id, int loop, int cel, byte *resource, int size, gfxr_view_t 
 					writepos += (xl << 1);
 					line_base += xl;
 				}
+			}
+
+			if (count) {
+				gfx_free_pixmap(NULL, retval);
+				GFXERROR("View %02x:(%d/%d) writes RLE data over its designated end at rel. offset 0x%04x\n", id, loop, cel, pos);
+				return NULL;
 			}
 		}
 	} else {
