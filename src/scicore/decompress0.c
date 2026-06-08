@@ -61,13 +61,34 @@ decrypt1(guint8 *dest, guint8 *src, int length, int complength)
 	guint16 token; /* The last received value */
 	guint16 maxtoken = 0x200; /* The biggest token */
 
+#ifdef HAVE_PICO
+	/* These two 4096-entry arrays are 16 KB combined — larger than the
+	   PicoCalc's entire 8 KB core0 stack. As the heap arena ratchets up
+	   (across savegame restores) the heap top climbs to within ~16 KB of the
+	   stack top, and this single largest frame then punches its locals into
+	   live heap → the spilled tokenctr gets overwritten → a wild strh to
+	   garbage (the decrypt1 HardFault). Move them off the stack to malloc-once
+	   file-scope statics so this frame stays small. decrypt1 is core0-serial
+	   (SCI decompression is never concurrent), so non-reentrancy is fine; the
+	   buffers are game-independent scratch, allocated once and never freed. */
+	static guint16 *tokenlist = NULL;        /* pointers to dest[] */
+	static guint16 *tokenlengthlist = NULL;  /* char length of each token */
+#else
 	guint16 tokenlist[4096]; /* pointers to dest[] */
 	guint16 tokenlengthlist[4096]; /* char length of each token */
+#endif
 	guint16 tokenctr = 0x102; /* no. of registered tokens (starts here)*/
 
 	guint16 tokenlastlength = 0;
 
 	guint16 destctr = 0;
+
+#ifdef HAVE_PICO
+	if (!tokenlist) {
+		tokenlist       = (guint16 *) sci_malloc(4096 * sizeof(guint16));
+		tokenlengthlist = (guint16 *) sci_malloc(4096 * sizeof(guint16));
+	}
+#endif
 
 	while (bytectr < complength) {
 
