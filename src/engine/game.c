@@ -55,6 +55,29 @@ extern int send_calls_allocated;
 extern int bp_flag;
 
 
+#if defined(HAVE_PICO) && defined(PICO_PACK_VOCAB)
+/* The packed-words blob is input-independent (identical the whole game) and is
+   already a permanent baseline SRAM cost. Pack it ONCE and keep it resident
+   across savegame restores instead of freeing + re-packing it on the replay
+   teardown: the re-pack needs one contiguous ~30KB block that fails on the
+   fragmented post-restore heap (the vocab.c:206 OOM). Mirrors the B-1 priority
+   scratch and the resmgr/gfx_state stay-resident restore design. It is freed
+   only when a game fully exits to the chooser (pico_reset_resident_vocab, called
+   from pico_main.c after freesci_main returns) so the next, possibly different,
+   game re-packs its own vocab. */
+static word_t **g_pico_vocab_blob = NULL;
+static int g_pico_vocab_blob_nr = 0;
+
+void
+pico_reset_resident_vocab(void)
+{
+	if (g_pico_vocab_blob)
+		free(g_pico_vocab_blob);
+	g_pico_vocab_blob = NULL;
+	g_pico_vocab_blob_nr = 0;
+}
+#endif
+
 
 static int
 _init_vocabulary(state_t *s) /* initialize vocabulary and related resources */
@@ -134,12 +157,34 @@ _init_vocabulary(state_t *s) /* initialize vocabulary and related resources */
 	   ~42KB the probe measured — is NOT built here. It is rebuilt per typed command
 	   inside kParse and freed afterwards (see kstring.c), so its cost is transient
 	   rather than a permanent resident charge. parser_rules stays NULL at init. */
+#ifdef PICO_PACK_VOCAB
+	if (g_pico_vocab_blob) {
+		/* Restore path: reuse the resident packed vocab — no re-pack, no OOM. */
+		s->parser_words    = g_pico_vocab_blob;
+		s->parser_words_nr = g_pico_vocab_blob_nr;
+		s->parser_suffices = vocab_get_suffices(s->resmgr, &(s->parser_suffices_nr));
+		s->parser_branches = vocab_get_branches(s->resmgr, &(s->parser_branches_nr));
+		s->parser_rules    = NULL;  /* rebuilt per-command in kParse */
+		sciprintf("Pico: parser vocab REUSED resident, %d words (GNF rebuilt per command).\n",
+			  s->parser_words_nr);
+	} else
+#endif
 	if ((s->resmgr->sci_version < SCI_VERSION_01_VGA)
 	    && (s->parser_words = vocab_get_words(s->resmgr, &(s->parser_words_nr)))) {
 #ifdef PICO_PACK_VOCAB
 		/* Stage 2: collapse the ~1489 per-word blocks into one packed
-		   allocation. Must be freed with a single free() in _free_vocabulary. */
-		s->parser_words    = vocab_pack_words(s->parser_words, s->parser_words_nr);
+		   allocation. On success keep it resident across restore
+		   (g_pico_vocab_blob, freed only on full exit by
+		   pico_reset_resident_vocab); on failure vocab_pack_words returns the
+		   same unpacked array untouched, which is freed normally. */
+		{
+			word_t **packed = vocab_pack_words(s->parser_words, s->parser_words_nr);
+			if (packed != s->parser_words) {
+				s->parser_words      = packed;
+				g_pico_vocab_blob    = packed;
+				g_pico_vocab_blob_nr = s->parser_words_nr;
+			}
+		}
 #endif
 		s->parser_suffices = vocab_get_suffices(s->resmgr, &(s->parser_suffices_nr));
 		s->parser_branches = vocab_get_branches(s->resmgr, &(s->parser_branches_nr));
@@ -211,7 +256,11 @@ _free_vocabulary(state_t *s)
 
 	if (s->parser_words) {
 #ifdef PICO_PACK_VOCAB
-		free(s->parser_words);  /* Stage 2: packed into one allocation */
+		/* The resident packed blob is kept across restore — do NOT free it here
+		   (pico_reset_resident_vocab frees it on full exit). Only free if this is
+		   the unpacked fallback array (pack failed), which is many small blocks. */
+		if (s->parser_words != g_pico_vocab_blob)
+			vocab_free_words(s->parser_words, s->parser_words_nr);
 #else
 		vocab_free_words(s->parser_words, s->parser_words_nr);
 #endif

@@ -23,6 +23,9 @@ extern psram_spi_inst_t g_psram;
 
 /* FreeSCI's main(), renamed under HAVE_PICO */
 int freesci_main(int argc, char **argv);
+#ifdef PICO_PACK_VOCAB
+void pico_reset_resident_vocab(void);  /* game.c */
+#endif
 
 /* ---- HardFault diagnostics (RP2350 / Cortex-M33) ---------------------- */
 /* The RP2350 has no MMU, so a wild pointer doesn't fault at the access — but a
@@ -222,6 +225,11 @@ int main(void)
         printf("Launching freesci_main\n");
         freesci_main(argc, argv);
         printf("freesci_main returned\n");
+#ifdef PICO_PACK_VOCAB
+        /* Drop the resident packed vocab so the next (possibly different) game
+           re-packs its own; kept resident only across in-game restores. */
+        pico_reset_resident_vocab();
+#endif
         /* After the game exits, loop back to the chooser */
     }
 }

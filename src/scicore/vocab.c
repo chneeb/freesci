@@ -203,7 +203,11 @@ vocab_pack_words(word_t **words, int words_nr)
 		recs += (rec + 3) & ~(size_t) 3;   /* keep records 4-byte aligned */
 	}
 
-	blob = (char *) sci_malloc(tbl + recs);
+	/* Raw malloc, NOT sci_malloc: on Pico sci_malloc -> pico_oom_report HALTS on
+	   failure, so the graceful "return unpacked words" fallback below could never
+	   run. Raw malloc returns NULL instead, letting the caller keep a working
+	   (unpacked) vocab. Freed with a single raw free() (see _free_vocabulary). */
+	blob = (char *) malloc(tbl + recs);
 	if (!blob)
 		return words;   /* pack failed; keep the unpacked array */
 
