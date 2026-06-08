@@ -327,6 +327,20 @@ _sm_deallocate (seg_manager_t* self, int seg, int recursive)
 		mobj->data.nodes.entries_nr = mobj->data.nodes.max_entry = 0;
 		break;
 	case MEM_OBJ_CLONES:
+		/* Free each live clone's separately-malloc'd variables block before
+		   dropping the table. Only free_at_address_clones (GC) freed these;
+		   on engine teardown (sm_destroy at savegame restore / quit) any clone
+		   still live in the table leaked its variables — ~77/restore on SQ3's
+		   death scene, a per-restore heap-fragmentation driver. */
+		{
+			int ci;
+			for (ci = 0; ci < mobj->data.clones.max_entry; ci++)
+				if (ENTRY_IS_VALID(&(mobj->data.clones), ci)
+				    && mobj->data.clones.table[ci].entry.variables) {
+					sci_free(mobj->data.clones.table[ci].entry.variables);
+					mobj->data.clones.table[ci].entry.variables = NULL;
+				}
+		}
 		sci_free(mobj->data.clones.table);
 		mobj->data.clones.table = NULL;
 		mobj->data.clones.entries_nr = mobj->data.clones.max_entry = 0;
