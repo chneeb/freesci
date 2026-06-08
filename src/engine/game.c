@@ -44,6 +44,9 @@
 #include <versions.h>
 #include <kernel.h>
 #include "kernel_types.h"
+#ifdef HAVE_PICO
+#include "gc.h"
+#endif
 #ifdef PICO_VOCAB_PROBE
 #include <malloc.h>
 #include <string.h>
@@ -843,6 +846,35 @@ script_free_breakpoints(state_t *s)
 /* Game instance stuff: Init/Unitialize state-dependant data */
 /*************************************************************/
 
+#ifdef HAVE_PICO
+/* The live gamestate, published while a game is running (game_init..game_exit)
+   so the allocator's last-ditch reclaim can reach the resmgr + seg manager.
+   NULL outside a running game (e.g. during the chooser / restore teardown). */
+state_t *g_pico_current_state = NULL;
+
+/* Last-ditch heap reclaim, called by _SCI_MALLOC/_SCI_CALLOC/_SCI_REALLOC when an
+   allocation fails BEFORE giving up to pico_oom_report. On SQ3's tight, fragmented
+   heap a routine decode/deserialize alloc (e.g. decompress0.c:324) can be denied
+   while KB remain free total — the free space is just shattered into sub-block
+   chunks. Two cheap things can re-coalesce a contiguous run without losing game
+   state: flush the resource LRU (reloads on demand) and run the GC (reclaims
+   disposed clones the death-animation piled up that GC hasn't swept yet). The
+   re-entrancy guard lives in sci_memory.c: run_gc itself allocates, so a failure
+   *inside* reclaim must fall straight through to pico_oom_report, not recurse. */
+void
+pico_reclaim_heap(void)
+{
+	state_t *s = g_pico_current_state;
+
+	if (!s)
+		return;
+
+	if (s->resmgr)
+		scir_free_all_lru(s->resmgr);
+
+	run_gc(s);
+}
+#endif
 
 int
 game_init(state_t *s)
@@ -923,12 +955,20 @@ game_init(state_t *s)
 
 	s->menubar = menubar_new(); /* Create menu bar */
 
+#ifdef HAVE_PICO
+	g_pico_current_state = s; /* Publish for the allocator's last-ditch reclaim */
+#endif
+
 	return 0;
 }
 
 int
 game_exit(state_t *s)
 {
+#ifdef HAVE_PICO
+	g_pico_current_state = NULL; /* Resmgr/seg manager are about to be torn down */
+#endif
+
 	if (s->execution_stack) {
 		sci_free(s->execution_stack);
 	}

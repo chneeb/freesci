@@ -48,6 +48,14 @@ extern void pico_oom_report(const char *what, unsigned long size,
    for out-of-range sizes. Deregistration is by ptr in __wrap_free. */
 extern void census_site_register(void *ptr, const char *file, int line);
 
+/* Last-ditch heap reclaim (game.c): flush the resource LRU + run the GC to
+   re-coalesce a contiguous run on a fragmented heap. We call it ONCE on an
+   allocation failure and retry before halting via pico_oom_report. run_gc and
+   the LRU reload both allocate, so any failure DURING reclaim must skip the
+   reclaim+retry and fall straight to the OOM report — hence the guard. */
+extern void pico_reclaim_heap(void);
+static int g_pico_in_reclaim = 0;
+
 /* Running total of all sci_*-routed live bytes (actual block sizes via
    malloc_usable_size, so it matches mallinfo's accounting). The BREAKDOWN probe
    prints this; comparing its growth to mallinfo.uordblks splits an engine-side
@@ -84,6 +92,12 @@ _SCI_MALLOC(size_t size, const char *file, int line, const char *funct)
 #endif
 #ifdef HAVE_PICO
 	res = malloc(size);
+	if (res == NULL && !g_pico_in_reclaim) {
+		g_pico_in_reclaim = 1;
+		pico_reclaim_heap();
+		g_pico_in_reclaim = 0;
+		res = malloc(size);
+	}
 	if (res == NULL) pico_oom_report("malloc", (unsigned long)size, file, line, funct);
 	else { g_sci_live_bytes += malloc_usable_size(res); census_site_register(res, file, line); }
 #else
@@ -107,6 +121,12 @@ _SCI_CALLOC(size_t num, size_t size, const char *file, int line, const char *fun
 #endif
 #ifdef HAVE_PICO
 	res = calloc(num, size);
+	if (res == NULL && !g_pico_in_reclaim) {
+		g_pico_in_reclaim = 1;
+		pico_reclaim_heap();
+		g_pico_in_reclaim = 0;
+		res = calloc(num, size);
+	}
 	if (res == NULL) pico_oom_report("calloc", (unsigned long)(num * size), file, line, funct);
 	else { g_sci_live_bytes += malloc_usable_size(res); census_site_register(res, file, line); }
 #else
@@ -127,6 +147,14 @@ _SCI_REALLOC(void *ptr, size_t size, const char *file, int line, const char *fun
 	{
 		size_t old_usable = ptr ? malloc_usable_size(ptr) : 0;
 		res = realloc(ptr, size);
+		/* On NULL, realloc leaves the original ptr valid (not freed), so a
+		   reclaim+retry is safe. */
+		if (res == NULL && !g_pico_in_reclaim) {
+			g_pico_in_reclaim = 1;
+			pico_reclaim_heap();
+			g_pico_in_reclaim = 0;
+			res = realloc(ptr, size);
+		}
 		if (res == NULL) pico_oom_report("realloc", (unsigned long)size, file, line, funct);
 		else { g_sci_live_bytes += malloc_usable_size(res) - old_usable; census_site_register(res, file, line); }
 	}

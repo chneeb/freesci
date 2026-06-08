@@ -643,6 +643,59 @@ OOM and the post-restore baseline ratchet in one change** — at a cost of +32 K
 (decode *peak* ~unchanged since that 32 KB is live during every decode anyway; the *valley* between decodes
 drops ~32 KB, e.g. room-8 free 89 K → ~57 K, still positive but tighter for heavy-clone scenes).
 
+### TESTED — graceful retry+GC fired but did NOT recover; revealed TWO findings (log 63c9796a, 2026-06-08)
+
+**The fix (as built):** every `sci_malloc`/`sci_calloc`/`sci_realloc` routes through
+`_SCI_MALLOC`/`_SCI_CALLOC`/`_SCI_REALLOC` (`sci_memory.c`), where the Pico OOM-halt lives. On a NULL return
+the allocator calls `pico_reclaim_heap()` (`game.c`, `HAVE_PICO`) **once**, then retries before falling to
+`pico_oom_report`. `pico_reclaim_heap` flushes the resource LRU (`scir_free_all_lru(s->resmgr)`) then runs the
+GC (`run_gc(s)`), reaching the live state via `g_pico_current_state` (published in `game_init`, cleared in
+`game_exit`). A static `g_pico_in_reclaim` guard prevents recursion (run_gc + LRU reload both allocate). Both
+configs build clean; desktop untouched (all `HAVE_PICO`-gated). **Uncommitted — held for the device test that
+this note reports.**
+
+**Device result: the room-13 restore OOM STILL HALTS.** Restore into room 13 now *succeeds* (room enters +
+ready — the decrypt1 stack-collision crash is gone, consistent with the off-stack fix), but post-restore
+gameplay still `[OOM]`s: `malloc 11127 failed` **printed twice** → `[OOM]` at `decompress0.c:324`
+(`free=0x78b8`=30904, `arena=0x66bc4`=420804). The two identical "failed" lines confirm the **retry fired**
+(attempt + post-reclaim retry, same 11127) — but reclaim freed nothing usable.
+
+**FINDING 1 (implementation BUG — FIXED, pending device retest) — `g_pico_current_state` was NULL post-restore,
+so reclaim was a no-op exactly when needed.** My earlier "why it targets the restore site correctly" reasoning
+was WRONG. The restore path (`vm.c` `_game_run`, ~2313-2319) does `game_exit(s)` — which **clears the global to
+NULL** — then swaps `s = rs` (the restored state from `gamestate_restore`) **without calling `game_init` on
+`rs`**. So `g_pico_current_state` stayed NULL for the entire restored session; `pico_reclaim_heap()` saw NULL
+and returned immediately. GC + LRU-flush never ran. (game_init *does* run earlier on the throwaway light state
+at vm.c:2304, but that state is freed at 2318 — the running state `rs` was never published.) **Fix applied:**
+republish `g_pico_current_state = s` right after `s = rs` (vm.c, `HAVE_PICO`, with an `extern` decl beside
+`g_pico_restore_pending_name`); the `else` branch (rs==NULL, continuing the old game_init'd `s`) was already
+correct. Both configs build clean. NB the OOM here is *gameplay* (post-restore, after a window dispose), NOT
+deserialization — so the "GC walks a fresh consistent state" safety argument doesn't apply either; this is the
+gameplay-time-GC-from-arbitrary-point path (the caveat below), now the primary path — so the next device run is
+also the first real exercise of `run_gc` firing from inside an allocation.
+
+**FINDING 2 (the deeper problem — reclaim is the WRONG LEVER for this OOM).** Even with Finding 1 fixed, this
+specific OOM almost certainly won't recover, because the blocker is **fragmentation, not reclaimable bytes**:
+- `reslru=0 reslock=615` — all 615 resources are LOCKED, so `scir_free_all_lru` frees **nothing** here.
+- `chunks=219` at room-13-ready (fresh boot is 17-40) — the restore rebuild shattered the heap. 30904 B free
+  total, but no 11127-contiguous run among 219 fragments. `run_gc` only frees small scattered clone/node
+  blocks (~40 B each; `clonevar=3140 B/77 clones`) → cannot synthesize an 11127-contiguous hole.
+So retry+GC is cheap insurance for OOMs where the LRU has evictable content or GC can free a *large* block, but
+it does **not** address the post-restore fragmentation/arena-ratchet wall (the parked "lever 2"). The real
+lever for the restore decompress OOM is reducing restore-time fragmentation (chunks 17→219) or a decompress
+strategy that doesn't need a large contiguous block — NOT allocator self-reclaim.
+
+**Status:** (a) Finding-1's republish is **DONE** (committed) so retry+GC now actually runs post-restore —
+correct + useful for *other* OOMs, and the first device run that exercises `run_gc` from inside an allocation
+(watch for a UAF HardFault in the reg_t hashmap; fallback is LRU-flush-only). (b) The fragmentation lever for
+*this* decompress site is **still open** — reclaim can't conjure contiguity (LRU empty/all-locked, GC frees
+only scattered ~40 B blocks vs the 219-chunk shatter), so it needs restore-time fragmentation reduction or a
+decompress strategy that avoids a large contiguous block, NOT allocator self-reclaim. The clean `[OOM]` halt
+(legible, no HardFault, no corruption) means the mitigation behaves; it just can't make space that isn't
+contiguous. **The decrypt1 stack-collision fix is device-CONFIRMED by this log** (room 13 restore no longer
+HardFaults at `decompress0.c:153`; it now reaches the clean fragmentation `[OOM]` underneath, exactly as the
+3396e873 note predicted).
+
 ### DONE (device-confirmed, log ce81217b) — B-1 permanent priority scratch fixes the pic-decode OOM
 
 Fix B-1 is implemented and device-confirmed. `g_pico_priority_scratch` (32 KB nibble-packed) is `malloc`'d

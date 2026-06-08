@@ -60,6 +60,7 @@ calls_struct_t *send_calls = NULL;
 int send_calls_allocated = 0;
 #ifdef HAVE_PICO
 char *g_pico_restore_pending_name = NULL;
+extern state_t *g_pico_current_state; /* game.c: published for the allocator's last-ditch reclaim */
 #endif
 int bp_flag = 0;
 static reg_t _dummy_register = NULL_REG_INITIALIZER;
@@ -2317,6 +2318,13 @@ _game_run(state_t *s, int restoring)
 					script_free_vm_memory(s);
 					sci_free(s);
 					s = rs;
+#ifdef HAVE_PICO
+					/* game_exit above NULLed the global; the restored state rs is
+					   never run through game_init, so republish it here or the
+					   allocator's pico_reclaim_heap() stays a no-op for the whole
+					   restored session (the exact window it's meant to cover). */
+					g_pico_current_state = s;
+#endif
 
 					if (!send_calls_allocated)
 						send_calls = (calls_struct_t*)sci_calloc(sizeof(calls_struct_t),
