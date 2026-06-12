@@ -147,11 +147,15 @@ add_compile_options(-fgnu89-inline -w -Wno-implicit-function-declaration)
 #   FSCI_PROBE_MEM_CENSUS — [mem] CENSUS/SITES + the --wrap malloc histogram
 #                           (~27.6KB .bss; implies FSCI_PROBE_MEM for the dump)
 #   FSCI_PROBE_PARSER     — [gnf] per-command GNF-rebuild transient size
+#   FSCI_PROBE_ARENA      — [arenagrow] names the sci_* alloc that grows the
+#                           heap arena (sbrk), pinpointing the restore-time
+#                           +32KB/restore ratchet trigger (Pico only)
 option(FSCI_PROBE_STR        "Probe: SCI string-kernel buffer overflows"        ON)
 option(FSCI_PROBE_GFX        "Probe: priority/control/occlusion gfx tracing"    OFF)
 option(FSCI_PROBE_MEM        "Probe: per-room SRAM/heap breakdown lines"        OFF)
 option(FSCI_PROBE_MEM_CENSUS "Probe: live-alloc size histogram + call sites"    OFF)
 option(FSCI_PROBE_PARSER     "Probe: per-command GNF-rebuild transient size"    OFF)
+option(FSCI_PROBE_ARENA      "Probe: name the alloc that grows the heap arena"  OFF)
 if(FSCI_PROBE_MEM_CENSUS AND NOT FSCI_PROBE_MEM)
     message(STATUS "FSCI_PROBE_MEM_CENSUS implies FSCI_PROBE_MEM (census dumps in the breakdown) — enabling it")
     set(FSCI_PROBE_MEM ON)
@@ -170,6 +174,9 @@ if(FSCI_PROBE_MEM_CENSUS)
 endif()
 if(FSCI_PROBE_PARSER)
     add_compile_definitions(FSCI_PROBE_PARSER=1)
+endif()
+if(FSCI_PROBE_ARENA)
+    add_compile_definitions(FSCI_PROBE_ARENA=1)
 endif()
 
 if(PLATFORM STREQUAL "pico")

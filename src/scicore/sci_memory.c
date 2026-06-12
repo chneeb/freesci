@@ -65,6 +65,40 @@ static int g_pico_in_reclaim = 0;
 size_t g_sci_live_bytes = 0;
 #endif
 
+#if defined(HAVE_PICO) && defined(FSCI_PROBE_ARENA)
+#include <unistd.h>   /* sbrk(0): cheap O(1) program-break read, no heap walk */
+/* [arenagrow] probe: the heap arena only grows when an allocation forces a
+   _sbrk() extension, and picolibc never returns it — that one-way growth is the
+   +32KB/restore ratchet that walks the heap into the RAM ceiling. After each
+   successful sci_* alloc, compare the program break to its previous value; if it
+   advanced, print the caller that triggered the grow. This NAMES the exact
+   allocation driving the ratchet (e.g. during gamestate_restore) instead of
+   guessing the site. Uses printf (raw serial, like the [mem] probes) so the line
+   lands in pico.log even mid-restore. Diagnostic build only (FSCI_PROBE_ARENA,
+   default OFF) — zero overhead otherwise. */
+/* Shared program-break watermark.  Both the sci_* allocators (via the macro
+   below) and the raw-malloc decode/restore sites (via pico_arena_probe(),
+   declared in sci_memory.h) sample the same last_brk, so a grow forced by a
+   raw malloc is attributed to the raw site that calls the probe immediately
+   after its malloc — instead of bleeding onto the next sci_* alloc.  FreeSCI
+   allocates from core0 only, so no locking is needed. */
+static char *pico_arena_last_brk = NULL;
+
+void
+pico_arena_probe(size_t size, const char *file, int line, const char *funct)
+{
+	char *cur = (char *) sbrk(0);
+	if (pico_arena_last_brk && cur > pico_arena_last_brk)
+		printf("[arenagrow] +%ld brk=%p req=%lu  %s:%d %s\n",
+		       (long)(cur - pico_arena_last_brk), (void *)cur,
+		       (unsigned long)size, file, line, funct);
+	pico_arena_last_brk = cur;
+}
+#define PICO_ARENA_PROBE(sz) pico_arena_probe((sz), file, line, funct)
+#else
+#define PICO_ARENA_PROBE(sz) ((void)0)
+#endif
+
 /*#define POISON_MEMORY*/
 
 /* set optimisations for Win32: */
@@ -108,6 +142,7 @@ _SCI_MALLOC(size_t size, const char *file, int line, const char *funct)
 		memset(res, 0xa5, size);
 	}
 #endif
+	PICO_ARENA_PROBE(size);
 	return res;
 }
 
@@ -132,6 +167,7 @@ _SCI_CALLOC(size_t num, size_t size, const char *file, int line, const char *fun
 #else
 	ALLOC_MEM((res = calloc(num, size)), num * size, file, line, funct)
 #endif
+	PICO_ARENA_PROBE(num * size);
 	return res;
 }
 
@@ -161,6 +197,7 @@ _SCI_REALLOC(void *ptr, size_t size, const char *file, int line, const char *fun
 #else
 	ALLOC_MEM((res = realloc(ptr, size)), size, file, line, funct)
 #endif
+	PICO_ARENA_PROBE(size);
 	return res;
 }
 

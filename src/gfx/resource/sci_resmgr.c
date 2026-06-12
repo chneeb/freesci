@@ -160,6 +160,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			g_pico_decode_visual_buf = NULL;
 		} else {
 			scaled_pic->visual_map->index_data = (byte*)malloc(GFXR_AUX_MAP_SIZE);
+			PICO_ARENA_PROBE_RAW(GFXR_AUX_MAP_SIZE);
 			if (!scaled_pic->visual_map->index_data) {
 				/* Deferred alloc failed.  Signal gfxop_new_pic to retry with an
 				   early pin from the freshly-freed region; if that also fails
@@ -188,6 +189,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			priority_is_scratch = 1;
 		} else {
 			scaled_pic->priority_map->index_data = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
+			PICO_ARENA_PROBE_RAW((GFXR_AUX_MAP_SIZE + 1) >> 1);
 		}
 		if (!scaled_pic->priority_map->index_data) {
 			/* Priority (32KB nibble) couldn't find a contiguous block after the

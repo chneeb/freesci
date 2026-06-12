@@ -817,6 +817,210 @@ decompress alloc succeeds normally, the 16 KB decompress scratch could be droppe
 (IMG_1693) confirms** room 15 background + hand cursor render cleanly (no garbage rect / corruption-family
 artifact) — frame is merely incomplete because the VM aborted mid-load. Pure OOM, not a render bug.
 
+**RE-CONFIRMED + EXACT CEILING from the ELF (FSCI_PROBE_ARENA build, pico.log 2026-06-12).** A restore into
+the rats room (room 15) → climb ladder → enter next room reproduced this OOM byte-for-byte, and the
+`[arenagrow]` probe pinned the numbers. The precise physical ceiling (from `arm-none-eabi-nm`): heap
+`__end__` **0x200157f8** → `__HeapLimit/__StackLimit` **0x20080000** = **436,232 B max arena** (`__StackTop`
+0x20082000, 8 KB main stack above). (Corrects the earlier ~436,748 / 436,200 estimates — the exact max is
+**436,232**.) The session: pre-restore room 2 arena **403,464 / chunks 27** → post-restore room 15 arena
+**436,232 / chunks 172**. So one restore ratcheted the arena **+32,768 to the byte-exact ceiling** (last
+`[arenagrow]` line: `brk=20080000`, heap pinned against `__StackLimit`, zero growth room) AND fragmented it
+**6×** (27→172). Climbing into the next room: `malloc 3926 failed` (script 3 load) → no 3926-contiguous run
+among 172 fragments, arena can't grow → `kScriptID` no dispatch table → fatal send to 0000:0000. Same as
+log 20bb9822.
+
+**Telemetry finding — the dominant ratchet drivers are RAW mallocs the probe can't name directly.** The two
+largest captured grows are mis-attributed to *tiny* `sci_*` allocs: `+32768 … req=256 … tools.c:720
+sci_getcwd` and `+53248 … req=52 … sci_pic_0.c:282 gfxr_init_pic`. Per the probe's known limitation, the real
+driver is the **raw `malloc` immediately before** each — i.e. the per-decode **32 KB control buffer**
+(`sci_resmgr.c`) and **64 KB visual** / decompress buffers. The `sci_*`-routed grows the probe *can* see are a
+minority; the arena climbed 387,080 → 403,464 across rooms 900/2 with **no** `[arenagrow]` lines at all
+(all raw-malloc driven). **So to name the exact restore-time ratchet allocation, the probe must be extended to
+the ~4 raw-malloc sites** (deferred visual `sci_resmgr.c:155`, early-pin `operations.c:2281`, 32 KB control,
+decompress raw fallbacks) — otherwise it keeps attributing their grows to the next `sci_*` call. Lever is
+unchanged (drive the restore peak below the standing 403,464 arena so the final +32,768 grow never fires);
+the probe-extension is the cheap next diagnostic to name *which* restore alloc forces it.
+
+### RULED OUT — `malloc_trim()` does NOT fix the arena ratchet (device-tested, reverted to HEAD baseline)
+
+`malloc_trim(pad)` was tried as the un-ratchet lever and is a **dead end** for this OOM — do not re-attempt
+cold. Two flavors, both failed:
+
+- **Per-room `malloc_trim(0)` (operations.c, end of `gfxop_new_pic`)** — maximally aggressive (strips the top
+  chunk to ~300 B via `_sbrk(negative)`). **Caused a regression:** the next restore's reconstruct then
+  sbrk-grew from the stripped floor and `malloc 7302 failed` mid-reconstruct. It returned bytes the restore
+  immediately needed back, fragmenting the rebuild.
+- **Padded valley `malloc_trim(16384)`** — intended to un-ratchet "less aggressively." It was a **no-op**: at
+  every room valley the top free chunk was smaller than the 16 KB cushion, so newlib released nothing (no
+  `_sbrk(negative)` ever issued). Zero effect on the arena; the run still OOM'd on play-path-variance
+  fragmentation, not the trim.
+
+**Two facts established along the way (keep — they correct earlier guesses):**
+- **The "trim poisons sbrk" theory is WRONG.** A post-lightinit `malloc_trim(0)` stripped to keep≈304, yet the
+  following reconstruct sbrk-grew the arena 395276 → 432140 with no corruption. newlib `_sbrk` (pico-sdk
+  `newlib_interface.c`) cleanly honors a later positive grow after a negative trim; the only guard is
+  `next_heap_end > __StackLimit`. So an earlier-session regression blamed on "trim poisoning sbrk" was actually
+  fragmentation/play-path variance.
+- **True physical ceiling re-confirmed from the ELF:** heap `__end__` grows up to `__StackLimit/__HeapLimit`
+  0x20080000; `__StackTop` 0x20082000. **Max arena ≈ 436,748 B (0x6A80C).**
+
+**Conclusion:** `malloc_trim` (any pad) can't help — releasing the top chunk at a valley either returns memory
+the next peak immediately re-sbrk's (ratchet unchanged) or fragments the very rebuild that needs contiguity.
+The real lever stays **driving the restore-time transient peak below the standing arena** so sbrk never grows
+(savegame.c `gamestate_restore` + vm.c `_game_run` teardown/rebuild peak), NOT allocator self-reclaim. All trim
+experiments were reverted — vm.c/savegame.c/operations.c are back to **zero diff vs HEAD** (the room-15 build).
+
+### RULED OUT — "free CFSML script bufs before reload" (Codex rescue rank-1) — HardFaulted, premise was false
+
+A Codex `/codex:rescue` pass proposed, as its top-ranked un-ratchet fix, that the restore path **leaks the
+old script bytecode buffers**: it claimed `_cfsml_read_script_t` re-allocates `script_t.buf` at
+`savegame.c:1818`, duplicating each script's ~KBs across the deserialization → +32KB ratchet. The fix was to
+`sci_free(scr->buf)` in `load_script` before the reload. **Implemented, then it HardFaulted immediately on the
+first restore** (UNALIGNED UsageFault, CFSR=0x01000000, PC in `_malloc_usable_size_r`, LR in `_SCI_FREE`).
+
+**The premise is FALSE — `script_t.buf` is never serialized.**
+- `_cfsml_read_script_t` (savegame.c ~3411) reads `nr`/`buf_size`/`script_size`/`heap_size`/`obj_indices`/
+  `exports_nr`/… but **not** `buf`. The `buf` reader/allocator at **line 1818 belongs to
+  `_cfsml_read_dynmem_t`** (a different struct with its own `buf` field), NOT `_cfsml_read_script_t`. Codex
+  mis-attributed the line.
+- So at `load_script` entry `scr->buf` is **uninitialized garbage** (the seg-manager heap slot was just
+  rebuilt); the original `scr->buf = malloc(scr->buf_size)` is a **first-time init**, not an overwrite of a
+  retained pointer. There is **no leak and no duplicate peak** here.
+- The HardFault was `_SCI_FREE` (sci_memory.c) calling `malloc_usable_size(garbage_ptr)` for its
+  `g_sci_live_bytes` accounting *before* `free()` → faults inside `_malloc_usable_size_r` on the bogus
+  pointer. Reverted — savegame.c back to zero diff vs HEAD.
+
+**Lesson:** verify which function a cited `savegame.c:NNNN` line actually sits in (the CFSML file is one giant
+generated file, many near-identical `buf` readers) before freeing anything on the restore path. The arena
+ratchet is NOT a script-buf leak.
+
+### TELEMETRY — `[arenagrow]` probe to NAME the alloc that triggers the sbrk grow (`FSCI_PROBE_ARENA`, default OFF)
+
+Since the +32,768 B/restore ratchet root cause is still unexplained (genuine deserialization 2× working-set
+peak is the prime suspect, but unproven), guessing sites is what produced the rank-1 dead-end above. Instead,
+**name the allocation that actually grows the program break.** New top-level CMake `option(FSCI_PROBE_ARENA)`
+(OFF; ON adds `-DFSCI_PROBE_ARENA=1`). When ON + `HAVE_PICO`, `sci_memory.c` defines `pico_arena_grow_probe`:
+each `_SCI_MALLOC`/`_SCI_CALLOC`/`_SCI_REALLOC` reads `sbrk(0)` (O(1) program-break read, no heap walk) and,
+when it moved up since the last sci_* alloc, prints
+`[arenagrow] +<delta> brk=<addr> req=<size>  <file>:<line> <funct>`. Diff the `[arenagrow]` lines across a
+restore to see exactly which sci_* call site forced each ~32KB sbrk granule.
+
+- Build the diagnostic firmware: add `-DFSCI_PROBE_ARENA=ON` to the Pico configure (already wired).
+
+**EXTENDED to the raw-malloc decode/restore sites (2026-06-12).** The first device run (pico.log, rats-room
+restore → ladder → next-room `malloc 3926` crash) proved the `sci_*`-only probe's blind spot is the *whole
+story* here: the arena climbed 387,080 → 403,464 across rooms with NO `[arenagrow]` lines (all raw-malloc
+driven), and the two biggest captured grows were mis-attributed to tiny `sci_*` allocs (`+32768 req=256
+sci_getcwd`, `+53248 req=52 gfxr_init_pic`) — the real drivers were the raw `malloc`s right before them. So
+`pico_arena_grow_probe` was renamed `pico_arena_probe`, made non-static (declared in `sci_memory.h`), and its
+program-break watermark (`pico_arena_last_brk`) is now **shared** with a raw-site macro `PICO_ARENA_PROBE_RAW(sz)`
+(also in `sci_memory.h`; no-op unless `FSCI_PROBE_ARENA`, and a non-Pico fallback so unguarded call sites still
+compile on desktop). Each raw decode/restore `malloc` calls it *immediately after* the alloc, so a grow lands on
+the real culprit instead of the next `sci_*` call. Instrumented raw sites:
+  - **Per-decode:** `sci_resmgr.c` visual 64KB deferred (`:162`) + priority 32KB fallback (`:190`);
+    `operations.c` priority-scratch one-time (`:2297`), decompress-scratch one-time (`:2305`), early-pin visual
+    64KB (`:2370`).
+  - **Restore path (the ratchet suspects):** `savegame.c` `load_script` `scr->buf` per-script bytecode
+    (`:4500`) + the CFSML `read_*_tp` raw struct allocs (`song_t` `:3890`, `int_hash_map_t` `:3917`,
+    `int_hash_map_node_t` `:3967`).
+  - **Already `sci_*`-routed (no raw site, covered by the macro probe):** `decompress0.c` decompress output
+    (`:50` → `sci_malloc`), decrypt1 token buffers (`:113/:114`), script/vocab decompress (`:348`); visual[0]
+    (`pico_init_specific` → `sci_malloc`); all seg-manager rebuild allocs.
+- Both configs build clean; `pico_arena_probe` confirmed linked in the Pico ELF. **Next device run with this
+  build should NAME the exact restore-time allocation forcing the +32,768 grow** (diff `[arenagrow]` across the
+  restore — watch especially the `savegame.c:4500 load_script` lines during `reconstruct_scripts`).
+
+### REVERTED — the compressed-INPUT decompress scratch was NET-NEGATIVE (device-measured, 2026-06-12)
+
+A third permanent scratch (16KB, for `decompress0.c`'s compressed-INPUT read `buffer`, the `:348`/`sci_malloc(compressedLength)`
+site) was added on top of B-1 (32KB priority) and B-1.2 (16KB decompress-OUTPUT), then **reverted** the same day.
+It is a confirmed dead end — do not re-add it. The input buffer's lifetime DID make it scratch-safe (alias-free:
+freed within `decompress0` before return, decode is core0-serial, exactly one live), so the idea was sound; the
+problem is the **arena cost outweighs the benefit**.
+
+**Device data (`[arenagrow]`, FSCI_PROBE_ARENA build):** at the boot's first pic decode the three permanent
+scratches grow the break in lockstep —
+```
++32768 req=32000  operations.c gfxop_new_pic  ← priority scratch (B-1)
++20480 req=16384  operations.c gfxop_new_pic  ← decompress-OUTPUT scratch (B-1.2)
++20480 req=16384  operations.c gfxop_new_pic  ← decompress-INPUT scratch (the reverted one)
+```
+i.e. **72KB of arena consumed at the very first decode**, of which my input scratch was a permanent **+20KB**
+(16KB nominal, 20KB after the sbrk granule). The thing it was meant to fix (the `:348` input OOM) was no longer
+the failure after it landed; the OUTPUT path (`decompress0.c:50`, script/vocab decompress, which canNOT share a
+scratch — locked-resident, multiple live) OOM'd instead, and OOM'd *harder* because the input scratch had eaten
+20KB of headroom. A transient buffer (one live at a time) is better served by general heap headroom than by a
+permanent reservation. **Lesson: a permanent scratch only pays off for an allocation whose *contiguous* failure
+is otherwise unavoidable on a fragmented heap (priority/decompress-output decode buffers); for a small transient
+that `sci_malloc` can usually place, the always-resident cost is pure loss.**
+
+**Device follow-up (post-revert, DIAGNOSTIC build, 2026-06-12):** climbing the ladder in the rats room (room 3)
+OOM'd cleanly at exactly the reverted site — `[OOM] decompress0.c:348` (`line=0x15c`), `size=7725`,
+`arena=0x6a808`=436232 (**the exact physical ceiling**), `free=40392` but fragmented. So the revert *did*
+reintroduce the `:348` input OOM — **BUT only on the diagnostic firmware**, which sits ~26KB under the ceiling
+(see the Codex assessment's clean-vs-diagnostic span). The user confirms this same OOM **does NOT occur on Codex's
+probe-free clean build** — the ~26KB the probes cost is the whole margin here. Strongest evidence yet that (a) the
+revert is correct (the input scratch's permanent 20KB was worse than the occasional `:348` miss), and (b)
+**viability MUST be judged on a clean build** — the diagnostic build's 26KB overhead manufactures OOMs the shipping
+configuration does not have. The legible `[OOM]` halt (vs a HardFault) is also reconfirmed.
+
+### DONE (device-confirmed legible, this build) — `load_script` NULL-check turns a restore-OOM HardFault into a clean `[OOM]`
+
+`load_script` (`savegame.c`, the `reconstruct_scripts` restore path) called `scir_find_resource(...sci_script...)`
+then immediately `sm_mcpy_in_out(..., script->data, script->size, ...)` with **no NULL-check on `script`**. On the
+tight post-restore heap the resource load can fail (`opendir`/`RESOURCE.NNN` small mallocs fail → `Resmgr: Failed
+to read script.NNN` → `scir_find_resource` returns NULL), and the `memcpy` then read from a garbage source pointer
+→ **HardFault** (IMG_1695: PC=`memcpy`, LR=`load_script` `savegame.c:4514`, BFAR=`0xf0000000`). `sm_mcpy_in_out`
+already guards its *dest* (`scr->buf`), so only the *source* (`script->data`) was unguarded. Fix: bail with a
+`sciprintf` + `pico_oom_report` (Pico) when `script` (or `heap` for SCI1.1) is NULL — converts the
+memcpy-from-garbage fault into a legible `[OOM]` LCD dump naming `load_script`. Shared-engine fix (the NULL-deref
+was always latent); the `pico_oom_report` halt is `HAVE_PICO`-gated, desktop just returns. **Device-confirmed:** the
+next run produced a clean `[OOM]` (at `decompress0.c:50`, *before* reaching `load_script` this time) instead of a
+HardFault — the legibility path works.
+
+### KEY FINDING — the arena hits the PHYSICAL CEILING during room-2 GAMEPLAY, before any restore (log, 2026-06-12)
+
+The decisive insight from the post-revert-era logs: **the restore is not where the arena maxes out — normal
+gameplay is.** The four `[arenagrow]` lines immediately before the restore trigger (`Activating port 1 after
+disposing window 4`) show the break reaching `0x20080000` (the absolute ceiling, max arena 436,232 B) during
+**room-2 play**, driven by *tiny* allocations on a shattered heap:
+```
++4096 brk=2007D000 req=1998  gfx_tools.c:307 gfx_pixmap_alloc_index_data
++4096 brk=2007E000 req=2060  reg_t_hashmap.c:42 new_reg_t_hash_map
++4096 brk=2007F000 req=12    reg_t_hashmap.c:42 reg_t_hash_map_check_value
++4096 brk=20080000 req=2060  reg_t_hashmap.c:42 new_reg_t_hash_map   ← CEILING, on a 2060-byte GC alloc
+```
+Each forces a fresh +4096 sbrk grow because the fragmented heap has no free chunk even for **12 bytes**. So by the
+time a restore runs, the arena is already pinned at the ceiling; the restore rebuild then OOMs on an ordinary
+7-12KB decompress (`decompress0.c:50`) for lack of a contiguous run (`free` ~15KB total but fragmented). **The
+failure class has moved DOWN** — old walls were 64KB/32KB contiguous; now ordinary 7-12KB allocs fail post-restore.
+The binding constraint is picolibc fragmentation denying small/medium contiguous runs near the ceiling, NOT total
+free bytes and NOT PSRAM capacity (PSRAM is already used for everything offloadable; `script_t.buf` is hot RW VM
+memory, ruled out).
+
+### ASSESSMENT (Codex, `PICO_SQ3_SRAM_CEILING_ASSESSMENT.md`, 2026-06-12) — at the practical SRAM ceiling
+
+An independent Codex assessment (file in repo root) concurs with the above and adds two load-bearing facts:
+
+1. **Diagnostic probes cost ~26KB of heap ceiling.** Clean current-feature build `__end__=0x2000f154` (heap span
+   **462,508 B**) vs the diagnostic `build-pico` `__end__=0x200157fc` (heap span **436,228 B**) — a ~26KB
+   difference. **Viability must be judged on a CLEAN build** (`FSCI_PROBE_*=OFF`, keep `FSCI_PROBE_STR=ON`,
+   `PICO_CONTROL_MAP=ON`, `PICO_PACK_VOCAB=ON`, `PICO_PWM_AUDIO=OFF`); diagnostic firmware turns "barely works"
+   into "fails early." Use probes to find causes, then retest clean.
+2. **Best remaining engineering lever = a reusable transient view-cel decode scratch.** View cel `index_data` is
+   already offloaded to PSRAM *after* decode, but each cel still allocates a transient SRAM `index_data` *during*
+   decode — a fragmentation source. Decoding cels into a reusable scratch then storing to PSRAM attacks transient
+   fragmentation without adding steady-state SRAM. A small **resettable SRAM arena** for clearly-serial decode/parse
+   buffers (view-cel, pic/control decode temporaries, GNF transients) is the more general version of this — narrow
+   and explicit, not a general allocator replacement (lifetime mistakes are the risk).
+
+**Codex's verdict (and the working assumption now):** SQ3-without-sound can probably be made to fit "well enough"
+with one more focused pass on transient scratch/fragmentation, but the port is at the practical ceiling — do NOT
+expect another clean 50-100KB win, and treat "SQ3 + sound + robust arbitrary-length restore chains + comfortable
+margin" as out of reach. Things NOT worth chasing further: more `.bss` mining (tapped out), audio while headroom
+is this tight, a read-only PSRAM script cache (mutable `buf`), GC-on-OOM (faults at unsafe moments), `malloc_trim`
+(tried, ineffective/harmful).
+
 ### RESOLVED (device-confirmed, log e8d3f32a) — second-restore vocab OOM is the SAME fragmentation class, one layer up
 
 **Device-confirmed fixed (log e8d3f32a):** three consecutive in-game restores all printed `Pico: parser

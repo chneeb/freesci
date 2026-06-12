@@ -3888,6 +3888,7 @@ read_song_tp(FILE *fh, song_t **foo, char *lastval, int *line, int *hiteof)
   char *token;
   int assignment;
   *foo = (song_t*) malloc(sizeof(song_t));
+  PICO_ARENA_PROBE_RAW(sizeof(song_t));
   token = _cfsml_get_identifier(fh, line, hiteof, &assignment);
 /* Auto-generated CFSML data reader code */
   {
@@ -3915,6 +3916,7 @@ int
 read_int_hash_map_tp(FILE *fh, int_hash_map_t **foo, char *lastval, int *line, int *hiteof)
 {
 	*foo = (int_hash_map_t*)malloc(sizeof(int_hash_map_t));
+	PICO_ARENA_PROBE_RAW(sizeof(int_hash_map_t));
 /* Auto-generated CFSML data reader code */
   {
     int _cfsml_eof = 0, _cfsml_error;
@@ -3965,6 +3967,7 @@ read_int_hash_map_node_tp(FILE *fh, int_hash_map_node_t **foo, char *lastval, in
 		*foo = NULL; /* No hash map node */
 	} else {
 		*foo = (int_hash_map_node_t*)malloc(sizeof(int_hash_map_node_t));
+		PICO_ARENA_PROBE_RAW(sizeof(int_hash_map_node_t));
 		if (lastval[0] != '[')
 		{
 			sciprintf("Expected opening bracket in hash_map_node_t on line %d\n", *line);
@@ -4498,10 +4501,28 @@ void load_script(state_t *s, seg_id_t seg)
 	script_t *scr = &(s->seg_manager.heap[seg]->data.script);
 
 	scr->buf = (byte *) malloc(scr->buf_size);
+	PICO_ARENA_PROBE_RAW(scr->buf_size);
 
 	script = scir_find_resource(s->resmgr, sci_script, scr->nr, 0);
+	heap = NULL;
 	if (s->version >= SCI_VERSION(1,001,000))
 		heap = scir_find_resource(s->resmgr, sci_heap, scr->nr, 0);
+
+	if (!script || (s->version >= SCI_VERSION(1,001,000) && !heap)) {
+		/* A restore-time resource load failed (typically OOM on the tight
+		   Pico heap exhausting opendir/RESOURCE.NNN reads). Without this
+		   guard the switch below memcpy's from script->data == NULL and
+		   HardFaults; degrade to a legible failure instead. */
+		sciprintf("load_script: could not load script.%03d resource"
+			  " (script=%p heap=%p) -- heap exhausted?\n",
+			  scr->nr, (void *)script, (void *)heap);
+#ifdef HAVE_PICO
+		pico_oom_report("restore load_script (resource read failed)",
+				(unsigned long)scr->buf_size,
+				__FILE__, __LINE__, "load_script");
+#endif
+		return;
+	}
 
 	switch (s->seg_manager.sci1_1)
 	{

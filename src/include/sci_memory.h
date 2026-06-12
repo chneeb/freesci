@@ -374,6 +374,26 @@ sci_refcount_memdup(void *data, size_t len);
    this — their decompressed data stays resident, so it must not share scratch. */
 #	define PICO_DECOMPRESS_SCRATCH_SIZE 16384
 extern unsigned char *g_pico_decompress_scratch;
+
+/* [arenagrow] raw-malloc probe (FSCI_PROBE_ARENA only).  The sci_* allocators
+   self-instrument, but the dominant arena-ratchet drivers are RAW malloc()s
+   (per-decode visual/priority, restore-time script bufs) the sci_* probe can
+   only mis-attribute to the next sci_* call.  Raw sites call PICO_ARENA_PROBE_RAW
+   immediately after their malloc() so the grow lands on the real culprit; it
+   shares the same program-break watermark as the sci_* probe.  Compiled out
+   (zero overhead) unless FSCI_PROBE_ARENA is on. */
+#	if defined(FSCI_PROBE_ARENA)
+void pico_arena_probe(size_t size, const char *file, int line, const char *funct);
+#		define PICO_ARENA_PROBE_RAW(sz) \
+			pico_arena_probe((size_t)(sz), __FILE__, __LINE__, __func__)
+#	else
+#		define PICO_ARENA_PROBE_RAW(sz) ((void)0)
+#	endif
+#endif
+
+#ifndef PICO_ARENA_PROBE_RAW
+/* Non-Pico builds (and any call site reached outside HAVE_PICO): no-op. */
+#	define PICO_ARENA_PROBE_RAW(sz) ((void)0)
 #endif
 
 #ifdef _WIN32
