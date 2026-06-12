@@ -872,7 +872,7 @@ pico_reclaim_heap(void)
 	if (s->resmgr)
 		scir_free_all_lru(s->resmgr);
 
-	run_gc(s);
+	//run_gc(s);
 }
 #endif
 

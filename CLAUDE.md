@@ -686,15 +686,50 @@ lever for the restore decompress OOM is reducing restore-time fragmentation (chu
 strategy that doesn't need a large contiguous block — NOT allocator self-reclaim.
 
 **Status:** (a) Finding-1's republish is **DONE** (committed) so retry+GC now actually runs post-restore —
-correct + useful for *other* OOMs, and the first device run that exercises `run_gc` from inside an allocation
-(watch for a UAF HardFault in the reg_t hashmap; fallback is LRU-flush-only). (b) The fragmentation lever for
-*this* decompress site is **still open** — reclaim can't conjure contiguity (LRU empty/all-locked, GC frees
+but the predicted "`run_gc` from inside an allocation HardFaults" risk **MATERIALIZED on device** (next note,
+log dde62e0d): `run_gc` is now **removed** from `pico_reclaim_heap` (LRU-flush-only). (b) The fragmentation
+lever for *this* decompress site is **still open** — reclaim can't conjure contiguity (LRU empty/all-locked, GC frees
 only scattered ~40 B blocks vs the 219-chunk shatter), so it needs restore-time fragmentation reduction or a
 decompress strategy that avoids a large contiguous block, NOT allocator self-reclaim. The clean `[OOM]` halt
 (legible, no HardFault, no corruption) means the mitigation behaves; it just can't make space that isn't
 contiguous. **The decrypt1 stack-collision fix is device-CONFIRMED by this log** (room 13 restore no longer
 HardFaults at `decompress0.c:153`; it now reaches the clean fragmentation `[OOM]` underneath, exactly as the
 3396e873 note predicted).
+
+### DONE (device-confirmed, log dde62e0d + IMG_1686) — `run_gc` in reclaim HardFaults; reclaim is now LRU-flush-only
+
+The Finding-1 republish (above) made `g_pico_current_state` non-NULL during the restored session, so the very
+first device run that exercised `run_gc` *from inside a failed allocation* did exactly what the caveat warned:
+it **HardFaulted**. Two consecutive in-game restores, then the second restore's re-init OOM'd at `malloc 7302
+failed` (printed **once**, NOT the prior two-`failed`+clean-`[OOM]`) → `[FAULT]`. The single `failed`+`[FAULT]`
+with no `[OOM]` is the tell: control diverged *between* the first malloc-fail and the retry — i.e. inside
+`pico_reclaim_heap` → `run_gc`.
+
+**LCD dump (IMG_1686), resolved against `build-pico/src/freesci.elf`:**
+```
+HardFault PC=0x1002e018  → worklist_push (gc.c:62) — the reg_t_hash_map_check_value(hashmap, reg, 1, &added) call
+LR  =0x1002ac0c          → find_canonic_address_id (seg_manager.c:1652) — the GC segment walk
+CFSR=0x00008200          → BFSR = BFARVALID | PRECISERR (precise data bus fault)
+BFAR=MMFAR=0xffffffe4    → ≈ NULL−28: a struct-field deref through a bad/near-NULL pointer
+```
+**Root cause:** the 7302 alloc fails inside `gamestate_restore` → `_reset_graphics_input` (palette/decompress).
+At that instant `g_pico_current_state` points at the **throwaway light state** `game_init` built at vm.c:2305 —
+while `gamestate_restore` is mid-flight building the *real* target. So `run_gc` walks a half-reconstructed,
+inconsistent seg_manager; `find_canonic_address_id` hands `worklist_push` a reg_t whose segment entry is bogus,
+and the reg_t hashmap deref faults (BFAR ≈ NULL−28). This is the documented "GC from an arbitrary allocation
+point" hazard, now proven on hardware.
+
+**FIX (device-confirmed by the user): `run_gc(s)` is commented out in `pico_reclaim_heap` (`game.c`) — reclaim
+is now LRU-flush-only.** The HardFault is gone. Nothing is lost for the restore case: `run_gc` couldn't help it
+anyway (Finding 2 — fragmentation, all 615 resources LOCKED so even the LRU flush is a near-no-op there). The
+LRU flush is retained because it *does* help true gameplay OOMs that have evictable (unlocked) resources.
+Disposed clones/lists/nodes now wait for the normal `GC_INTERVAL` (2048) instead of an on-OOM sweep — acceptable.
+
+**If GC-on-OOM is ever wanted back**, it must NOT fire from inside an arbitrary allocation. Move it to a *safe
+sequence point* where the live state is consistent (e.g. before a room transition, or before `replay()` in the
+restore path *after* the new state is fully built and published), gated so it never runs while
+`gamestate_restore` is mid-flight. Not pursued now — the real OOM lever is restore-time fragmentation reduction,
+not allocator self-reclaim.
 
 ### DONE (device-confirmed, log ce81217b) — B-1 permanent priority scratch fixes the pic-decode OOM
 
