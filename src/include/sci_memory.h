@@ -365,6 +365,17 @@ sci_refcount_memdup(void *data, size_t len);
 
 /********** other memory/debug related routines **********/
 
+#ifdef HAVE_PICO
+/* Permanent pic/view decompress scratch — allocated once from the pristine
+   boot heap (gfxop_new_pic prologue, operations.c) and reused by every pic/view
+   decode so decompress0 never needs a fresh contiguous block on a fragmented
+   post-restore heap.  16KB covers the measured pic/view high-water (~11KB);
+   larger resources fall back to a real sci_malloc.  Scripts/vocab do NOT use
+   this — their decompressed data stays resident, so it must not share scratch. */
+#	define PICO_DECOMPRESS_SCRATCH_SIZE 16384
+extern unsigned char *g_pico_decompress_scratch;
+#endif
+
 #ifdef _WIN32
 extern void
 debug_win32_memory(int dbg_setting);

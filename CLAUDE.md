@@ -759,6 +759,64 @@ the motivator into the ship). The decode-OOM lever (lever 1) is closed.
   not kill the +~33 KB/restore sbrk creep, so the ratchet's cause is elsewhere (still parked — not a blocker
   while ~100 K stays free after each restore).
 
+### DONE (device-confirmed, log 20bb9822) — B-1.2 permanent pic/view decompress scratch closes the decompress0 OOM
+
+Same permanent-scratch pattern as B-1, applied to the **decompress output buffer**. `g_pico_decompress_scratch`
+(16 KB) is `malloc`'d **once** in the `gfxop_new_pic` prologue (`operations.c`, right after the priority
+scratch) from the still-pristine boot heap, and `decompress0` reuses it for every **pic/view** decode instead
+of a fresh per-decode `sci_malloc(result->size)` — so the fragmented post-restore heap never has to find a
+contiguous block for it (the `decompress0.c:324` OOM, the wall the prior several notes kept hitting).
+
+- **Touch points:** `sci_memory.h` (`PICO_DECOMPRESS_SCRATCH_SIZE 16384` + `extern g_pico_decompress_scratch`);
+  `operations.c` (define global + prologue alloc); `decompress0.c` (`pico_decompress_alloc(type,size)` returns
+  the scratch for `sci_pic`/`sci_view` when `size ≤ 16384`, else falls back to `sci_malloc`; the 1 alloc + 5
+  error-path frees route through `DECOMPRESS_ALLOC_DATA`/`DECOMPRESS_FREE_DATA` macros, desktop path
+  unchanged); `resource.c` (a `PICO_IS_DECOMPRESS_SCRATCH()` guard on **all four** `res->data` free sites —
+  evict, LRU flush, LRU-age, teardown — so the shared scratch is never `sci_free`'d).
+- **Why 16 KB / pic+view only:** measured device high-water (log 20bb9822 `[dcmp]` probe, since removed) was
+  **pic 7506, view 10797** — both well under 16 KB. Scripts/vocab are **excluded by design** — their
+  decompressed data stays resident (not evicted within the call), so they must not share a single reusable
+  scratch; they keep using `sci_malloc`.
+- **Safety:** all three pic/view load sites (`sci_resmgr.c:141`, `:467`, `operations.c:2285`) evict
+  immediately and unconditionally, and pic/view are the *sole* consumers of those resource types — so the
+  scratch is only ever live for one serial decode. The 4-site free guards are defense-in-depth.
+- **Result (log 20bb9822):** restored into room 13, climbed the ladder, **room 15 loaded and rendered** (pic
+  7506 + view 10797 both went through the scratch, NO `decompress0.c:324` OOM). The decode-output OOM lever is
+  closed — it got the game *further* than any prior restore session.
+
+### OPEN — arena-ratchet ceiling is now the binding constraint (one restore → physical RAM wall, log 20bb9822)
+
+The decompress-scratch fix above unblocked room 15, which then hit the **next** OOM — and it is the parked
+"lever 2" (arena ratchet), now fatal rather than a slow creep. Tail of log 20bb9822:
+```
+malloc 3926 failed to allocate memory   ← attempt
+malloc 3926 failed to allocate memory   ← sci_malloc LRU-flush retry, no help (reslru=0 reslock=615)
+ERROR in kScriptID L291: Script 0x3 does not have a dispatch table
+... Attempt to send to non-object ... Address was 0000:0000   ← fatal VM abort
+```
+`kScriptID` (`kscripts.c:279`) called `script_get_segment(SCRIPT_GET_LOAD)` to instantiate script 3; a small
+**3926-byte** alloc inside that load returned NULL (raw `malloc` → no `[OOM]` halt, game continued), so the
+script came up with `exports_nr==0` (no dispatch table) and the subsequent VM `send` to it faulted fatally.
+
+**Why a 3926-byte alloc fails: the arena is physically maxed.** Post-restore arena = **436200** (= 0x6A7E8).
+Heap `__end__` 0x2001742c + 0x6A7E8 = heap top **0x20081C14**, only **~1004 bytes** below `__StackTop`
+0x20082000 — i.e. the heap has grown to within ~1 KB of the absolute top of RAM and is **one sbrk increment
+from the wall**. **A single restore did it:** room 2 arena 403432 → room 13 arena 436200 = **+32768** (exactly
+one sbrk increment, never returned). With the arena maxed and `chunks=111+` in room 15, the shattered free
+space can't yield 3926 contiguous bytes, and the LRU-flush retry frees nothing (all 615 resources locked).
+
+**This is the same +32768/restore ratchet flagged (and parked) in the B-1 note above — now the active
+blocker, not a creep.** Removing B-1's priority reservation did NOT kill it, so the cause is elsewhere: the
+restore-time transient peak (2× working set during `gamestate_restore` deserialization) exceeds the standing
+arena by a bit, triggering an sbrk grow of one 32 KB granule that picolibc never returns. **Lever:** drive the
+restore peak *below* the standing arena so sbrk never grows. Investigation target = `savegame.c`
+`gamestate_restore` + `vm.c` `_game_run` restore teardown/rebuild peak (NOT allocator self-reclaim — retry
+can't conjure contiguity). **Tension to weigh:** the two permanent scratches (B-1 32 KB + B-1.2 16 KB = 48 KB
+always-resident) raise the post-restore baseline; if the ratchet fix restores enough headroom that the 11 KB
+decompress alloc succeeds normally, the 16 KB decompress scratch could be dropped to reclaim it. **Screenshot
+(IMG_1693) confirms** room 15 background + hand cursor render cleanly (no garbage rect / corruption-family
+artifact) — frame is merely incomplete because the VM aborted mid-load. Pure OOM, not a render bug.
+
 ### RESOLVED (device-confirmed, log e8d3f32a) — second-restore vocab OOM is the SAME fragmentation class, one layer up
 
 **Device-confirmed fixed (log e8d3f32a):** three consecutive in-game restores all printed `Pico: parser

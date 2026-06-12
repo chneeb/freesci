@@ -63,6 +63,11 @@ int g_pico_decode_visual_borrowed = 0;
    ratcheted the picolibc arena +33KB per restore. */
 byte *g_pico_priority_scratch = NULL;
 
+/* Permanent pic/view decompress scratch (see sci_memory.h).  Allocated once
+   alongside the priority scratch from the pristine boot heap; decompress0 reuses
+   it for every pic/view decode instead of a fresh per-decode contiguous malloc. */
+unsigned char *g_pico_decompress_scratch = NULL;
+
 /* Declared in pico_driver.c */
 extern void pico_free_visual(gfx_driver_t *drv);
 extern void pico_alloc_visual(gfx_driver_t *drv);
@@ -2290,6 +2295,14 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   per-decode malloc (the old behaviour) — legibly, not fatally. */
 	if (!g_pico_priority_scratch)
 		g_pico_priority_scratch = (byte*)malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
+
+	/* Same idea for the decompress output buffer: a permanent 16KB block grabbed
+	   from the pristine boot heap, reused by every pic/view decompress so the
+	   post-restore fragmented heap never has to find a fresh contiguous run (the
+	   decompress0.c:324 OOM).  NULL fallback → decompress0 uses a real sci_malloc. */
+	if (!g_pico_decompress_scratch)
+		g_pico_decompress_scratch =
+			(unsigned char*)malloc(PICO_DECOMPRESS_SCRATCH_SIZE);
 
 	/* visual[0]-REUSE: decode straight into the resident 64KB display buffer
 	   rather than freeing it and allocating a fresh decode-visual.  This cuts the

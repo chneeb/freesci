@@ -33,6 +33,31 @@
 
 /* #define _SCI_DECOMPRESS_DEBUG */
 
+#ifdef HAVE_PICO
+/* pic/view decompress reuses the permanent g_pico_decompress_scratch
+   (operations.c) rather than a fresh contiguous malloc, so the fragmented
+   post-restore heap never has to find one (the decompress0.c OOM).  Any other
+   resource type, or a pic/view bigger than the scratch, falls back to
+   sci_malloc.  Caller evicts pic/view data immediately (sci_resmgr.c), so the
+   scratch is only ever live for one decode at a time. */
+static unsigned char *
+pico_decompress_alloc(int type, unsigned int size)
+{
+	if ((type == sci_pic || type == sci_view)
+	    && g_pico_decompress_scratch
+	    && size <= PICO_DECOMPRESS_SCRATCH_SIZE)
+		return g_pico_decompress_scratch;
+	return (unsigned char *) sci_malloc(size);
+}
+
+#  define DECOMPRESS_ALLOC_DATA(type, size) pico_decompress_alloc((type), (size))
+#  define DECOMPRESS_FREE_DATA(p) \
+	do { if ((unsigned char*)(p) != g_pico_decompress_scratch) free(p); } while (0)
+#else
+#  define DECOMPRESS_ALLOC_DATA(type, size) ((unsigned char*)sci_malloc(size))
+#  define DECOMPRESS_FREE_DATA(p) free(p)
+#endif
+
 /* 9-12 bit LZW encoding */
 int
 decrypt1(guint8 *dest, guint8 *src, int length, int complength)
@@ -321,10 +346,10 @@ int decompress0(resource_t *result, int resh, int sci_version)
 	}
 
 	buffer = (guint8*)sci_malloc(compressedLength);
-	result->data = (unsigned char*)sci_malloc(result->size);
+	result->data = DECOMPRESS_ALLOC_DATA(result->type, result->size);
 
 	if (read(resh, buffer, compressedLength) != compressedLength) {
-		free(result->data);
+		DECOMPRESS_FREE_DATA(result->data);
 		free(buffer);
 		return SCI_ERROR_IO_ERROR;
 	};
@@ -344,7 +369,7 @@ int decompress0(resource_t *result, int resh, int sci_version)
 
 	case 0: /* no compression */
 		if (result->size != compressedLength) {
-			free(result->data);
+			DECOMPRESS_FREE_DATA(result->data);
 			result->data = NULL;
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -356,7 +381,7 @@ int decompress0(resource_t *result, int resh, int sci_version)
 
 	case 1: /* LZW compression */
 		if (decrypt1(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+			DECOMPRESS_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -367,7 +392,7 @@ int decompress0(resource_t *result, int resh, int sci_version)
 
 	case 2: /* Some sort of Huffman encoding */
 		if (decrypt2(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+			DECOMPRESS_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -380,7 +405,7 @@ int decompress0(resource_t *result, int resh, int sci_version)
 		fprintf(stderr,"Resource %s.%03hi: Compression method %hi not "
 			"supported!\n", sci_resource_types[result->type], result->number,
 			compressionMethod);
-		free(result->data);
+		DECOMPRESS_FREE_DATA(result->data);
 		result->data = 0; /* So that we know that it didn't work */
 		result->status = SCI_STATUS_NOMALLOC;
 		free(buffer);

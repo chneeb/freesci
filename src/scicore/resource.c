@@ -43,6 +43,15 @@
 #undef SCI_REQUIRE_RESOURCE_FILES
 /* #define SCI_VERBOSE_RESMGR 1 */
 
+/* On Pico, decompress0 hands the permanent pic/view decompress scratch
+   (operations.c) out as res->data; it must never be sci_free'd or the next
+   decode would reuse a freed block.  Every res->data free site guards on this. */
+#ifdef HAVE_PICO
+#	define PICO_IS_DECOMPRESS_SCRATCH(p) ((unsigned char*)(p) == g_pico_decompress_scratch)
+#else
+#	define PICO_IS_DECOMPRESS_SCRATCH(p) (0)
+#endif
+
 const char* sci_version_types[] = {
 	"SCI version undetermined (Autodetect failed / not run)",
 	"SCI version 0.xxx",
@@ -753,7 +762,8 @@ _scir_free_resources(resource_t *resources, int resources_nr)
 
 		_scir_free_altsources(res->alt_sources);
 
-		if (res->status != SCI_STATUS_NOMALLOC)
+		if (res->status != SCI_STATUS_NOMALLOC
+		    && !PICO_IS_DECOMPRESS_SCRATCH(res->data))
 			sci_free(res->data);
 	}
 
@@ -774,7 +784,8 @@ scir_free_resource_manager(resource_mgr_t *mgr)
 static void
 _scir_unalloc(resource_t *res)
 {
-	sci_free(res->data);
+	if (!PICO_IS_DECOMPRESS_SCRATCH(res->data))
+		sci_free(res->data);
 	res->data = NULL;
 	res->status = SCI_STATUS_NOMALLOC;
 }
@@ -937,7 +948,8 @@ scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res)
 		return;
 	if (res->status == SCI_STATUS_ENQUEUED)
 		_scir_remove_from_lru(mgr, res);
-	sci_free(res->data);
+	if (!PICO_IS_DECOMPRESS_SCRATCH(res->data))
+		sci_free(res->data);
 	res->data = NULL;
 	res->status = SCI_STATUS_NOMALLOC;
 }
@@ -948,7 +960,8 @@ scir_free_all_lru(resource_mgr_t *mgr)
 	while (mgr->lru_last) {
 		resource_t *goner = mgr->lru_last;
 		_scir_remove_from_lru(mgr, goner); /* sets status = ALLOCATED */
-		sci_free(goner->data);
+		if (!PICO_IS_DECOMPRESS_SCRATCH(goner->data))
+			sci_free(goner->data);
 		goner->data = NULL;
 		goner->status = SCI_STATUS_NOMALLOC;
 	}
