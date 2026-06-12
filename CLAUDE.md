@@ -141,7 +141,18 @@ and navigates with the I2C keyboard (UP/DOWN/ENTER/ESC). Behaviour is identical 
 `show_dir_chooser()` — only the root path changed from `0:/agi` to `0:/freesci`.
 
 ### Sound on Pico (TODO)
-Sound is currently disabled (`--no-sound` in `pico_main.c`). To enable:
+Sound is currently disabled, in two layers:
+- **FreeSCI engine sound:** `--no-sound` (`-q`) in `pico_main.c`'s argv → `SFX_STATE_FLAG_NOSOUND`.
+- **PicoCalc PWM synth:** gated behind CMake `option(PICO_PWM_AUDIO)` (**default OFF**). When OFF,
+  `audio/pwm_synth.c` is **not linked at all** (`src/platform/pico/CMakeLists.txt`) and
+  `pwm_synth_init(26)` is `#ifdef PICO_PWM_AUDIO`-skipped (`pico_main.c`). This recovers the ~6.8KB
+  SRAM its `strings[6924]` waveform table reserved (the synth otherwise ran an idle 22kHz IRQ
+  outputting silence, since nothing ever drives a channel while engine sound is off) plus its flash +
+  channel globals. `strings[]` is now `static const` (`audio/pwm_strings.h`) so even an ON build keeps
+  it in flash (`.rodata`), not SRAM — it's read-only in the IRQ.
+
+To bring sound back:
+- Build with `-DPICO_PWM_AUDIO=ON` (re-links the synth + re-arms `pwm_synth_init`).
 - Wire FreeSCI's OPL2 softsynth (fmopl.c) output into a PCM callback feeding `pwm_synth`
 - Add a Pico PCM device driver under `src/sfx/pcm_device/pico_pwm.c`
 - Remove `--no-sound` from `pico_main.c`'s argv
@@ -1419,9 +1430,11 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
 
 3. **Sound *(independent track — gated on heap headroom, not CPU)*.** The whole sound stack
    (`scisound`/`scisoftseq`/`scipcm`/`scimixer`) already links into the firmware but is dormant:
-   `pico_main.c` passes `-q` → `SFX_STATE_FLAG_NOSOUND`. PWM output already runs (`pwm_synth_init(26)`
-   at boot: 8-bit mono, 22 kHz PWM on GPIO 26/27); what's missing is feeding *PCM* into it instead
-   of the tiny_agi sine channels.
+   `pico_main.c` passes `-q` → `SFX_STATE_FLAG_NOSOUND`. The PicoCalc PWM synth is **now gated behind
+   `-DPICO_PWM_AUDIO` (default OFF)** — when OFF `audio/pwm_synth.c` is unlinked and `pwm_synth_init(26)`
+   is skipped, recovering ~6.8KB SRAM (see "Sound on Pico (TODO)"). To work on this item, build with
+   `-DPICO_PWM_AUDIO=ON` to get the 8-bit mono 22 kHz PWM on GPIO 26/27 back; what's missing is then
+   feeding *PCM* into it instead of the tiny_agi sine channels.
    - **CPU is fine:** OPL2 inner loop ≈ 9 voices × ~30 cyc × 22050 ≈ 4% at 150 MHz; PWM IRQ <1%.
      `OPLOpenTable` uses `pow/log10/sin` once at init (fast with the RP2350 FPU; slow on RP2040).
    - **RAM is the gate.** Static `.bss` is **already negligible** — the big synth tables

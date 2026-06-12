@@ -5,7 +5,9 @@
 #include "hardware/clocks.h"
 #include "pico_sdcard.h"
 #include "kbd_input.h"
+#ifdef PICO_PWM_AUDIO
 #include "audio/pwm_synth.h"
+#endif
 #include "lcdspi.h"
 #include "psram_alloc.h"
 #include "psram/psram_spi.h"
@@ -159,9 +161,11 @@ int main(void)
 
     MEMPRINT("after sd_init");
 
+#ifdef PICO_PWM_AUDIO
     /* PWM audio on GPIO 26/27 (PicoCalc standard) */
     pwm_synth_init(26);
     MEMPRINT("after pwm_init");
+#endif
 
     /* PSRAM on PIO1 (CS=20, SCK=21, MOSI=2, MISO=3) */
     g_psram = psram_spi_init_clkdiv(pio1, -1, 1.0f, true);

@@ -27,6 +27,13 @@ set(HW_SOURCES
     ${PICOCALC_HW_DIR}/lcdspi/lcdspi.c
 )
 
+# PWM audio synth is only compiled when PICO_PWM_AUDIO is ON (default OFF — see
+# top-level CMakeLists.txt). OFF keeps its ~6.8KB waveform table out of SRAM.
+set(PICO_AUDIO_SOURCES "")
+if(PICO_PWM_AUDIO)
+    set(PICO_AUDIO_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/audio/pwm_synth.c)
+endif()
+
 add_library(scipicoplatform STATIC
     pico_main.c
     pico_time.c
@@ -34,7 +41,7 @@ add_library(scipicoplatform STATIC
     pico_sdcard.c
     kbd_input.c
     hw_config.c
-    audio/pwm_synth.c
+    ${PICO_AUDIO_SOURCES}
     ${PSRAM_SOURCES}
     ${FATFS_SOURCES}
     ${HW_SOURCES}

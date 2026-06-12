@@ -203,6 +203,18 @@ if(PLATFORM STREQUAL "pico")
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)
     endif()
+
+    # PicoCalc PWM audio synth (tiny_agi waveform synth on GPIO 26/27).
+    # OFF for now: FreeSCI sound is disabled (-q / SFX_STATE_FLAG_NOSOUND), so the
+    # synth only ran an idle 22kHz IRQ outputting silence and reserved ~6.8KB SRAM
+    # for its waveform table (audio/pwm_strings.h). OFF unlinks pwm_synth.c entirely
+    # (full SRAM + flash recovery) and skips pwm_synth_init(). Flip ON to bring sound
+    # back — it re-compiles the synth and re-arms init in one flag. See CLAUDE.md
+    # "Sound on Pico (TODO)".
+    option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" OFF)
+    if(PICO_PWM_AUDIO)
+        add_compile_definitions(PICO_PWM_AUDIO=1)
+    endif()
 endif()
 
 # ── Global include directories ────────────────────────────────────────────────
