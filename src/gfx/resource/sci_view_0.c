@@ -38,6 +38,11 @@
 
 #ifdef HAVE_PICO
 #include "psram_alloc.h"
+/* The permanent 32KB pic-priority decode scratch (operations.c).  It is idle
+   outside of pic decode — its contents are offloaded to PSRAM inside
+   gfxr_interpreter_calculate_pic — so view decode (a separate, non-overlapping
+   resmgr call on core0) borrows it as the per-cel decode buffer. */
+extern byte *g_pico_priority_scratch;
 #endif
 
 
@@ -53,8 +58,31 @@ gfxr_draw_cel0(int id, int loop, int cel, byte *resource, int size, gfxr_view_t 
 	int writepos = mirrored? xl : 0;
 	int pixmap_size = xl * yl;
 	int line_base = 0;
-	gfx_pixmap_t *retval = gfx_pixmap_alloc_index_data(gfx_new_pixmap(xl, yl, id, loop, cel));
-	byte *dest = retval->index_data;
+	gfx_pixmap_t *retval = gfx_new_pixmap(xl, yl, id, loop, cel);
+	byte *dest;
+#ifdef HAVE_PICO
+	/* Decode this cel into the idle pic-priority scratch instead of a fresh
+	   per-cel malloc.  Each cel is offloaded to PSRAM immediately below, so the
+	   SRAM buffer is only needed transiently and one cel at a time; reusing the
+	   resident 32KB scratch eliminates the per-cel malloc/free churn that
+	   fragments the heap (gfx_tools.c gfx_pixmap_alloc_index_data was an
+	   arena-grow driver).  retval->index_data stays NULL so the error paths'
+	   gfx_free_pixmap never frees the borrowed scratch.  A cel larger than the
+	   scratch (near-fullscreen) falls back to a real per-cel alloc. */
+	int dest_is_scratch = 0;
+	if (xl > 0 && yl > 0 && (xl * yl) <= ((GFXR_AUX_MAP_SIZE + 1) >> 1)
+	    && g_pico_priority_scratch) {
+		dest = g_pico_priority_scratch;
+		memset(dest, 0, xl * yl);
+		dest_is_scratch = 1;
+	} else {
+		gfx_pixmap_alloc_index_data(retval);
+		dest = retval->index_data;
+	}
+#else
+	gfx_pixmap_alloc_index_data(retval);
+	dest = retval->index_data;
+#endif
 
 	retval->color_key = 255; /* Pick something larger than 15  */
 
@@ -154,8 +182,9 @@ gfxr_draw_cel0(int id, int loop, int cel, byte *resource, int size, gfxr_view_t 
 		size_t sz = (size_t)(retval->index_xl * retval->index_yl);
 		retval->psram_addr  = psram_alloc(sz);
 		retval->psram_valid = 1;
-		psram_store(retval->psram_addr, retval->index_data, sz);
-		free(retval->index_data);
+		psram_store(retval->psram_addr, dest, sz);
+		if (!dest_is_scratch)
+			free(dest);
 		retval->index_data = NULL;
 	}
 #endif

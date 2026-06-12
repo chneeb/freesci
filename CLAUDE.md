@@ -1021,6 +1021,37 @@ margin" as out of reach. Things NOT worth chasing further: more `.bss` mining (t
 is this tight, a read-only PSRAM script cache (mutable `buf`), GC-on-OOM (faults at unsafe moments), `malloc_trim`
 (tried, ineffective/harmful).
 
+### DONE (device-confirmed, clean-build ladder clear) — B-1.3 view-cel decode borrows the idle priority scratch
+
+Codex's "best remaining lever" (above) is implemented: `gfxr_draw_cel0` (`sci_view_0.c`, `HAVE_PICO`) no longer
+`malloc`s a fresh per-cel `index_data`. Each cel is already offloaded to PSRAM immediately after decode (so the
+SRAM peak was already a single cel), but the per-cel `gfx_pixmap_alloc_index_data` `malloc`/`free` **churn** was a
+confirmed fragmentation driver (`[arenagrow]` lines `gfx_tools.c:307 req=1998 gfx_pixmap_alloc_index_data`). Now a
+cel decodes straight into the **idle 32KB `g_pico_priority_scratch`** (B-1's permanent pic-priority buffer), then
+`psram_store`s from it — **zero new steady-state SRAM**, no per-cel heap traffic.
+
+- **Why borrowing the priority scratch is safe:** the priority scratch is only live *during* pic decode — its
+  contents are offloaded to PSRAM inside `gfxr_interpreter_calculate_pic` and `state->priority_map` keeps only the
+  PSRAM metadata (`index_data` NULL) afterward (`operations.c` ~2441). View decode is a *separate*,
+  non-overlapping resmgr call on core0, so the scratch is idle and its data already safe in PSRAM. Cels are
+  decoded → stored serially, so the scratch is reused only after the prior cel is in PSRAM.
+- **Implementation detail that matters:** `retval->index_data` stays **NULL** on the borrow path (the scratch is
+  held in a local `dest`), so the decode error paths' `gfx_free_pixmap` can never free the borrowed scratch. A
+  near-fullscreen cel (`xl*yl > 32000`) falls back to the old per-cel `gfx_pixmap_alloc_index_data` + `free`. The
+  PSRAM offload `free`s `dest` only `if (!dest_is_scratch)`. Desktop (`#else`) path is byte-for-byte unchanged.
+- **Device result (clean build, log this session):** the per-cel `gfx_tools.c:307` arena-grows are **gone** (only
+  2 such grows in the whole session, both non-view pixmaps — cursor/text/pic-aux). Decode peak unchanged.
+- **Clean-build viability CONFIRMED.** Built probe-free (`build-pico-clean`: `FSCI_PROBE_*=OFF`,
+  `FSCI_PROBE_STR=ON`, `PICO_CONTROL_MAP=ON`, `PICO_PACK_VOCAB=ON`, `PICO_PWM_AUDIO=OFF`). Clean `__end__=0x2000f150`
+  → heap span **462,512 B** vs the diagnostic `build-pico` `__end__=0x200157f8` → **436,232 B** = **+26,280 B**
+  (~25.7KB) headroom, exactly the probe cost. On the **diagnostic** build the rats-room ladder OOM'd at the exact
+  ceiling (`malloc 3926 failed` → `kScriptID` no dispatch table → send to `0000:0000`, arena pinned at 436,232);
+  on the **clean** build the player **cleared the ladder** — the +26KB is the whole margin. This is the concrete
+  proof of the assessment's "viability MUST be judged on a clean build" and "SQ3-without-sound fits well enough at
+  the ceiling with one transient-fragmentation pass." The arena ratchet itself is NOT fixed (churn-reduction ≠
+  ratchet-stop); the clean build buys back the headroom the probes ate, and the view-cel fix lowers the
+  fragmentation rate that climbs to the ceiling.
+
 ### RESOLVED (device-confirmed, log e8d3f32a) — second-restore vocab OOM is the SAME fragmentation class, one layer up
 
 **Device-confirmed fixed (log e8d3f32a):** three consecutive in-game restores all printed `Pico: parser
