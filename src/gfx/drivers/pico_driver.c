@@ -601,8 +601,15 @@ void pico_render_background(gfx_driver_t *drv)
     rect_t full = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
     rect_t dst  = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
     pico_blit_indexed(ps, bg, -1, full, dst, ps->visual[0], PICO_XSIZE, NULL, 0);
-    /* Push the freshly decoded background to the display immediately. */
-    flush_region(ps, 0, 0, PICO_XSIZE, PICO_YSIZE);
+    /* Stage the new background in visual[0] but do NOT flush it to the LCD here.
+       gfxop_new_pic runs this from inside kDrawPic, before kAnimate's open
+       transition; an eager flush snapped the full new pic onto the screen, then
+       animate_do_animation redrew the old screen and revealed the new one via the
+       fade/curtain — the player saw "show, disappear, fade in again". Matching the
+       desktop model (gfxop_new_pic only stages the static buffer, never the front),
+       the reveal now comes solely from the normal pipeline (the open transition,
+       FULL_REDRAW, or _reset_graphics_input on restore). visual[0] still holds the
+       new pic so animate_do_animation's grab of newscreen reads it correctly. */
 }
 
 /* ------------------------------------------------------------------ */

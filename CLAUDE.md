@@ -341,6 +341,76 @@ free the VIEW tree alongside the PIC tree before `psram_reset()`, so `gfxr_get_v
 fresh. Trade-off: views re-decode per room change instead of staying cached — correct call on Pico,
 and SQ3's per-room view set is small.
 
+### OPEN — dialogue box/text lingers on the background after dismiss (Pico)
+
+After a text/dialogue box is dismissed in SQ3 (e.g. room 2's spacecraft narration), white+black box/text
+remnants stay on the background ("top of the spacecraft") until the room is re-entered. Desktop dismisses
+cleanly. **Still unresolved — two attempted fixes were REVERTED (kgraphics.c is back to zero diff vs HEAD)
+because, tested together on device, they produced NO change.**
+
+**What was tried and ruled out (both reverted):**
+1. **`graph_restore_box` FULL_REDRAW + forced flush** (`HAVE_PICO`). Hypothesis: SQ3's text boxes use the
+   save-under/snapshot path (`kDisplay` save_under, kGraph `RESTORE_BOX`, menu/control save-unders all call
+   `graph_restore_box`), which frees the box/text widgets via `gfxw_restore_snapshot` → dirtifies only
+   `visual->dirty`, then returns to a **bare `gfxop_update()`** (`kgraphics.c:697`) that flushes only
+   `state->dirty_rects` and never runs `s->visual->draw()` → on Pico's single `visual[0]` nothing
+   BACK-restores/flushes the region. Tried: capture snapshot `area`, then `add_dirty_abs(area)` +
+   `FULL_REDRAW()` + `gfxop_update_box(area)`. **No effect on device.**
+2. **`kDisposeWindow` FULL_REDRAW + forced flush** (`HAVE_PICO`). Same remedy at the true
+   `kNewWindow`/`kDisposeWindow` window-port dismiss site (bare `gfxop_update` → `add_dirty_abs(goner->bounds)`
+   + `FULL_REDRAW()` + `gfxop_update_box(goner->bounds)`). **No effect on device either.**
+
+**What "no change from either" implies:** the dismiss for this scene is NOT going through `graph_restore_box`
+*or* `kDisposeWindow` (or a FULL_REDRAW *is* firing but something immediately re-draws the box). The flush-gap
+theory may still be right for the *mechanism*, but we patched the wrong site(s). **Decisive next step: capture
+a pico.log across the dismiss and identify the actual kernel call sequence** — look for `kDisposeWindow`'s
+`Activating port %d after disposing window %d` line (confirms that path ran) and any `graph_restore_box` /
+`kDisplay` / `kGraph` calls. With `debug_mode` set (SD-root `0:/freesci.cfg`, see the config-file note) the
+graphics trace narrows which widget op draws and frees the box. Other possibilities to weigh once the path is
+known: (a) the box pixels got composited into the PSRAM `static_bg` so a BACK-restore reproduces them; (b) the
+artifact extent lies outside the dirtied rect (window shadow/title beyond `bounds`); (c) cleanup relies on a
+per-frame `kAnimate` that this static scene never issues. Documented as open; not chased further until the log
+names the path.
+
+### FIXED (device-confirmed) — Pico render-path pic-open flash
+
+Uncommitted, `HAVE_PICO`-guarded / Pico-only `pico_driver.c`, desktop-untouched.
+
+1. **New room background flashes full, vanishes, then fades/curtains in** (SQ3 logo screen; room 2 "shown,
+   disappears, curtain reveals"). **Cause:** `pico_render_background` (`pico_driver.c`) composited the
+   freshly-decoded background into `visual[0]` AND **immediately flushed it to the LCD** (`flush_region`).
+   It is called from `gfxop_new_pic` *inside* `kDrawPic`, **before** `kAnimate`'s open transition. So: the
+   new pic snaps on ("show") → `animate_do_animation` redraws `s->old_screen` (the previous room, grabbed
+   in kDrawPic before the composite) and flushes ("disappear") → the transition `switch` reveals
+   `newscreen` ("fade/curtain in"). Desktop never flashes because `gfxop_new_pic` only stages the *static*
+   buffer, never the front. **Fix:** removed the eager `flush_region` from `pico_render_background`; it now
+   only **stages** the new background in `visual[0]` (matching the desktop model). The reveal comes solely
+   from the normal pipeline (the open transition, `FULL_REDRAW`, or `_reset_graphics_input` on restore).
+   `visual[0]` still holds the new pic, so `animate_do_animation`'s `newscreen` grab (reads `visual[0]`)
+   is unchanged; `old_screen` is grabbed *before* the composite, so it's still the old room. Net traced
+   sequence: old room stays on LCD → transition reveals new room, no flash. `flush_region` is still used
+   by `pico_update`'s FRONT path (no dead code).
+
+   **Residual risk (accepted):** a pic drawn with NO following `kAnimate`/update would stay invisible until
+   the next flush — but `pic_not_valid=1` forces the first `kAnimate` after every `kDrawPic` into the
+   `open_animation` path (which always flushes), identical to desktop, so any game that works on desktop is
+   safe. All reported cases (logo, room 2) go through the fade.
+
+**WHAT TO TEST when able to flash:**
+- **Dialogue-dismiss (#1):** SQ3 room 2, trigger the first dialogue (the spacecraft narration), dismiss it.
+  The white+black box/text must vanish cleanly and the spaceship background must be intact — no lingering
+  artifacts on the top of the ship, no room re-entry needed. This scene uses the **`graph_restore_box`
+  snapshot path** (the primary fix). Also exercise other message boxes (parser responses, inventory, "look"
+  descriptions) AND any true `kNewWindow` windows: open → read → dismiss, confirm no stuck artifacts on
+  either path.
+- **Pic-open flash (#2):** Watch the **SQ3 intro logo** and **room 2 first entry**: the new screen must
+  fade/curtain in directly from the *previous* screen — it must NOT snap on full, blank, then re-reveal.
+  Walk between several rooms (2↔9↔10↔11) and confirm each room transition is a clean single fade with no
+  pre-flash. Verify no room comes up *blank* and stuck (the residual-risk case) — every room should reveal
+  via its transition.
+- **Regression watch (both):** confirm normal gameplay rendering is unaffected — sprites, text, cursor,
+  priority occlusion all still draw; no new garbage rects on window open/close or room change.
+
 ### RESOLVED — in-game savegame restore rebuilt on a coalesced heap (multi-restore device-confirmed 2026-06-07)
 
 In-game `kRestoreGame` on Pico no longer rebuilds the new gamestate in place. The old in-place rebuild
@@ -1182,7 +1252,36 @@ Builds clean desktop + pico. **Awaiting device retest** to confirm the room-13 f
 HardFault with a garbage/ASCII BFAR still appears after this, there is a *second* overflow source (the
 string-kernel suspects below remain the next ASan target).
 
-### OPEN — top priority — heap corruption surfacing as a GC fault ("aspb")
+### WATCHED (apparently resolved, not positively confirmed) — heap corruption surfacing as a GC fault ("aspb")
+
+**DOWNGRADED from top-priority OPEN (2026-06-12).** The "aspb" family was a *conflation* of several
+distinct faults. The ones we **actually observed on device** have each been individually root-caused and
+fixed:
+- **Mirrored view-RLE overrun in `gfxr_draw_cel0` (`sci_view_0.c`) — this was "the 'aspb' corruptor
+  found."** The mirrored branch lacked the `yl` bound the non-mirrored branch had, so a leftover-`count`
+  run `memset` past `index_data` into the adjacent chunk header — exactly the metadata smash below. FIXED
+  and landed (room-13 fault gone). See the RESOLVED note above.
+- **decrypt1 16.4 KB stack frame overflowing the 8 KB main stack into the heap** — DEVICE-CONFIRMED FIXED
+  (log 3396e873). A second corruption mechanism that produced garbage-BFAR HardFaults.
+- The 4ded2752 branch-to-NULL and grabber/motivator faults were **reclassified as fragmentation-OOM**
+  (longjmp-into-dead-frame), not metadata smashes — the reg_t-shaped garbage was stale spilled locals.
+
+What remains genuinely **unconfirmed** is only the *string-kernel theory* (`kFormat`/`kStrCat`/`kStrCpy`
+in `kstring.c`, the prime-suspects bullet below). It was **never reproduced under ASan** and has **not
+recurred since the view-RLE + decrypt1 fixes landed**. So either (a) it was a real independent overflow
+not currently being triggered, or (b) the observed "aspb"-signature fault was always a *downstream symptom
+of the view-RLE overrun* (a smashed pixmap propagating into the GC/free walk) and is already fixed. We
+can't fully distinguish these from logs, but no recent clean- or diagnostic-build session shows the
+corruption signature (HardFault with garbage/ASCII BFAR **and no `[OOM]` line**) — every recent fault is
+either a clean `[OOM]` (fragmentation) or the now-fixed decrypt1 collision.
+
+**Status:** treat as apparently resolved; keep `FSCI_PROBE_STR` **ON** as the canary. If a `[strprobe]`
+line ever fires just before a `[FAULT]`, or a garbage/ASCII-BFAR + no-`[OOM]` HardFault recurs, re-open
+this and run the desktop ASan hammer below. Until then it is a watch item, not active work.
+
+---
+
+*Historical detail (kept for the ASan repro recipe and the original three-fault analysis):*
 
 Three HardFaults, all the same root cause — **heap allocator metadata smashed by an overflow** — caught
 at different downstream sites:
