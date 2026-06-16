@@ -468,8 +468,15 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                       || pxm->index_yl <= 0 || pxm->index_yl > PICO_YSIZE
                       || src.x < 0 || src.y < 0
                       || src.x + xl > pxm->index_xl
-                      || src.y + yl > pxm->index_yl))
+                      || src.y + yl > pxm->index_yl)) {
+#ifdef FSCI_PROBE_GFX
+        /* Diagnostic: a cel dropped here is invisible (desktop would clip it).
+           Capture the geometry so a missing PQ2 cel can be matched. */
+        sciprintf("[pblit] SKIP-GUARD cel idx=%dx%d src=(%d,%d %dx%d) pri=%d\n",
+                  pxm->index_xl, pxm->index_yl, src.x, src.y, xl, yl, priority);
+#endif
         return;
+    }
 
     /* Pre-build lookup: local color index → palette slot in ps->palette[].
        - 256 colors (background pic): palette slot == color index (identity)
@@ -502,7 +509,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
     int pri_yl = psram_pri ? s_shared_priority->index_yl : 0;
 
     /* [pblit] probe: per-sprite occlusion summary (throttled, strip later). */
-    int pb_drawn = 0, pb_supp = 0, pb_min = 99, pb_max = -1;
+    int pb_drawn = 0, pb_supp = 0, pb_min = 99, pb_max = -1, pb_opaque = 0;
 
     for (int y = 0; y < yl; y++) {
         const byte *row_src;
@@ -546,6 +553,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
         for (int x = 0; x < xl; x++) {
             byte idx = row_src[x];
             if (!has_alpha || idx != color_key) {
+                pb_opaque++;
                 if (pri_row && priority >= 0) {
                     /* Highest-priority-wins: background scenery whose baked-in
                        priority exceeds this cel's occludes it (matches the SDL
@@ -577,16 +585,19 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
        cel priority can be compared against the background priority under it.
        Throttled to 1-in-8 to keep the serial log readable while walking. */
 #ifdef FSCI_PROBE_GFX
-    if (psram_pri && pb_supp > 0) {
-        static unsigned pb_call = 0;
-        if ((pb_call++ & 7) == 0)
-            sciprintf("[pblit] cel pri=%d dest=(%d,%d %dx%d) bgpri=%d..%d "
-                      "drawn=%d supp=%d\n",
-                      priority, dest.x, dest.y, xl, yl,
-                      pb_min, pb_max, pb_drawn, pb_supp);
-    }
+    /* Diagnostic: log EVERY cel reaching the blit (not just suppressed ones) so a
+       missing PQ2 cel can be classified from one capture:
+         opaque=0          -> cel decoded empty/all-transparent (decode/offload bug)
+         drawn=0 supp>0     -> fully occlusion-suppressed (priority)
+         drawn>0            -> drew normally (look elsewhere: palette/clip)
+       psram=0 means no bg-priority gate ran (opaque pixels written through).
+       Restore the 1-in-8 throttle for routine walking once PQ2 is solved. */
+    sciprintf("[pblit] cel pri=%d dest=(%d,%d %dx%d) psram=%d opaque=%d "
+              "bgpri=%d..%d drawn=%d supp=%d\n",
+              priority, dest.x, dest.y, xl, yl, psram_pri, pb_opaque,
+              pb_min, pb_max, pb_drawn, pb_supp);
 #else
-    (void)pb_drawn; (void)pb_supp; (void)pb_min; (void)pb_max;
+    (void)pb_drawn; (void)pb_supp; (void)pb_min; (void)pb_max; (void)pb_opaque;
 #endif /* FSCI_PROBE_GFX */
 }
 

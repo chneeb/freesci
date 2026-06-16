@@ -1878,6 +1878,45 @@ first room is drawn (intro), so the long load isn't a blank screen. **Chosen app
 param var, song-handle warnings). The end-hook unregistering the callback at first room composite is
 what prevents load text from leaking over the running game — it is essential, not optional.
 
+### OPEN — PQ2 (SCI0) missing/garbled cels: priority pipeline CLEARED, redirected to VIEW-CEL DECODE
+
+PQ2 on Pico shows: (a) opening car-interior scene — a "blue box" over the character's head; (b) exiting
+the car — parking-lot cars missing; (c) glovebox closeup empty (should show 2 items). Background pic
+renders fine; only certain cels fail. Desktop renders all three correctly.
+
+**The Pico PRIORITY pipeline is byte-for-byte CLEARED — it is NOT the cause (proven, do not re-chase).**
+A desktop reference harness (`/tmp/pridump.c`, built against the `build-pri` `FSCI_PROBE_GFX` static libs)
+decodes PQ2 pic 33 through the **same desktop decode path** (`gfxr_init_pic` + `gfxr_clear_pic0` +
+`gfxr_draw_pic01`, with the 8th `sci1` arg = **0** for SCI0 — passing `resmgr->sci_version`=1 there
+mis-parses as SCI01 and yields garbage; that was a harness bug, now fixed) and cross-checks against the
+device `[pblit]` log (f21cedf3). Decisive datum: the **fully-opaque** head cel `dest=(108,65 135x58)`
+(`drawn+supp = 5356+2474 = 7830 = 135×58`, i.e. zero transparency) — the desktop harness counts **exactly
+2474** pixels with priority>3 in that rect, **identical to the device `supp=2474`**. So the Pico
+priority-map decode, the PSRAM nibble readback, and the `pico_blit_indexed` gate are pixel-identical to
+desktop. The other cels' `harness_over ≥ dev_supp` gaps are fully explained by transparent pixels (harness
+counts all pixels in the rect; device `supp` excludes transparent ones). Cel-priority computation is shared
+engine code (`priority_first=42`, `priority_last` keyed on resource-detected `s->version`; `game.c`/
+`kgraphics.c`), no Pico path. **Conclusion:** the pri-1/2/3 cels in the car scene are low-priority
+windshield/interior overlays *correctly* occluded by the pri-12/13 car frame — the "blue box over the head"
+is that pri-3 overlay correctly hidden behind the dashboard, render-identical to desktop. The stale CLAUDE.md
+"color written unconditionally" note (see limitations below) is wrong — the gate matches `gfx_crossblit.c`.
+
+**The log f21cedf3 contains ONLY the one car-interior scene (pic 33).** The cars/glovebox symptoms are
+*different pics not captured* — they cannot be analyzed from this log. The only `drawn=0` cels in it are
+tiny 10×1 menu-bar strips (top-left), not the reported objects.
+
+**Redirect: the symptoms point at VIEW-CEL DECODE/CONTENT on Pico, not occlusion.** "Empty glovebox,"
+"missing cars," and a head-as-solid-block are all consistent with view cels decoding to wrong/empty pixel
+data — and this path has prior Pico-specific bugs (the mirrored view-RLE overrun in `gfxr_draw_cel0`,
+`sci_view_0.c`; the B-1.3 view-cel-into-priority-scratch borrow). The `[pblit]` probe reports priority
+stats only, not pixel *content*, so it can't tell "suppressed" from "empty source." **Next diagnostic:**
+extend `pico_blit_indexed` to log EVERY cel (not just suppressed) with its opaque-pixel count, so a fresh
+capture of the glovebox/cars scenes distinguishes `opaque=0` (empty/garbled source = decode bug) from
+`opaque>0,drawn=0` (priority-suppressed) from garbage. Active investigation = `sci_view_0.c` decode path.
+
+(Cleanup still pending: the `[pblit]` probe in `pico_driver.c` currently prints EVERY suppressed cel — the
+1-in-8 throttle `if ((pb_call++ & 7) == 0)` was removed for this diagnosis; restore it when done.)
+
 ### Known graphics limitations on Pico (not yet fixed)
 
 These are correctness gaps in the Pico render path vs the SDL pipeline. Lower priority than the
@@ -1897,6 +1936,42 @@ roadmap above (gameplay works without them), but documented so they aren't redis
   (`gfx_copy_pixmap_box_i`) is a no-op, so sprite priorities accumulate and z-ordering degrades the
   longer you stand in a room. Proper fix: keep the static priority map PSRAM-resident and page the
   dirty rect back into an SRAM scratch on BACK-buffer update (same scratch the occlusion fix uses).
+
+### SCI version support on Pico — SCI0 ONLY (SCI1/VGA legibly rejected, not supported)
+
+The Pico graphics path is **SCI0-only**. Attempting an SCI1/VGA game (e.g. **Jones in the Fast Lane**,
+SCI1) used to **HardFault**: the player saw the credits text, hit Enter to start, and the device faulted
+in `pico_blit_indexed` (`pico_driver.c`, the `byte idx = row_src[x]` read) with `BFAR=0x8000` — a wild
+source-pointer deref. Decoded chain (PC→`pico_blit_indexed`, LR→`pico_render_background`, resolved against
+`build-pico/src/freesci.elf`).
+
+**Root cause — the Pico PSRAM decode wiring exists ONLY in the SCI0 branch.** `gfxr_interpreter_calculate_pic`
+(`sci_resmgr.c`) splits at `if (state->version >= SCI_VERSION_01_VGA)`: the **lower** (`#else`, SCI0) branch
+has the entire `HAVE_PICO` offload — borrow `visual[0]` as the decode buffer, nibble-pack the priority map,
+`psram_alloc`/`psram_store` the visual/priority `index_data`, set `psram_valid=1`/`index_data=NULL`. The
+**upper** (`version >= SCI_VERSION_01_VGA`, true for any SCI1/VGA game) branch decodes a VGA pic with **none**
+of that. So `static_bg` reaches `pico_render_background` → `pico_blit_indexed` with `index_data==NULL` AND
+`psram_valid==0` → neither blit source path is valid → wild deref. (View decode is the same story:
+`gfxr_draw_view0`/`sci_view_0.c` has the per-cel PSRAM offload; the VGA `gfxr_draw_view1`/`gfxr_draw_view11`
+paths do not.)
+
+**EGA cannot be forced.** The SCI version is **detected from the resource files** (`resource_map.c` sets
+`sci_version`), not a render-mode toggle. A VGA game's resources (256-colour palettes, view1/view11 cel
+format) have no EGA equivalent unless a separate EGA *release* of the game is supplied; there is no FreeSCI
+"force EGA" config that transcodes VGA resources. So this is not a flag — real SCI1 support would be a
+substantial port (VGA palette handling, view1 cel decode into the per-cel scratch, and the PSRAM offload
+wiring added to the entire `version >= SCI_VERSION_01_VGA` branch of `sci_resmgr.c` + the view1/view11
+decoders).
+
+**FIX (legible failure, not SCI1 support) — `operations.c` `gfxop_new_pic`, `HAVE_PICO`-gated.** A guard at
+the very top of the Pico path: `if (state->version >= SCI_VERSION_01_VGA) { pico_oom_report("SCI1/VGA game
+not supported (SCI0 only)", …); return GFX_FATAL; }`. `state->version` is `resmgr->sci_version` (the
+`SCI_VERSION_*` enum; `SCI_VERSION_01_VGA`=3). It halts on the **LCD** via the same legible-halt channel as
+every OOM (fault-safe SPI), naming the unsupported version, **before** any borrow/decode/blit runs — so an
+SCI1 game shows a clear message instead of a mystery HardFault. Desktop is untouched (guard is inside
+`#ifdef HAVE_PICO`; desktop renders SCI1/VGA fine through the SDL pipeline). Both configs build clean.
+**Awaiting device retest** (flash + load Jones → expect the LCD "SCI1/VGA game not supported" halt, not a
+HardFault).
 
 ### RP2040 portability note
 

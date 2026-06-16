@@ -68,6 +68,10 @@ byte *g_pico_priority_scratch = NULL;
    it for every pic/view decode instead of a fresh per-decode contiguous malloc. */
 unsigned char *g_pico_decompress_scratch = NULL;
 
+/* Declared in pico_main.c (LCD legible-halt path, shared with the OOM reporter). */
+extern void pico_oom_report(const char *what, unsigned long size,
+			    const char *file, int line, const char *funct);
+
 /* Declared in pico_driver.c */
 extern void pico_free_visual(gfx_driver_t *drv);
 extern void pico_alloc_visual(gfx_driver_t *drv);
@@ -2261,6 +2265,26 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	BASIC_CHECKS(GFX_FATAL);
 
 #ifdef HAVE_PICO
+	/* SCI1-unsupported guard.  The whole Pico decode/blit path below assumes the
+	   SCI0 pic format: it borrows visual[0] as the decode buffer, offloads the
+	   visual/priority maps to PSRAM and sets psram_valid, and pico_render_background
+	   reads static_bg back row-by-row.  That PSRAM wiring lives ONLY in the SCI0
+	   branch of sci_resmgr.c (and gfxr_draw_view0) — the version>=SCI_VERSION_01_VGA
+	   branch decodes a VGA pic with none of it, so static_bg reaches
+	   pico_blit_indexed with index_data==NULL AND psram_valid==0 → a wild
+	   source-pointer deref (the Jones-in-the-Fast-Lane HardFault, BFAR=0x8000 in
+	   pico_blit_indexed via pico_render_background).  There is no SCI1 graphics
+	   support on Pico and a VGA game cannot be coerced to EGA (version is detected
+	   from the resource files, not a render toggle).  Halt legibly instead of
+	   HardFaulting.  state->version == resmgr->sci_version (the SCI_VERSION_* enum). */
+	if (state->version >= SCI_VERSION_01_VGA) {
+		pico_oom_report("SCI1/VGA game not supported (SCI0 only)",
+				(unsigned long)state->version,
+				__FILE__, __LINE__, "gfxop_new_pic");
+		/* pico_oom_report halts; not reached. */
+		return GFX_FATAL;
+	}
+
 	/* Heap-growth probe: free heap carried over from the PREVIOUS room's
 	   gameplay, measured at the same point every room change. A monotonic
 	   decline room-over-room = a real leak; saturate-then-recover = healthy
