@@ -1878,7 +1878,103 @@ first room is drawn (intro), so the long load isn't a blank screen. **Chosen app
 param var, song-handle warnings). The end-hook unregistering the callback at first room composite is
 what prevents load text from leaking over the running game — it is essential, not optional.
 
-### OPEN — PQ2 (SCI0) missing/garbled cels: priority pipeline CLEARED, redirected to VIEW-CEL DECODE
+### FIXED (device-confirmed) — PQ2 missing foreground objects = static picviews erased by the BACK restore (one-buffer Pico vs three-buffer SDL)
+
+**DEVICE-CONFIRMED (2026-06-17):** the `pico_bake_static_region` fix works — the car-interior **face** and the
+**parking-lot cars** now render and persist. **One residual parked as OPEN:** the **glovebox closeup items**
+(2 of them) are still not visible. The face/cars and the glovebox use the same `GFX_BUFFER_STATIC` picview
+path, so the bake-in is *necessary but not sufficient* for the glovebox — its items are likely either (a)
+drawn before `static_bg` is set for that closeup (a `kDrawPic`/`set_static_buffer` ordering issue specific to
+the inset/closeup window), (b) clipped/positioned outside the baked region, or (c) submitted via a path the
+bake-in doesn't cover (e.g. a sub-window port whose static buffer differs). Next step when revisited: capture a
+`[pblit]` of the glovebox closeup and check whether the item cels reach the blit at all, and whether a BACK
+restore fires after they're drawn. Parked — not chased now.
+
+**The `color_key` fix below is REAL but was NOT the missing-object cause (device-tested, did NOT help).** The
+user flashed the `color_key` int→byte truncation fix and reported the foreground objects still missing: "No
+cars on parking lot. No face, no items in glove box, while in car." So `color_key` truncation is a *separate*,
+correct fix (it stops white index-255 **background** pixels being dropped as transparent — keep it), but the
+PQ2 **missing-object** bug is elsewhere. Re-narrowed and root-caused below; the old `color_key`-as-root-cause
+heading is retained verbatim afterward for the record but is **superseded** as the explanation for the missing
+objects.
+
+**ROOT CAUSE (strong code evidence, pending device confirm) — static picviews are drawn into `visual[0]` then
+erased by the next `GFX_BUFFER_BACK` restore, because Pico has ONE visual buffer where SDL has a dedicated
+STATIC buffer.** PQ2's missing objects (parking-lot cars, car-interior face, glovebox items) are **static
+picviews** — `kAddToPic` scene objects — which draw through a DIFFERENT path than animated actors:
+- Actors → `_gfxwop_view_draw` (`widgets.c`) → `gfxop_draw_cel` → `static_buf=0` → **`GFX_BUFFER_BACK`**.
+- Picviews → `_gfxwop_static_view_draw` (`widgets.c`, labelled "PICVIEW") → `gfxop_draw_cel_static`
+  (`operations.c:2192`) → `gfxop_draw_cel_static_clipped` → `_gfxop_draw_cel_buffer(..., static_buf=1, ...)` →
+  `_gfxop_draw_pixmap(..., GFX_BUFFER_STATIC)` (`operations.c:384`).
+
+**SDL (correct) uses THREE buffers** (`sdl_driver.c`): `visual[2]`=STATIC (background + baked-in picviews),
+`visual[1]`=BACK (working), `visual[0]`=FRONT. `GFX_BUFFER_STATIC` cels land in `visual[2]` (`bufnr =
+(buffer==GFX_BUFFER_STATIC)?2:1`, line 709), and `sdl_update` for **`GFX_BUFFER_BACK` copies FROM visual[2]**
+(`data_source = (buffer==GFX_BUFFER_BACK)?2:1`, line 863) — so picviews baked into the static buffer are
+reproduced on every BACK restore.
+
+**Pico has ONE `visual[0]`** and `pico_draw_pixmap` **ignored the `buffer` parameter** (`int bufnr = 0;
+/* single visual buffer serves back and static */`), so a `GFX_BUFFER_STATIC` picview landed in `visual[0]` —
+visible *momentarily*. But the next `GFX_BUFFER_BACK` restore (`pico_update`, the `GFX_BUFFER_BACK` case)
+re-blits `static_bg` — the PSRAM background **without** picviews — over `visual[0]`, **erasing the picview**.
+This exactly explains the symptom set: backgrounds render (they ARE `static_bg`); actors render (drawn into
+`visual[0]` *after* each BACK restore, same frame, then flushed); static picviews vanish (erased by the BACK
+restore that follows their one-time `kAddToPic` draw).
+
+**FIX (`pico_driver.c`, `HAVE_PICO`/Pico-only, uncommitted — awaiting device flash): bake static-buffer cels
+into the PSRAM `static_bg`.** New `pico_bake_static_region(ps, dest)`, called from `pico_draw_pixmap` only when
+`buffer == GFX_BUFFER_STATIC`, `psram_store`s the just-drawn `dest` region of `visual[0]` back into
+`static_bg->index_data` in PSRAM. This makes `static_bg` the Pico analogue of SDL's `visual[2]` — subsequent
+BACK restores blit the picviews straight back. Safe because `visual[0]` holds palette-slot bytes and
+`static_bg->index_data` is the *identical* palette slots (identity LUT for the 256-color background pic), and
+the cel was already priority-gated against the background when drawn into `visual[0]`, so the baked region is
+the correct composited result. Bounds-clamped to `static_bg`'s `index_xl/index_yl`. Both Pico configs build
+clean; desktop untouched. **Residual (accepted, secondary):** picview *priority* is NOT baked into the
+priority map (Pico's `priority_map`/`static_priority_map` index_data is in PSRAM/NULL so `_gfxop_draw_priority`
+is skipped), so an actor walking "behind" a static picview won't be occluded by it — same class as the
+documented "static_priority_map aliased / last-drawn-wins" limitations. The objects now *render*; inter-sprite
+occlusion vs picviews is a later refinement.
+
+**WHAT TO TEST on device:** load PQ2 → the car-interior opening scene (the face + dashboard items must be
+visible, not just the background), exit the car (parking-lot cars present), open the glovebox closeup (its 2
+items shown). Walk/animate near a static picview and confirm it persists across frames (not flickering in then
+vanishing). Regression watch: backgrounds, actors (ego), text, cursor still draw; no new garbage where a
+picview's region is baked.
+
+---
+
+*Superseded explanation (kept for the record — the `color_key` fix is correct but is NOT the missing-object
+cause; see above):*
+
+### FIXED (pending device retest) — `color_key` int→byte truncation drops every white (index-255) background pixel
+
+**ROOT CAUSE FOUND — `pico_blit_indexed` (`pico_driver.c`) narrowed `color_key` to a byte BEFORE testing
+`has_alpha`.** `gfx_pixmap_t::color_key` is an **`int`**; `GFX_PIXMAP_COLOR_KEY_NONE == -1`
+(`gfx_system.h:293`). The blit did `byte color_key = pxm->color_key;` then
+`int has_alpha = (color_key != GFX_PIXMAP_COLOR_KEY_NONE);`. Truncating `-1` to a byte yields **255**, and
+`255 != -1` → **`has_alpha = 1` for a transparency-free pixmap**. So the background `visual_map` (decoded
+with `color_key = NONE`, `sci_pic_0.c:307`) was blitted as if palette index **255 (solid white) were the
+transparent key** — every white background pixel was skipped, leaving holes that show stale `visual[0]`
+content. Desktop is correct (`color_key=NONE` → `has_alpha=0`, all pixels painted), so this is a **Pico-only**
+divergence — and it's the BACKGROUND, not the cels (the entire prior cel investigation was looking in the
+wrong place, though it correctly *cleared* the cel paths).
+
+**Proven by exact log-match, no device flash.** The captured device `[pblit]` background lines show
+full-screen blits with `opaque < 64000`: `opaque=57185` (6815 px dropped) and `opaque=63991` (9 px dropped).
+A desktop harness (`tests/picbg.c`, in-tree) decodes every PQ2 pic and counts palette-index-255 pixels in the
+visual map: **pic 1 has exactly 6815, pic 33 (the car interior) has exactly 9** → `64000 − idx255` reproduces
+the device opaque values to the byte. Mechanism confirmed: the dropped "transparent" pixels ARE the index-255
+white background pixels. (Most PQ2 pics have thousands of index-255 px, so nearly every room had white holes.)
+
+**FIX (`pico_driver.c`, `HAVE_PICO`):** test `has_alpha` on the **int** before narrowing —
+`int has_alpha = (pxm->color_key != GFX_PIXMAP_COLOR_KEY_NONE); byte color_key = has_alpha ? (byte)pxm->color_key : 0;`.
+Now a `color_key=NONE` background paints all pixels (incl. index 255); real keyed pixmaps (view cels,
+`color_key=255`, `sci_view_0.c:87`) are unchanged. Pico builds clean; desktop untouched (file is Pico-only).
+**Awaiting device retest** (flash → load PQ2 → car interior / parking lot / glovebox should render fully, no
+white holes / garbage). NB the earlier-cleared cel paths (priority, blank-cel, palette, geometry) stay
+cleared — the bug was never in the cels.
+
+*Original investigation notes (cel paths, all correctly CLEARED — kept for context):*
 
 PQ2 on Pico shows: (a) opening car-interior scene — a "blue box" over the character's head; (b) exiting
 the car — parking-lot cars missing; (c) glovebox closeup empty (should show 2 items). Background pic
@@ -1914,8 +2010,125 @@ extend `pico_blit_indexed` to log EVERY cel (not just suppressed) with its opaqu
 capture of the glovebox/cars scenes distinguishes `opaque=0` (empty/garbled source = decode bug) from
 `opaque>0,drawn=0` (priority-suppressed) from garbage. Active investigation = `sci_view_0.c` decode path.
 
-(Cleanup still pending: the `[pblit]` probe in `pico_driver.c` currently prints EVERY suppressed cel — the
-1-in-8 throttle `if ((pb_call++ & 7) == 0)` was removed for this diagnosis; restore it when done.)
+**CONFIRMED (every-cel `[pblit]` capture, pico.log, PQ2 run, 2026-06-16) — real view cels decode to EMPTY,
+geometry guard is NOT the cause.** The probe was extended to log every cel (not just suppressed) with its
+opaque-pixel count + a `<TOP>` tag for `dest.y<100`. A full PQ2 session captured **941 `[pblit]` lines**:
+- **0 SKIP-GUARD drops** — the geometry guard (`pico_blit_indexed:475`) dropped nothing. **Cleared as a
+  cause; do not re-chase it.**
+- **psram=1 (real view cels from the PSRAM offload): 401.** Of these — **305 drew normally** (`drawn>0`,
+  e.g. `pri=10 dest=(54,28 212x46) opaque=6635 drawn=6635`), **57 "suppressed"** (`opaque>0 drawn=0`) which
+  are almost entirely **trivial 1-pixel menu-bar strips** (`pri=0 dest=(0,10 11x1)` ×33, `10x1` ×19 — benign
+  top-bar redraw, not the missing objects), and **39 decoded to `opaque=0`** (all-transparent / empty pixel
+  data).
+- **The 39 empty cels are essentially ONE animated sprite plus one strip:** a `pri=6 dest=(x,76 12x35)` cel
+  tracking across **x=14→31** frame-by-frame (`bgpri=99..-1` = the priority gate never even ran because there
+  were no opaque pixels) — i.e. a **walking character rendering completely invisible** — and a single
+  `pri=10 dest=(263,109 4x32)`. These are real cels that came through the PSRAM view-cel path with **zero
+  drawable content**.
+- **psram=0: 540** — background fills / text written-through (not view cels), irrelevant to this bug.
+
+**Verdict (SUPERSEDED — see the OVERTURNED note two paragraphs below; kept for the device-data record):** the
+every-cel capture *seemed* to show the bug was VIEW-CEL DECODE producing empty pixel data — `psram=1 opaque=0`
+cels read back with no non-`color_key` pixels. The desktop harness later proved this reading wrong:
+`opaque=0` is **normal** blank SCI0 content (SQ3 has it too and renders fine), so these blank cels are NOT the
+missing objects. Do not act on this paragraph's verdict — read the OVERTURNED note below.
+
+**RULED OUT — it is NOT a version-forked code path (PQ2 0.000.490 vs SQ3 0.000.685 run byte-identical view
+decode).** The two games' interpreter revisions differ (~195 apart) but both **detect as `SCI_VERSION_0`**
+(=1): both carry the SCI0 main vocab + non-VGA views, so resource.c:671-672 lands both on `SCI_VERSION_0`
+(pico.log confirms PQ2 `Resmgr: Detected SCI0`). The interpreter version number is NOT consulted on the view
+path — only the resmap shape + vocab/view-type probes, which agree. Consequence, traced through
+`gfxr_interpreter_get_view` (`sci_resmgr.c`): line 417 `version < SCI_VERSION_01` → **both** get `palette=-1`;
+the `switch` `case SCI_VERSION_0:` → **both** call `gfxr_draw_view0`; the `>= SCI_VERSION_01_VGA` palettize
+(line 437) fires for **neither**. In `gfxr_draw_view0`, `palette=-1` fails the `(palette>=0)` guard (line 267)
+so the translation table + `GFX_PIXMAP_FLAG_PALETTIZED` are skipped for both; and `gfxr_draw_cel0` has **zero**
+version awareness (same 7-byte cel header, same pure-RLE `count=op>>4,color=op&0xf,memset`). So a version-keyed
+branch CANNOT explain why PQ2 cels come back empty while SQ3's don't — **do not re-chase the version gap.** The
+game-specific failure on a shared path narrows to: (1) **PQ2's cel DATA** — different mirror flags, or a
+`color_key` (`resource[6]`) / run pattern this decoder mishandles (e.g. a cel whose only color equals its
+`color_key` → every run maps to `color_key` → `opaque=0`); or (2) the Pico `psram_store`/`psram_load`
+round-trip (`sci_view_0.c:181-189`), which SQ3 also uses (so less likely game-specific). Suspect #1 is the
+cleaner explanation; the decisive test is the pre-store-vs-post-load `dest[]` byte dump named above.
+
+**OVERTURNED (desktop harness `tests/viewdump.c`, 2026-06-16) — `opaque=0` is NORMAL SCI0 content, NOT a bug
+signature. The "view cels decode to EMPTY = the bug" verdict above is WRONG.** A new desktop harness
+(`tests/viewdump.c`, kept in-tree) decodes SCI0 view cels through the **same shared engine path** the Pico
+uses (`gfxr_draw_view0` → `gfxr_draw_loop0` → `gfxr_draw_cel0`), no `HAVE_PICO` / no PSRAM, and counts opaque
+(`index != color_key`) pixels per cel. It disproved BOTH remaining suspects at once:
+- **The PSRAM round-trip (suspect #2) is innocent.** PQ2 **view 450 loop 0 cel 0 (12×35)** decodes
+  **`opaque=0` on the DESKTOP harness** — byte-identical to the device `[pblit]` empty `pri=6 12x35` sprite.
+  Same emptiness with **no PSRAM involved** → the round-trip is not losing content; the cel simply decodes
+  blank.
+- **The blank decode is CORRECT, not a decoder bug (suspect #1 also innocent for these cels).** View 450 raw
+  bytes (`size=59`): `loops_nr=1`, one cel 12×35, **`color_key=0`**, data is dominated by `0xc0` runs
+  (`count=12, color=0`). Color 0 **equals** the cel's `color_key=0`, so every run maps to the transparent key
+  → a genuinely, intentionally transparent cel. `gfxr_draw_cel0` decoded it exactly right.
+- **DECISIVE control: SQ3 (which renders perfectly) is ALSO full of `opaque=0` cels** — e.g. SQ3 view 1001
+  loop 2 cel 0 is a **93×108 fully-blank cel** — yet SQ3 has no missing-object bug. So a cel decoding to all-
+  `color_key` is **normal** SCI0 blank/placeholder data (animation-frame padding, unused loop slots), present
+  in both games. The device `[pblit] opaque=0` lines are **noise**, not the failing objects.
+
+**Consequence — the PQ2 investigation must be RE-NARROWED.** The 39 `opaque=0` device cels (one tracking
+12×35 sprite + a strip) are blank-by-design, not the cars/glovebox/blue-box. The real missing objects must be
+among the cels that **DO** decode with content (`opaque>0`) yet render wrong on Pico — so the bug is in
+**positioning / occlusion / palette mapping of opaque cels**, NOT blank-cel decode. Next step: identify which
+view/loop/cel the actually-missing objects use (from a targeted device `[pblit]` capture of the glovebox/cars
+scenes), run those exact view numbers through `tests/viewdump.c` to confirm they decode `opaque>0` on desktop,
+then compare desktop-decoded content vs the device blit for *those* cels — do NOT keep chasing the blank cels.
+
+**PALETTE MAPPING + SKIP-GUARD GEOMETRY both CLEARED (desktop harness `tests/celblit.c`, 2026-06-16).** A
+third harness (`tests/celblit.c`, in-tree) ports `pico_driver.c`'s two device-only blit decisions to the
+desktop and runs them against the SAME shared-engine cel decode, so they can be diffed WITHOUT a flash:
+1. **Palette mapping** — the Pico has no per-pixmap translation table; it maps each local cel colour to a
+   256-slot palette entry via `nearest_pal()` (closest RGB in `gfx_sci0_pic_colors[]`), whereas SDL renders
+   the cel colour's TRUE RGB. The harness flags every cel colour whose `nearest_pal`-mapped RGB ≠ its true
+   RGB (a device-only colour error). 2. **Skip-guard geometry** — `pico_blit_indexed` silently DROPS (cel
+   invisible) any cel whose `index_xl/index_yl` is outside `[1..320]/[1..200]`; the harness flags any cel the
+   guard would drop.
+   **Result: PQ2 — 230 views scanned, ZERO palette divergences, ZERO skip-guard drops** (only view 140,
+   size 8, a trivial/empty resource, failed to decode). SQ3 control: 210 views, same — zero of either.
+   Verbose dumps confirm the checks run (every opaque cel reports `divergent_px=0`). This is expected and
+   *confirms the theory*: pure-EGA SCI0 cels map exactly (EGA colour k sits at slot k×17, distance 0), and no
+   PQ2 cel exceeds 320×200. **So palette mapping and geometry-drop are RULED OUT as PQ2 failure modes.**
+
+**Cumulative narrowing — what is now CLEARED for the PQ2 missing-object bug** (each by a desktop harness, no
+device flash): priority decode/occlusion-gate (`tests/pridump.c`), blank-cel decode (`tests/viewdump.c`:
+`opaque=0` is normal), palette mapping + skip-guard geometry (`tests/celblit.c`). **What REMAINS** — the
+device-only render decisions a static cel-decode harness canNOT model, i.e. **composite-time placement and
+inter-sprite occlusion**: (a) where the cel is *placed* (ego/actor x,y + `xoffset`/`yoffset` hotspot), (b)
+the documented "last drawn wins" inter-sprite priority limitation (`pico_blit_indexed` skips the priority
+writeback when reading from PSRAM → `row_pri` NULL → later sprites aren't occluded by earlier higher-priority
+ones), and (c) the `static_priority_map`-aliased-to-`priority_map` accumulation (sprite priorities never
+cleared between frames). These are all **dynamic** (depend on runtime actor coordinates + draw order).
+
+**THE EXISTING `pico.log` ALREADY HAS the per-cel placement + draw-order data — no fresh flash needed for
+it (2026-06-16).** The current pico.log is the 941-line every-cel `[pblit]` capture, spanning ~6 distinct
+backgrounds (re-composited into 23 background-draw segments); every line carries the cel's `dest=(x,y wxh)`,
+`pri`, `bgpri` range, `drawn`, and `supp`. Mining it for Pico-only render divergence among cels that reached
+the blit comes up **EMPTY**:
+- **305 psram=1 real cels drew normally**; the 39 `opaque=0` ones are normal blank SCI0 content (see the
+  viewdump OVERTURNED note); the 57 "suppressed" are almost all trivial 1-px menu-bar strips `(0,10 10–11×1)`.
+- **Exactly ONE genuinely-suppressed real object in the whole capture:** `pri=12 dest=(136,164 18x6)
+  opaque=76 bgpri=13..13 drawn=0` (in the car-interior scene, pic 33). **VERIFIED CORRECT, not a bug:** a
+  one-off desktop harness (`/tmp/prirect.c`, decodes pic 33's priority map via `gfxr_draw_pic01` and prints
+  the rect) shows the desktop background priority over `(136,164 18×6)` is **uniformly 13 — identical to the
+  device `bgpri=13..13`** → a pri-12 cel is correctly fully occluded on BOTH. Render-identical.
+
+**Consequence — `[pblit]` has told us everything it structurally can; another `[pblit]` capture is the WRONG
+next step.** A per-blit probe only logs cels the engine actually *submits* to the blit. If the PQ2 missing
+objects (glovebox 2 items, parking-lot cars) are absent because their cel was **never submitted** (view not
+loaded / wrong loop-cel index / disposed / a `kAnimate` cast-list issue), `[pblit]` is silent on them — you
+cannot see a never-submitted cel in a per-blit log, and this capture shows no suppressed/garbled real cel
+that would explain the symptom. So the discriminating next probe is **engine-side submission tracking** (was
+the expected view/loop/cel ever handed to `gfxop_draw_cel` / added to the animate cast?), NOT more `[pblit]`.
+Open sub-question to settle first: confirm whether the glovebox/parking scenes were even visited in this
+session (the captured cels are dominated by the car-interior + message windows) — if not, one capture *known*
+to include those scenes is still needed, but the probe to add for it is the engine-side "was this cel
+submitted" trace, not the blit-side `[pblit]`.
+
+(Cleanup still pending: the `[pblit]` probe in `pico_driver.c` currently prints EVERY cel — the
+1-in-8 throttle `if ((pb_call++ & 7) == 0)` and the suppressed-only filter were removed, plus a `<TOP>`
+tag added, for this diagnosis; restore the throttle and drop the every-cel/`<TOP>` instrumentation when done.)
 
 ### Known graphics limitations on Pico (not yet fixed)
 

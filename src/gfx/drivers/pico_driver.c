@@ -456,8 +456,14 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                   int pri_stride)
 {
     int xl = src.xl, yl = src.yl;
-    byte color_key = pxm->color_key;
-    int has_alpha = (color_key != GFX_PIXMAP_COLOR_KEY_NONE);
+    /* color_key is an int (-1 == GFX_PIXMAP_COLOR_KEY_NONE); test has_alpha on the
+       int BEFORE narrowing to a byte.  Truncating -1 to a byte yields 255, which
+       != NONE, so a transparency-free pixmap (background visual_map, color_key=-1)
+       was wrongly given has_alpha=1 with key 255 — every palette-index-255 (solid
+       white) background pixel got dropped as transparent (device holes the desktop
+       doesn't have).  Only narrow to a byte when there really is a key. */
+    int has_alpha = (pxm->color_key != GFX_PIXMAP_COLOR_KEY_NONE);
+    byte color_key = has_alpha ? (byte)pxm->color_key : 0;
     int use_psram = (!pxm->index_data && pxm->psram_valid);
 
     /* GUARD: s_psram_row is PICO_XSIZE bytes.  A cel whose index_xl exceeds
@@ -591,11 +597,16 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
          drawn=0 supp>0     -> fully occlusion-suppressed (priority)
          drawn>0            -> drew normally (look elsewhere: palette/clip)
        psram=0 means no bg-priority gate ran (opaque pixels written through).
-       Restore the 1-in-8 throttle for routine walking once PQ2 is solved. */
+       Restore the 1-in-8 throttle for routine walking once PQ2 is solved.
+
+       TOP tag: cels landing in the upper screen band (dest.y < 100) get a
+       trailing " <TOP>" so the SQ3-intro "Pirates of Pestulon" subtitle cel
+       over the logo is greppable in one pass: grep '\[pblit\].*<TOP>'. */
     sciprintf("[pblit] cel pri=%d dest=(%d,%d %dx%d) psram=%d opaque=%d "
-              "bgpri=%d..%d drawn=%d supp=%d\n",
+              "bgpri=%d..%d drawn=%d supp=%d%s\n",
               priority, dest.x, dest.y, xl, yl, psram_pri, pb_opaque,
-              pb_min, pb_max, pb_drawn, pb_supp);
+              pb_min, pb_max, pb_drawn, pb_supp,
+              (dest.y < 100) ? " <TOP>" : "");
 #else
     (void)pb_drawn; (void)pb_supp; (void)pb_min; (void)pb_max; (void)pb_opaque;
 #endif /* FSCI_PROBE_GFX */
@@ -660,6 +671,39 @@ static int pico_unregister_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm)
         pxm->internal.info = NULL;
     }
     return GFX_OK;
+}
+
+/* Bake a just-drawn GFX_BUFFER_STATIC region of visual[0] back into the
+   PSRAM-resident static_bg, so subsequent GFX_BUFFER_BACK restores reproduce it.
+   This is the Pico analogue of the SDL static buffer (visual[2]): there, static
+   picviews (kAddToPic scene objects — PQ2's parking-lot cars, car-interior face,
+   glovebox items) are drawn into visual[2] and sdl_update copies FROM visual[2]
+   on every BACK restore. Pico has one visual[0]; without this bake-in the next
+   BACK restore blits static_bg (the picview-less background) over the picview and
+   erases it. visual[0] holds palette-slot bytes and static_bg->index_data is the
+   identical palette slots (identity LUT for the 256-color background), so the
+   region copies straight across. */
+static void pico_bake_static_region(struct _pico_state *ps, rect_t dest)
+{
+    gfx_pixmap_t *bg = ps->static_bg;
+    int bw, bh, x0, x1, w;
+
+    if (!bg || bg->index_data || !bg->psram_valid) return;  /* not PSRAM-backed */
+    bw = bg->index_xl;
+    bh = bg->index_yl;
+
+    x0 = dest.x < 0 ? 0 : dest.x;
+    x1 = dest.x + dest.xl;
+    if (x1 > bw) x1 = bw;
+    w = x1 - x0;
+    if (w <= 0) return;
+
+    for (int row = 0; row < dest.yl; row++) {
+        int by = dest.y + row;
+        if (by < 0 || by >= bh) continue;
+        psram_store(bg->psram_addr + (uint32_t)(by * bw + x0),
+                    ps->visual[0] + by * PICO_XSIZE + x0, (size_t)w);
+    }
 }
 
 static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
@@ -731,6 +775,12 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
                               NULL, 0, 0,
                               GFX_CROSSBLIT_FLAG_DATA_IS_HOMED);
     }
+
+    /* Static picviews (kAddToPic scene objects) must survive BACK restores: bake
+       the drawn region into the PSRAM static_bg (see pico_bake_static_region). */
+    if (buffer == GFX_BUFFER_STATIC)
+        pico_bake_static_region(S, dest);
+
     return GFX_OK;
 }
 
