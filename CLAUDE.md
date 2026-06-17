@@ -341,12 +341,20 @@ free the VIEW tree alongside the PIC tree before `psram_reset()`, so `gfxr_get_v
 fresh. Trade-off: views re-decode per room change instead of staying cached — correct call on Pico,
 and SQ3's per-room view set is small.
 
-### OPEN — dialogue box/text lingers on the background after dismiss (Pico)
+### RESOLVED (device-confirmed 2026-06-17) — dialogue box/text lingers on the background after dismiss (Pico)
 
 After a text/dialogue box is dismissed in SQ3 (e.g. room 2's spacecraft narration), white+black box/text
-remnants stay on the background ("top of the spacecraft") until the room is re-entered. Desktop dismisses
-cleanly. **Still unresolved — two attempted fixes were REVERTED (kgraphics.c is back to zero diff vs HEAD)
-because, tested together on device, they produced NO change.**
+remnants stayed on the background ("top of the spacecraft") until the room was re-entered. Desktop dismisses
+cleanly. **Fixed by the static-picview bake-in** (`pico_bake_static_region`, `pico_driver.c`, commit
+`4be87cb4`) — the SAME change that fixed the PQ2 missing-foreground-objects bug also clears this. The user
+device-confirmed the SQ3 box/text now dismisses cleanly. The two earlier `kgraphics.c` attempts (below) were
+the wrong layer: this is the one-buffer `static_bg`/BACK-restore consistency problem, fixed in the driver, not
+a kernel-side flush gap. (Mechanism: the dismiss path's BACK restore now reproduces the correct background
+over the dismissed-box region because `static_bg` and `visual[0]` are kept consistent through the static draw
+path — the exact dismiss kernel sequence was not separately traced, but the same change set resolves it.)
+
+*Historical (kept for the record — the two REVERTED kgraphics.c attempts that produced NO change on device,
+confirming the fix belonged in the driver, not the kernel):*
 
 **What was tried and ruled out (both reverted):**
 1. **`graph_restore_box` FULL_REDRAW + forced flush** (`HAVE_PICO`). Hypothesis: SQ3's text boxes use the
