@@ -450,6 +450,12 @@ parse_arguments(int argc, char **argv, cl_options_t *cl_options, char **savegame
 	cl_options->res_version = SCI_VERSION_AUTODETECT;
 	cl_options->show_rooms = 0;
 
+	/* Pico calls freesci_main() repeatedly (once per game launch from the
+	   chooser loop), so getopt's global scanner state survives across runs.
+	   optind=0 forces both glibc and newlib's getopt to reinitialize; without
+	   it the second launch starts past argv's end and parses no options. */
+	optind = 0;
+
 #ifdef HAVE_GETOPT_LONG
 	while ((c = getopt_long(argc, argv, "qlvhmsDr:d:G:V:g:x:y:c:M:O:S:P:f:", options, &optindex)) > -1) {
 #else /* !HAVE_GETOPT_LONG */
@@ -1164,10 +1170,22 @@ main(int argc, char** argv)
 		exit(1);
 	}
 
+#ifdef HAVE_PICO
+	/* No home directory on Pico, so init_directories() leaves the cwd at the SD
+	   root and savegames would land in 0:/. Keep each game's saves (and any
+	   game-written "mirrored" files) inside its own gamedir instead. Point both
+	   work_dir and the save dir at resource_dir (the absolute gamedir): the
+	   gameplay chdir(work_dir) then makes the ambient cwd the gamedir, so the
+	   deferred restore's relative chdir(save_N) in _game_run also resolves there. */
+	strncpy(work_dir, resource_dir, PATH_MAX);
+	work_dir[PATH_MAX] = 0;
+	script_set_gamestate_save_dir(gamestate, resource_dir);
+#else
 	/* Set the CWD as the savegame dir */
 	cwd = sci_getcwd();
 	script_set_gamestate_save_dir(gamestate, cwd);
 	sci_free(cwd);
+#endif
 
 	if (sciv_action == ACTION_LIST_SAVEGAMES) {
 		list_savegames(gamestate);
