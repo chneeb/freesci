@@ -781,6 +781,28 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
     if (buffer == GFX_BUFFER_STATIC)
         pico_bake_static_region(S, dest);
 
+#ifdef FSCI_PROBE_GFX
+    /* [pbuf] probe: classify which buffer each cel targets and whether the static
+       bake fired, to pin down the PQ2 glovebox-closeup miss. The companion [pblit]
+       line lacks the buffer arg; this adds it.
+         buf=STATIC + baked=1                  -> kAddToPic picview (face/cars path)
+         buf=BACK                              -> window/control contents (bake never
+                                                  fires; next BACK restore erases it)
+       sbg/sbg_psram name the current static_bg so a stale/previous-room background
+       at glovebox-open time is visible (bake would write into the wrong room).
+       Strip with the other GFX probes once PQ2 is solved. */
+    {
+        const char *bn = buffer == GFX_BUFFER_STATIC ? "STATIC"
+                       : buffer == GFX_BUFFER_BACK   ? "BACK"
+                       : buffer == GFX_BUFFER_FRONT  ? "FRONT" : "?";
+        sciprintf("[pbuf] buf=%s dest=(%d,%d %dx%d) baked=%d sbg=%p sbg_psram=%d\n",
+                  bn, dest.x, dest.y, dest.xl, dest.yl,
+                  (buffer == GFX_BUFFER_STATIC) ? 1 : 0,
+                  (void *)S->static_bg,
+                  (S->static_bg && S->static_bg->psram_valid) ? 1 : 0);
+    }
+#endif /* FSCI_PROBE_GFX */
+
     return GFX_OK;
 }
 
@@ -850,6 +872,15 @@ static int pico_update(struct _gfx_driver *drv,
 {
     switch (buffer) {
     case GFX_BUFFER_BACK:
+#ifdef FSCI_PROBE_GFX
+        /* [pupd] probe: BACK restore region. This is the static_bg -> visual[0]
+           erase. If a glovebox-item rect (e.g. 243,121 or 263,109) is covered by
+           a BACK restore that is NOT followed by a redraw of that item before the
+           next FRONT flush, the item is erased. Compare these rects against the
+           [pblit]/[pbuf] item draws to see if an item draw is being undone. */
+        sciprintf("[pupd] BACK restore src=(%d,%d %dx%d) dest=(%d,%d)\n",
+                  src.x, src.y, src.xl, src.yl, dest.x, dest.y);
+#endif
         /* Restore background from PSRAM into visual[0] for this dirty region. */
         if (S->static_bg && S->visual[0]) {
             uint8_t *destptr = S->visual[0] + dest.y * PICO_XSIZE + dest.x;
@@ -861,6 +892,13 @@ static int pico_update(struct _gfx_driver *drv,
         break;
 
     case GFX_BUFFER_FRONT:
+#ifdef FSCI_PROBE_GFX
+        /* [pupd] probe: FRONT flush region = exactly what reaches the LCD. If a
+           glovebox-item rect is drawn to visual[0] but NO FRONT flush covers it,
+           the item is in the back buffer but never pushed to the panel. */
+        sciprintf("[pupd] FRONT flush dest=(%d,%d %dx%d)\n",
+                  dest.x, dest.y, src.xl, src.yl);
+#endif
         flush_region(S, dest.x, dest.y, src.xl, src.yl);
         /* Per-frame keyboard poll + pace. Covers animation loops that never
            call kGetEvent/kWait (e.g. the SQ3 intro), which otherwise run
@@ -881,6 +919,15 @@ static int pico_set_static_buffer(struct _gfx_driver *drv,
 {
     (void)priority;
     S->static_bg = pic;  /* save for BUFFER_BACK restoration */
+#ifdef FSCI_PROBE_GFX
+    /* [pstat] probe: every static_bg swap. If opening the glovebox emits a [pstat]
+       line, the closeup is a full kDrawPic (static_bg refreshed -> bake target is
+       correct); if it does NOT, the closeup is an inset/window and static_bg stays
+       the car interior (bake writes into the wrong room / BACK restore wipes it). */
+    sciprintf("[pstat] set_static_buffer pic=%p %dx%d psram=%d\n",
+              (void *)pic, pic ? pic->index_xl : 0, pic ? pic->index_yl : 0,
+              (pic && pic->psram_valid) ? 1 : 0);
+#endif /* FSCI_PROBE_GFX */
     return GFX_OK;
 }
 

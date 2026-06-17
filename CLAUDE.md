@@ -1889,14 +1889,32 @@ what prevents load text from leaking over the running game — it is essential, 
 ### FIXED (device-confirmed) — PQ2 missing foreground objects = static picviews erased by the BACK restore (one-buffer Pico vs three-buffer SDL)
 
 **DEVICE-CONFIRMED (2026-06-17):** the `pico_bake_static_region` fix works — the car-interior **face** and the
-**parking-lot cars** now render and persist. **One residual parked as OPEN:** the **glovebox closeup items**
-(2 of them) are still not visible. The face/cars and the glovebox use the same `GFX_BUFFER_STATIC` picview
-path, so the bake-in is *necessary but not sufficient* for the glovebox — its items are likely either (a)
-drawn before `static_bg` is set for that closeup (a `kDrawPic`/`set_static_buffer` ordering issue specific to
-the inset/closeup window), (b) clipped/positioned outside the baked region, or (c) submitted via a path the
-bake-in doesn't cover (e.g. a sub-window port whose static buffer differs). Next step when revisited: capture a
-`[pblit]` of the glovebox closeup and check whether the item cels reach the blit at all, and whether a BACK
-restore fires after they're drawn. Parked — not chased now.
+**parking-lot cars** now render and persist. **One residual OPEN:** the **glovebox closeup items** (2 of them)
+are still not visible.
+
+**PREMISE OVERTURNED (log mining 8b10806a + 632c9597, 2026-06-17) — the items are NOT static picviews and NOT
+drawn-once-then-erased; they are redrawn to `GFX_BUFFER_BACK` with real content EVERY focused frame.** The
+earlier guess (same `GFX_BUFFER_STATIC` picview path as face/cars, bake "necessary but not sufficient") is
+WRONG. Both post-bake logs show:
+- **632c9597:** items `(243,121 36x27) drawn=534` and `(263,109 19x44) drawn=309`, `supp≈0`, logged
+  `buf=BACK baked=0` on every frame they are focused — the exact live-cast pattern SQ3's working ego follows.
+  They reach `visual[0]` with correct pixels each frame.
+- **8b10806a:** in the idle glovebox state the items appear ZERO times; only the cursor `(160,150 16x16)`
+  redraws.
+
+So a bake/un-bake scheme (the approved "Option 1") is likely the WRONG fix — and it touches the shared draw
+path, risking the validated SQ3 render. Since SQ3 proves the single-buffer model renders such cels fine, the
+items *should* be visible; the bug is downstream of the draw. **Two hypotheses, neither resolvable from the
+current logs:** (1) the **FRONT flush dirty-rect** passed to `pico_update(FRONT)` never covers the item
+regions → visual[0] has them but the LCD is never updated there; (2) a **`static_bg` BACK restore** (which
+lacks the items) erases them on the transition-to-idle frame, and the items leave the cast so aren't redrawn.
+
+**Diagnostic added (uncommitted-then-committed): the `[pupd]` probe** in `pico_update` (`pico_driver.c`,
+`FSCI_PROBE_GFX`-gated) logs every FRONT flush rect and BACK restore rect — the deciding data that was never
+captured. **Next device capture:** open the glovebox closeup, move focus away so the items leave the cast,
+grep `[pupd]` around `(243,121)`/`(263,109)`. Item rect drawn but no FRONT flush covers it → hypothesis 1 (fix
+the flush dirty-rect, NOT a bake). BACK restore covers it with no following redraw before the flush →
+hypothesis 2. Held off building the bake rewrite until this capture picks the correct fix.
 
 **The `color_key` fix below is REAL but was NOT the missing-object cause (device-tested, did NOT help).** The
 user flashed the `color_key` int→byte truncation fix and reported the foreground objects still missing: "No
