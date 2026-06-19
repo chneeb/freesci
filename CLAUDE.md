@@ -1892,6 +1892,61 @@ what prevents load text from leaking over the running game — it is essential, 
 **parking-lot cars** now render and persist. **One residual OPEN:** the **glovebox closeup items** (2 of them)
 are still not visible.
 
+**PARKED (2026-06-19, user decision) — narrowed to a coordinate / partial-window panel-addressing asymmetry
+BELOW `flush_region`; two candidate mechanisms remain, neither resolvable offline.** All glovebox diagnostics
+have been removed from the tree (see "Diagnostics removed" below); this is a watch item, not active work. The
+rect/flush trace was exhausted and is verified correct — the items go through the full pipeline yet the panel
+stays empty (user device-confirmed "Still completely empty", freshest log pico.log 18:33 2026-06-17).
+What the trace established before parking:
+- **Drawn with real content:** view54 cel1 `(52,119 117x36) drawn=3126/supp=43`, cel4 `(41,139 96x34)
+  drawn=2251/supp=234`, loop1cel2 `(224,159→96x34 clipped) drawn=2054/supp=543` — non-zero opaque pixels.
+- **Baked into PSRAM static_bg** (`[pbuf] STATIC baked=1` then `BACK`, the working face/cars pattern) and
+  **explicitly FRONT-flushed** (`[pupd] FRONT flush` covering both item regions); steady state never
+  re-restores/overwrites the item region. So by the rect trace the items SHOULD be on screen.
+- **Color/palette/visual[0]/bake/overwrite are ALL ruled out (`bgrect.c` + the `[pflush]` byte-sample probe,
+  this session).** `[pflush]` dumped the *actual `visual[0]` index bytes* at the middle row right before the
+  SPI send: item1 `(52,119)` midrow read `255,1,1,1,1,255` (idx1→blue body, idx255→white edges) and item2
+  `(224,159)` read `8,4,6,6,6,4` (idx6→brown) — i.e. **visual[0] genuinely HOLDS the item pixels at flush
+  time**, real item colors, distinct from the dithered background (`bgrect.c` histogram confirmed the bg is
+  dithered: idx 8/136/255 etc., not the items' idx1/6). The flush loop and the probe read the *same*
+  `visual[0]+(y+row)*320+x` through the *same* palette as the visible door.
+- **DECISIVE white-pixel argument:** item1's midrow edges are value **255 (white)** — the *same* white index
+  the door paints (door midrow `255,15,11,15,11,255`). The door at X≈209 shows; item1 white at X=52 (same Y
+  band) does NOT, despite 29 separate flushes. Same buffer, same palette, same `flush_region` code — so the
+  asymmetry is purely **coordinate / partial-window addressing**, NOT color, palette, visual[0] contents,
+  bake, or overwrite. Yet the *full-screen* background flush (which spans x=52 AND x=224) displays fine →
+  those columns ARE addressable → the bug is specific to the **small partial-window** `define_region_spi`
+  flush at those coordinates.
+
+**Two remaining candidate mechanisms (unresolved, need a device flash to distinguish):**
+1. **Shipping-path missing FRONT flush for kAddToPic static items.** The door is flushed only because it is a
+   *live cast member* re-emitted every frame; the items rely on the one-time AddToPic draw/bake/flush. The
+   per-frame `PICO_DIAG_REFLUSH_STATIC` re-flush experiment (now removed) was meant to test this but its
+   device result was not captured before parking.
+2. **Rapid-fire `define_region_spi` timing / CS-settle bug** in the partial-window path — a small window set
+   immediately after the previous transmit may not latch the new address window before `hw_send_spi`.
+
+**Proposed one-shot experiment when work resumes (do this BEFORE more probes):** in `flush_region`, for one
+item-sized rect, fill `line_buf` with a SOLID known color (e.g. pure red) instead of the palette-mapped
+pixels and send it. If the solid block appears at the item coordinates → visual[0]/palette is irrelevant and
+the bug is upstream (the real pixels never reach this flush on the shipping path = mechanism 1). If the solid
+block does NOT appear → `define_region_spi`/SPI at those coordinates is the fault (mechanism 2). This isolates
+panel-addressing from buffer-contents in a single flash. Do NOT touch the shared compositing path until this
+picks the mechanism — the bake rewrite risk to the validated SQ3 render is real.
+
+**Diagnostics removed (2026-06-19) — tree is back to the committed baseline:** the uncommitted `[pflush]`
+probe (`flush_region`) and `[pcel]` probe (`operations.c` `_gfxop_draw_cel_buffer`) are deleted, and the
+always-on behavior-changing `PICO_DIAG_REFLUSH_STATIC` experiment (per-frame re-flush of baked AddToPic rects
++ its `static_regions[]`/`static_region_nr` struct fields) is fully removed. `pico_driver.c` and
+`operations.c` are now zero-diff vs HEAD. The COMMITTED `FSCI_PROBE_GFX`-gated probes `[pstat]`/`[pbuf]`/
+`[pupd]`/`[pblit]` are LEFT in place — they compile out of clean/default builds (option default OFF) and cost
+nothing, so they stay available for the next glovebox session. Desktop harnesses under `tests/` (`bgrect.c`,
+`viewdump.c`, `picbg.c`, `pridump.c`, `celblit.c`) are untracked and left on disk.
+
+*Historical (kept for the record — the two-hypothesis framing below was the pre-18:33-log state; the 18:33 log
++ user confirmation now SUPERSEDE it: both hypotheses' rect conditions are satisfied in the log yet the items
+are still empty, which is exactly why the next step moved from rect tracing to pixel-byte dumping):*
+
 **PREMISE OVERTURNED (log mining 8b10806a + 632c9597, 2026-06-17) — the items are NOT static picviews and NOT
 drawn-once-then-erased; they are redrawn to `GFX_BUFFER_BACK` with real content EVERY focused frame.** The
 earlier guess (same `GFX_BUFFER_STATIC` picview path as face/cars, bake "necessary but not sufficient") is
