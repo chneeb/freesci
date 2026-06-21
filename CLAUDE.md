@@ -1645,14 +1645,16 @@ legitimate growing working set as scripts load and plateau at 17, not accumulati
 did **not** revisit any single room, so the separately-tracked ~35 KB/revisit gfx-region growth (see
 DIAGNOSIS above) was not exercised here and remains open.
 
-### Static-buffer SRAM recovery (DONE — `.bss` → lazy malloc / link-discard) — ~28 KB, now tapped out
+### Static-buffer SRAM recovery (DONE — `.bss` → lazy malloc / link-discard / pool-shrink) — ~41 KB, now tapped out
 
 A link-time static array reserves `.bss` permanently — it lowers the `mallinfo` arena ceiling
 whether or not the feature ever runs. Converting the array to a `static T *p = NULL` pointer that is
 `sci_malloc`'d on first use costs **zero** SRAM until the code path actually fires, and on Pico that
-path never fires for the buffers below — so the recovery is pure. After this work the arena ceiling
+path never fires for the buffers below — so the recovery is pure. After the first wave the arena ceiling
 rose **427,744 → 444,136** (+16.4 KB observed; ~25 KB nominal across the first three), plus a later
-~2.8 KB from the bottom two rows (verified against the ELF `.bss`).
+~2.8 KB from the bottom two rows (verified against the ELF `.bss`). A second wave (2026-06-21) added a
+further **+12.6 KB** of heap ceiling (clean-build `__end__` 0x2000f150 → 0x2000c020, heap span
+**462,512 → 475,104 B**) via the FatFS handle-pool shrink + the opl2/adlib link-discard (last two rows).
 
 | Buffer | File | Size | Why free on Pico |
 |--------|------|------|------------------|
@@ -1660,20 +1662,32 @@ rose **427,744 → 444,136** (+16.4 KB observed; ~25 KB nominal across the first
 | `said_tree[500]` + `said_tokens[128]` | `said.c` / `said.y` (alloc in `said()` under `if (s->parser_valid)`) | ~4.5 KB | `said()` only builds its tree when `parser_valid`, which needs a loaded vocab; Pico disables vocab → always 0 → dead |
 | `bank` + `channels` (in `amiga.c`) | `softseq/amiga.c`, ref in `softsequencers.c` | ~1.5 KB | PicoCalc has no Amiga audio. `&sfx_softseq_amiga` is `#ifndef HAVE_PICO`-guarded; `scisoftseq` is a STATIC lib so the linker discards `amiga.o` entirely (`.bss` **and** flash) once unreferenced — no CMake change needed |
 | `input[1024]` + `inputbuf[256]` | `main.c` `get_gets_input` / `scriptdebug.c` `_debug_get_input_default` | ~1.3 KB | Interactive debug console reads `stdin` via `fgets`; Pico has no stdin so neither runs. Lazy `sci_malloc` on first call → 0 `.bss`, 0 heap on Pico |
+| `fat_files[MAX_FDS]` FatFS handle pool | `pico_io.c` (`MAX_FDS 16→8`) + `ffconf.h` (`FF_FS_TINY 0→1`) | ~9 KB | FreeSCI rarely opens >2 files at once; 8 handles is plenty. `FF_FS_TINY=1` collapses each `FIL`'s own 512 B sector buffer into the shared `FATFS` window → each handle drops ~608 B → ~96 B. Pool went 9728 B → 768 B (**device-confirmed working**) |
+| `adlib_sbi` 1152 + `sci_adlib_vol_tables` 1024 + `adlib_reg_L/R` 512 + `KSL_TABLE/SL_TABLE/RATE_0` ~576 | `opl2.c` / `adlib.c` / `fmopl.c`, ref in `softsequencers.c` | ~3.3 KB | Sound is off on Pico (`-q` → NOSOUND, `sfx_init` early-returns before any softseq runs). Gating `&sfx_softseq_opl2` behind `#if !defined(HAVE_PICO) || defined(PICO_PWM_AUDIO)` link-discards opl2.o → fmopl.o → adlib.o together. Returns automatically with `-DPICO_PWM_AUDIO=ON` |
 
-- **adlib/`fmopl.c` — nothing to recover.** The big synth tables are *already* lazy `static int *`
-  pointers (NULL under NOSOUND, malloc'd in `OPLBuildTables`, `fmopl.c:610-627`); only ~650 B of tiny
-  lookup tables remain in `.bss`. (This corrected the stale "~34 KB `ENV_CURVE` in `.bss`" claim.)
+- **The two synth `.bss` claims are now BOTH stale — superseded by the opl2/adlib link-discard above.**
+  The big `fmopl.c` synth tables are *already* lazy `static int *` (NULL under NOSOUND); the remaining
+  ~3.3 KB of small Adlib/OPL `.bss` lookup tables (`adlib_sbi`/`sci_adlib_vol_tables`/`adlib_reg_L/R`/
+  `KSL_TABLE`/`SL_TABLE`/`RATE_0`) used to be "**deliberately kept** for the PWM-Adlib path (roadmap #3)" —
+  but they cost ceiling **every** sound-off build, so they are now link-discarded by default and re-enter
+  with `-DPICO_PWM_AUDIO=ON`. No SRAM is "saved for later" while sound is off; the tables come back the
+  moment the PWM-Adlib work is built.
 - **Both conversions preserve the capability** — lazy malloc ≠ deletion. If vocab/parser is
   re-enabled (roadmap #1) or SCI01/SCI1 games are run, the buffers allocate on demand exactly as before.
 - **`said.y` was edited in lockstep with the generated `said.c`** so a future bison regen won't clobber
   the change.
-- **The amiga link-discard is the cleanest pattern** for dead synths: guard the registration-array
-  reference under `#ifndef HAVE_PICO` and the static lib drops the whole object. The remaining sound
-  `.bss` (`adlib_sbi` 1152, `sci_adlib_vol_tables` 1024, `adlib_reg_L/R` 512, `KSL_TABLE`/`SL_TABLE`
-  ~576, all from `opl2.c`/`adlib.c`/`fmopl.c`) is **deliberately kept** — that is the planned PWM-Adlib
-  path (roadmap #3), so reclaiming it now just gets re-spent when sound lands.
-- **Static mining is now tapped out** (~28 KB total). The ~35 KB/revisit accumulation that was the
+- **The amiga / opl2 link-discard is the cleanest pattern** for dead synths: guard the
+  registration-array reference (`sw_sequencers[]` in `softsequencers.c`) so the static lib drops the
+  whole object graph. amiga.o is `#ifndef HAVE_PICO`; opl2.o (which transitively pulls fmopl.o + adlib.o)
+  is `#if !defined(HAVE_PICO) || defined(PICO_PWM_AUDIO)`. `sfx_find_softseq` is never called under
+  NOSOUND, so the array's default-`[0]` shifting from opl2 to SN76496 is inert.
+- **Not a reclaim, but related (CPU only): `gfx_sci0_pic_colors` init-once on Pico** (`sci_pic_0.c`
+  `gfxr_init_static_palette`). The 256-entry blend table stays resident (2 KB — it's a writable
+  per-pic `colors` slot, can't be const flash), but its 256× `sqrt` INTERCOL recompute is now done
+  **once** instead of on every pic decode (`_gfxr_pic0_colors_initialized = 1` under `#ifdef HAVE_PICO`).
+  Desktop keeps recompute-every-time because `sci0_palette` is runtime-mutable via the debug console
+  (`con_hook_int`, `main.c`); Pico has no console so the palette never changes → safe to cache.
+- **Static mining is now tapped out** (~41 KB total). The ~35 KB/revisit accumulation that was the
   remaining wall is now **RESOLVED** (two caller-side leaks: cwd + console scrollback — see the RESOLVED
   note above). What's left is the *transient* decode peak + fragmentation OOM (a contiguous block denied
   while KB remain free), not a steady-state baseline climb — attack it via the per-cel decode scratch or

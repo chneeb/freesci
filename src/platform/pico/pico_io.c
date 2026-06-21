@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include "ff.h"
 
-#define MAX_FDS 16
+#define MAX_FDS 8
 
 /* fd 0/1/2 are stdin/stdout/stderr — we don't intercept those */
 #define FD_OFFSET 3

@@ -270,8 +270,14 @@ gfxr_init_static_palette()
 			gfx_sci0_pic_colors[i].b = INTERCOL(gfx_sci0_image_colors[sci0_palette][i & 0xf].b,
 							    gfx_sci0_image_colors[sci0_palette][i >> 4].b);
 		}
+#ifdef HAVE_PICO
+		/* No debug console on Pico, so sci0_palette never changes at
+		   runtime — compute the blend once instead of on every pic decode. */
+		_gfxr_pic0_colors_initialized = 1;
+#else
 		WARNING("Uncomment me after fixing sci0_palette changes to reset me");
                 /*  _gfxr_pic0_colors_initialized = 1; */
+#endif
 	}
 }
 

@@ -33,7 +33,9 @@
 
 #include "../softseq.h"
 
+#if !defined(HAVE_PICO) || defined(PICO_PWM_AUDIO)
 extern sfx_softseq_t sfx_softseq_opl2;
+#endif
 extern sfx_softseq_t sfx_softseq_SN76496;
 extern sfx_softseq_t sfx_softseq_pcspeaker;
 #ifndef HAVE_PICO
@@ -43,7 +45,12 @@ extern sfx_softseq_t sfx_softseq_mt32;
 extern sfx_softseq_t sfx_softseq_fluidsynth;
 
 static sfx_softseq_t *sw_sequencers[] = {
+#if !defined(HAVE_PICO) || defined(PICO_PWM_AUDIO)
+	/* Sound-off Pico build drops this reference so the linker discards
+	   opl2.o (which pulls fmopl.o + adlib.o) from the sfx static libs
+	   (~3.3KB .bss). Returns automatically with -DPICO_PWM_AUDIO=ON. */
 	&sfx_softseq_opl2,
+#endif
 /*	&sfx_softseq_mt32, */
 	&sfx_softseq_SN76496,
 	&sfx_softseq_pcspeaker,
