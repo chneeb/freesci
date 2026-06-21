@@ -28,6 +28,7 @@ int freesci_main(int argc, char **argv);
 #ifdef PICO_PACK_VOCAB
 void pico_reset_resident_vocab(void);  /* game.c */
 #endif
+void pico_reset_decode_scratches(void);  /* operations.c */
 
 /* ---- HardFault diagnostics (RP2350 / Cortex-M33) ---------------------- */
 /* The RP2350 has no MMU, so a wild pointer doesn't fault at the access — but a
@@ -234,6 +235,17 @@ int main(void)
            re-packs its own; kept resident only across in-game restores. */
         pico_reset_resident_vocab();
 #endif
+        /* Reset the arena before the next game.  The prior game ratcheted the
+           picolibc break to the physical ceiling (it never returns sbrk'd memory
+           on its own), so without this the next game inherits a maxed, fragmented
+           arena and OOMs on a routine alloc despite plenty of total free space
+           (e.g. loading PQ2 right after SQ3).  Free the permanent decode scratches
+           (which otherwise pin the break high), then malloc_trim releases the now-
+           free top of the heap via sbrk, so the next game grows from a low arena —
+           a cold-boot heap without the power cycle. */
+        pico_reset_decode_scratches();
+        malloc_trim(0);
+        MEMPRINT("post-trim");
         /* After the game exits, loop back to the chooser */
     }
 }

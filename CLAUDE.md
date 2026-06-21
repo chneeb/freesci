@@ -862,7 +862,48 @@ contiguous block for it (the `decompress0.c:324` OOM, the wall the prior several
   7506 + view 10797 both went through the scratch, NO `decompress0.c:324` OOM). The decode-output OOM lever is
   closed — it got the game *further* than any prior restore session.
 
-### OPEN — arena-ratchet ceiling is now the binding constraint (one restore → physical RAM wall, log 20bb9822)
+### RESOLVED (device-confirmed 2026-06-21) — the two arena-ratchet OOMs are closed: restore keeps visual[0] resident + the chooser resets the arena between games
+
+The arena ratchet manifested as **two distinct OOMs**, both now fixed and device-confirmed (multiple
+in-game restores AND quit-SQ3→load-PQ2 all run with no crash):
+
+1. **Post-restore OOM = the 64 KB `visual[0]` RE-ALLOCATION, not the ratchet itself** (`savegame.c`
+   `gamestate_restore`, `HAVE_PICO`). The captured log decided it: after several restores the OOM was
+   `pico_alloc_visual` (`pico_driver.c:72`, 64000 B) with **140 KB free but no 64 KB-contiguous run**, arena
+   pinned at the physical ceiling. The restore relief was **freeing `visual[0]` before deserialization then
+   re-allocating 64 KB after `fclose`** — trading the one 64 KB-contiguous block it already held for the
+   deserializer's softer ~16 KB needs, but then unable to re-find 64 KB on the fragmented restore heap (the
+   single largest contiguous requirement on the path). **Fix: do NOT free/re-alloc `visual[0]` on the restore
+   path** — keep it resident throughout. The deserializer's ~16 KB holes still come from the retained LRU /
+   script-buf / VM-value-stack frees (the VM stack free alone is a guaranteed 16 KB-contiguous hole). Removed
+   both the `pico_free_visual` (was ~4828) and the post-`fclose` `pico_alloc_visual` (was ~4862). Note the
+   per-room decode path already uses the visual[0]-REUSE pattern (decodes into the resident buffer, never
+   frees it), so its `pico_alloc_visual` at `operations.c:2485` is a no-op while visual[0] is resident — the
+   restore path was the *sole* remaining place still re-acquiring the 64 KB block.
+
+2. **Cross-game-switch OOM = the next game inherits the prior game's maxed, fragmented arena** (`pico_main.c`
+   chooser loop + `operations.c` `pico_reset_decode_scratches`). picolibc never returns sbrk'd memory, so
+   after SQ3 ratcheted the break to the **physical ceiling** (475,100 B clean / 436,232 B diagnostic) on its
+   first room decode, quitting to the chooser left the arena pinned there. Loading PQ2 (a heavier game: 1843
+   vocab words vs SQ3's 1489) into that maxed/fragmented leftover OOM'd at `decompress0.c:50` (`malloc 8502
+   failed`, 184 KB free but no contiguous run). **PQ2 from a cold boot loads fine** — proving it was purely
+   the inherited arena, not PQ2 size. **Fix: reset the arena at the chooser, the one safe quiescent point**
+   (unlike the restore path where `malloc_trim` was ruled out — see the RULED OUT note below — because it
+   returned bytes the restore immediately needed). After `freesci_main` returns: free the two permanent decode
+   scratches (B-1 32 KB priority + B-1.2 16 KB decompress — they otherwise pin the break high and block the
+   trim), then `malloc_trim(0)` releases the now-free top of the heap via `sbrk`, so the next game grows from a
+   low arena — a cold-boot heap without the power cycle. The next game re-allocates its scratches contiguously
+   on its first pic decode. The new `[mem] post-trim` line shows the arena dropping off the ceiling.
+
+This is the first safe win against the long-parked "lever 2": the ratchet *within* a single game session is
+unchanged (the break still climbs to the ceiling during play and stays there until exit), but the two places
+it became **fatal** — post-restore and cross-game — are now closed. The historical analysis below is kept for
+the record (it correctly diagnosed the ratchet mechanism; the fix turned out to be removing the 64 KB churn
+and resetting at the chooser, not driving the restore peak below the standing arena).
+
+---
+
+*Historical (the OPEN analysis that led here — arena-ratchet ceiling as the binding constraint, log 20bb9822):*
 
 The decompress-scratch fix above unblocked room 15, which then hit the **next** OOM — and it is the parked
 "lever 2" (arena ratchet), now fatal rather than a slow creep. Tail of log 20bb9822:

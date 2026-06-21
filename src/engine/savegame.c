@@ -4802,13 +4802,19 @@ gamestate_restore(state_t *s, char *dirname)
 	   and that teardown reads these buffers, so free them now:
 	     - the resmgr's decompressed-resource LRU cache (reloads on demand),
 	     - every outgoing script's bytecode buf (~30KB, the 2x script working set),
-	     - the 16KB VM value stack (one contiguous malloc -> a guaranteed 16KB hole),
-	     - visual[0], the 64KB display back-buffer (re-allocated after fclose, before
-	       _reset_graphics_input repaints it).
+	     - the 16KB VM value stack (one contiguous malloc -> a guaranteed 16KB hole).
 	   Freed pointers are NULLed; the matching _sm_deallocate cases are null-guarded
-	   under HAVE_PICO so the later game_exit teardown skips them cleanly. */
+	   under HAVE_PICO so the later game_exit teardown skips them cleanly.
+
+	   NB visual[0] (the 64KB back-buffer) is deliberately NOT freed here. Freeing it
+	   traded the one 64KB-contiguous block we already hold for the deserializer's
+	   softer ~16KB needs, but then the post-fclose pico_alloc_visual had to re-find
+	   64KB contiguous on a heap fragmented by restore — which is the single largest
+	   contiguous requirement on the restore path and the alloc that actually OOM'd
+	   (device log: pico_alloc_visual, 64000 B, 140KB free but no 64KB run, arena at
+	   the physical ceiling). Keeping visual[0] resident removes that requirement; the
+	   ~16KB deserialization holes still come from the LRU/script/stack frees above. */
 	{
-		extern void pico_free_visual(gfx_driver_t *drv);
 		int _si;
 		scir_free_all_lru(s->resmgr);
 		for (_si = 0; _si < s->seg_manager.heap_size; _si++) {
@@ -4824,8 +4830,6 @@ gamestate_restore(state_t *s, char *dirname)
 				_m->data.stack.entries = NULL;
 			}
 		}
-		if (s->gfx_state && s->gfx_state->driver)
-			pico_free_visual(s->gfx_state->driver);
 	}
 #endif
 
@@ -4852,16 +4856,6 @@ gamestate_restore(state_t *s, char *dirname)
 /* End of auto-generated CFSML data reader code */
 
 	fclose(fh);
-
-#ifdef HAVE_PICO
-	/* Re-allocate the 64KB visual back-buffer freed before deserialization, so it
-	   is live again before _reset_graphics_input repaints it below. */
-	{
-		extern void pico_alloc_visual(gfx_driver_t *drv);
-		if (s->gfx_state && s->gfx_state->driver)
-			pico_alloc_visual(s->gfx_state->driver);
-	}
-#endif
 
 	if ((retval->savegame_version < FREESCI_MINIMUM_SAVEGAME_VERSION) ||
 	    (retval->savegame_version > FREESCI_CURRENT_SAVEGAME_VERSION)) {

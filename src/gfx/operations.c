@@ -79,6 +79,25 @@ extern byte *pico_get_visual(gfx_driver_t *drv);
 extern void pico_connect_engine_priority(gfx_pixmap_t *priority_map);
 extern void pico_render_background(gfx_driver_t *drv);
 extern void pico_setup_sci0_palette(gfx_driver_t *drv);
+
+/* Free the permanent decode scratches when a game fully exits to the chooser.
+   They are never freed during a game (the whole point of the permanent-scratch
+   pattern), but between games they pin the picolibc break high — blocking the
+   chooser-loop malloc_trim that resets the arena so the next game grows from a
+   fresh low heap instead of inheriting the prior game's maxed-out ceiling.  The
+   next game re-allocates them contiguously on its first pic decode. */
+void
+pico_reset_decode_scratches(void)
+{
+	if (g_pico_priority_scratch) {
+		free(g_pico_priority_scratch);
+		g_pico_priority_scratch = NULL;
+	}
+	if (g_pico_decompress_scratch) {
+		free(g_pico_decompress_scratch);
+		g_pico_decompress_scratch = NULL;
+	}
+}
 #endif
 
 #define PRECISE_PRIORITY_MAP /* Duplicate all operations on the local priority map as appropriate */
