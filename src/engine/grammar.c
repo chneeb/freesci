@@ -29,6 +29,16 @@
 #include <stdarg.h>
 #include <string.h>
 
+#ifdef HAVE_PICO
+#include <malloc.h>   /* mallinfo() for the per-command GNF candidate-cap floor */
+/* Per-command GNF candidate expansion (vocab_gnf_parse) multiplies candidates
+   word-by-word. Against a large grammar (e.g. PQ2's 1843 words) an ambiguous
+   multi-word command can exhaust the heap in _vinsert. Abort expansion when
+   free heap drops below this floor: keep the candidates gathered so far and
+   continue the parse. Self-gating — small grammars (SQ3) never approach it. */
+#define PICO_GNF_HEAP_FLOOR (24 * 1024)
+#endif
+
 #define TOKEN_OPAREN 0xff000000
 #define TOKEN_CPAREN 0xfe000000
 #define TOKEN_TERMINAL_CLASS 0x10000
@@ -655,6 +665,10 @@ vocab_gnf_parse(parse_tree_node_t *nodes, result_word_t *words, int words_nr,
     parse_rule_list_t *new_work = NULL;
     parse_rule_list_t *reduced_rules = NULL;
     parse_rule_list_t *seeker, *subseeker;
+#ifdef HAVE_PICO
+    int pico_floor_hit = 0;     /* set when free heap drops below the floor */
+    int pico_vinsert_ctr = 0;   /* throttle the (non-cheap) mallinfo() check */
+#endif
 
     if (verbose)
       sciprintf("Adding word %d...\n", word);
@@ -686,13 +700,30 @@ vocab_gnf_parse(parse_tree_node_t *nodes, result_word_t *words, int words_nr,
 
 	  subseeker = tlist;
 	  while (subseeker) {
-	    if (subseeker->rule->id == my_id)
-	      new_work = _vocab_add_rule(new_work, _vinsert(seeker->rule, subseeker->rule));
+	    if (subseeker->rule->id == my_id) {
+	      parse_rule_t *ins = _vinsert(seeker->rule, subseeker->rule);
+	      new_work = _vocab_add_rule(new_work, ins);
+	    }
 
 	    subseeker = subseeker->next;
+#ifdef HAVE_PICO
+	    if ((++pico_vinsert_ctr & 0x3f) == 0
+		&& mallinfo().fordblks < PICO_GNF_HEAP_FLOOR) {
+	      pico_floor_hit = 1;
+	      break;
+	    }
+#endif
 	  }
 	}
 
+#ifdef HAVE_PICO
+	if (pico_floor_hit) {
+	  sciprintf("[gnf] candidate expansion hit heap floor at word"
+		    " %d/%d, truncating (free=%dB)\n",
+		    word, words_nr, mallinfo().fordblks);
+	  break;
+	}
+#endif
 	seeker = seeker->next;
       }
       vocab_free_rule_list(reduced_rules);

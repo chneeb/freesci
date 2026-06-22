@@ -1785,6 +1785,33 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
    The diagnostic `[gnf]` line (`kstring.c`, `HAVE_PICO`) prints the per-command rebuild's transient
    bytes + free heap. Leave it until the parser has more device mileage, then strip with the other probes.
 
+   **FIXED (device-confirmed) — heavy-grammar GNF candidate-expansion OOM, fixed by a free-heap floor in
+   `vocab_gnf_parse` (`grammar.c`, `HAVE_PICO`).** PQ2 (1843 words vs SQ3's ~1489) OOM-halted at
+   `grammar.c:205` `_vinsert` on a multi-word ambiguous command ("lock car doors"). Root cause: the
+   per-command candidate expansion in `vocab_gnf_parse` multiplies candidates **word-by-word** — for each
+   non-final word, every surviving candidate with a remaining nonterminal is matched against the *entire*
+   GNF rule list and `_vinsert`ed, so against a large grammar an ambiguous 3-word command fans out
+   multiplicatively until the heap is exhausted (each `_vinsert` ≈ 248–268 B). This is a *transient
+   parse-time* blowup, NOT a headroom problem — SQ3's small grammar parses fine with *less* free heap
+   (~59–70 KB) than PQ2's failure point (~74 KB), so raising the baseline doesn't help; only the heavy
+   grammar explodes.
+   - **Fix:** inside the `subseeker`/`seeker` loops, every **64** subseeker iterations
+     (`++pico_vinsert_ctr & 0x3f`) check `mallinfo().fordblks`; if free heap is below
+     `PICO_GNF_HEAP_FLOOR` (**24 KB**), set `pico_floor_hit`, break both loops, free `reduced_rules`, and
+     continue the parse with the candidates gathered so far. Prints a permanent telltale
+     `[gnf] candidate expansion hit heap floor at word N/M, truncating (free=…B)`.
+   - **Why truncation doesn't break parsing:** the explosion is mostly *junk* candidates — grammar
+     ambiguity spawning thousands of alternative GNF paths, but the real sentence needs only **one** valid
+     path, gathered early in the list. Lopping off the combinatorial tail keeps the matching candidate, so
+     the command still resolves. Device-confirmed: "lock car doors" truncated at word 0 (free fell to a few
+     KB) yet parsed correctly, three times; the 2-word case never hit the floor at all.
+   - **Self-gating** (satisfies the "only large grammar" intent with no per-game threshold): small grammars
+     never approach the 24 KB floor, so SQ3 is untouched in practice. Fully `HAVE_PICO`-gated (incl. the
+     `<malloc.h>` include) → desktop is byte-for-byte unchanged. The interval was tightened 256→64 after the
+     first device run showed a single 256-window could plunge free heap ~69 KB → ~3.4 KB (caught, but thin
+     margin); at 64 it aborts nearer the floor. **`grammar.c` is hand-written, not generated** — no
+     `grammar.y` to regenerate (contrast `said.c`←`said.y`).
+
    ---
    *Original design notes (kept for context / re-measuring other games):*
 
