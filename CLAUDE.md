@@ -2293,6 +2293,29 @@ submitted" trace, not the blit-side `[pblit]`.
 1-in-8 throttle `if ((pb_call++ & 7) == 0)` and the suppressed-only filter were removed, plus a `<TOP>`
 tag added, for this diagnosis; restore the throttle and drop the every-cel/`<TOP>` instrumentation when done.)
 
+### OPEN (newly reported 2026-06-22, needs capture) — SQ3 intro "Pirates of Pestulon" drawn on WHITE instead of over the SQ3 logo
+
+User-reported on device: in the SQ3 intro the **"Pirates of Pestulon"** title/credit is drawn on a **white
+background** instead of composited over the actual **Space Quest 3 logo** that should be behind it. The logo
+backdrop is missing/blanked under the title. User offered a photo ("I could provide a photo if I am fast
+enough") — **not yet captured**, and **no `FSCI_PROBE_GFX` pico.log of the intro exists yet**, so this is a
+report, not a diagnosis.
+
+**Likely mechanism family (unconfirmed — do NOT act before a capture):** this is the SQ3 logo *screen*, which
+is exactly the pic the pic-open-flash fix (above) staged through `pico_render_background`. Two candidate
+causes, both in the single-`visual[0]` / static-bake area already mapped:
+1. **The logo background pic never composited under the title** — if the Pestulon title is a static picview
+   (`kAddToPic`) or a separate pic drawn after a *blank/white* fill, the `visual[0]` it lands on is white
+   rather than the logo. Same one-buffer-vs-three-buffer class as the PQ2 static-picview bug
+   (`pico_bake_static_region`) and the pic-open staging change.
+2. **Palette/`color_key` on the logo pic** — a white-index background not being painted (cf. the `color_key`
+   int→byte truncation fix) or the logo decoding into a buffer that the title's flush overwrites.
+
+**Decisive next step (no code yet):** capture an `FSCI_PROBE_GFX` pico.log across the SQ3 intro (logo →
+Pestulon title) and grep `[pbuf]`/`[pupd]`/`[pblit]` for the logo pic's background draw vs the title cels —
+distinguish "logo pic never staged into `visual[0]`" (cause 1) from "logo staged then overwritten white"
+(cause 2). Held per the run-first / don't-touch-the-shared-compositing-path rule.
+
 ### Known graphics limitations on Pico (not yet fixed)
 
 These are correctness gaps in the Pico render path vs the SDL pipeline. Lower priority than the
@@ -2312,6 +2335,17 @@ roadmap above (gameplay works without them), but documented so they aren't redis
   (`gfx_copy_pixmap_box_i`) is a no-op, so sprite priorities accumulate and z-ordering degrades the
   longer you stand in a room. Proper fix: keep the static priority map PSRAM-resident and page the
   dirty rect back into an SRAM scratch on BACK-buffer update (same scratch the occlusion fix uses).
+- **Actors draw OVER static picviews (`kAddToPic` scene objects) instead of being occluded by them.**
+  Device-observed (user-reported 2026-06-22): in PQ2 the ego/characters paint over the **parking-lot
+  cars**; in SQ3 over the **ship engine/motivator**. **This is NOT a new regression** — it is the
+  documented residual of the `pico_bake_static_region` fix (see the FIXED glovebox/PQ2 note above):
+  that fix bakes a static picview's *color* into the PSRAM `static_bg` so it renders, but its *priority*
+  is never baked into the priority map (Pico's `priority_map`/`static_priority_map` `index_data` is in
+  PSRAM/NULL, so `_gfxop_draw_priority` is skipped for picviews). With no picview priority in the map,
+  the per-pixel occlusion test always lets the later-drawn actor win → the actor paints over the
+  car/motivator. Same root family as the two limitations above (last-drawn-wins + `static_priority_map`
+  aliasing). Fix folds into the priority-occlusion work: bake static-picview priority into the
+  (PSRAM-resident) priority map alongside the color bake, then gate the actor's color write on it.
 
 ### SCI version support on Pico — SCI0 ONLY (SCI1/VGA legibly rejected, not supported)
 
