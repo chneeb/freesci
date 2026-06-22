@@ -2293,7 +2293,45 @@ submitted" trace, not the blit-side `[pblit]`.
 1-in-8 throttle `if ((pb_call++ & 7) == 0)` and the suppressed-only filter were removed, plus a `<TOP>`
 tag added, for this diagnosis; restore the throttle and drop the every-cel/`<TOP>` instrumentation when done.)
 
-### OPEN (newly reported 2026-06-22, needs capture) — SQ3 intro "Pirates of Pestulon" drawn on WHITE instead of over the SQ3 logo
+### RESOLVED (device-confirmed 2026-06-22, all 3 scenes) — SQ3 intro background loss was the overlay (`add_to_pic`) path drawing onto a PSRAM-offloaded base; `color_key` only UNMASKED it
+
+**Device-confirmed fixed:** all three reported cases — the SQ3 logo behind "Pirates of Pestulon", the
+starfield behind the Two-Guys panels, AND a third overlay scene — now composite correctly. The fix is in
+`gfxr_interpreter_calculate_pic` (`sci_resmgr.c`, SCI0 Pico decode block, `HAVE_PICO`-only).
+
+**Root cause — the Pico SCI0 overlay decode never preserved the base pic.** `overlay:` (sel 0x0111) →
+`kDrawPic` with `add_to_pic=1` → `gfxop_add_to_pic` → `gfxr_add_to_pic`, which composites the overlay pic
+onto the cached base pic (`res->scaled_data.pic`) with `DRAWPIC01_FLAG_OVERLAID_PIC`. Desktop preserves the
+base by `memcpy`ing `undithered_buffer` back into `visual_map->index_data` before drawing the overlay commands
+(`sci_resmgr.c` `#else` branch) and does **not** clear. The Pico branch did neither: it allocated a fresh
+decode buffer, called `gfxr_clear_pic0` **unconditionally** (fills the play area with **0xff = white**,
+`sci_pic_0.c:354`), then drew only the overlay's own commands — so the base logo/starfield was gone and
+untouched areas were white. (On Pico the base's `visual_map->index_data` is also PSRAM-offloaded/NULL, so the
+buffer started empty anyway.)
+
+**Why it looked like a `color_key` regression (commit `4be87cb4`) but wasn't.** Before `4be87cb4`,
+`pico_blit_indexed` truncated `color_key -1 → 255`, so index-255 (white) was wrongly treated as transparent.
+The overlay buffer's white clear areas were therefore **skipped** at blit, letting the previously-drawn base
+(still in `visual[0]` from the earlier `drawPic`) show through → looked correct by accident. The `color_key`
+fix made white a real paintable color, so the white clear now **painted over** `visual[0]`, wiping the base.
+The `color_key` fix is **correct** (needed for PQ2's NONE-keyed white backgrounds) — it merely removed the
+camouflage on this pre-existing overlay bug. The earlier `pico_bake_static_region` suspicion was **wrong**:
+offline disassembly of the intro scripts (script 1 = logo, script 19 = starfield) showed both use
+`overlay:`/`drawPic:` and **never** `addToPic:`, so the STATIC bake path was never involved.
+
+**Fix.** In the SCI0 Pico decode block: `restore_base = (flags & DRAWPIC01_FLAG_OVERLAID_PIC) &&
+visual_map->psram_valid && priority_map->psram_valid`. When set, instead of `gfxr_clear_pic0`, `psram_load`
+the base visual (`index_xl*index_yl` bytes) and base priority (nibble-packed, `(npix+1)>>1`) from the base's
+own `psram_addr` back into the fresh decode buffers; the overlay's commands then draw on top, and the
+composited result re-offloads as usual. The base's `psram_valid`/`psram_addr` survive because the PSRAM bump
+arena is only rewound on a fresh `drawPic` (`gfxop_new_pic` → `gfxr_free_all_pics` → `psram_reset`), never on
+`add_to_pic`, and the fields aren't overwritten until the re-offload (after the clear point). The non-overlay
+path is unchanged (still clears). The Pico analogue of the desktop `undithered_buffer` restore; keeps the
+`color_key` fix intact so PQ2 is unaffected. Both Pico configs build clean; desktop untouched.
+
+---
+
+*Historical (the OPEN investigation that led here — kept for the record):*
 
 User-reported on device: in the SQ3 intro the **"Pirates of Pestulon"** title/credit is drawn on a **white
 background** instead of composited over the actual **Space Quest 3 logo** that should be behind it. The logo
@@ -2311,10 +2349,71 @@ causes, both in the single-`visual[0]` / static-bake area already mapped:
 2. **Palette/`color_key` on the logo pic** — a white-index background not being painted (cf. the `color_key`
    int→byte truncation fix) or the logo decoding into a buffer that the title's flush overwrites.
 
-**Decisive next step (no code yet):** capture an `FSCI_PROBE_GFX` pico.log across the SQ3 intro (logo →
-Pestulon title) and grep `[pbuf]`/`[pupd]`/`[pblit]` for the logo pic's background draw vs the title cels —
-distinguish "logo pic never staged into `visual[0]`" (cause 1) from "logo staged then overwritten white"
-(cause 2). Held per the run-first / don't-touch-the-shared-compositing-path rule.
+**PHOTO EVIDENCE (device, IMG_1773 mid-transition + IMG_1775 settled, 2026-06-22):**
+- **IMG_1773:** a left-to-right **wipe/curtain transition** is revealing a **flat white** screen carrying the
+  red "The Pirates of Pest…" script, *replacing* the blue SQ3 logo — which is still visible un-wiped on the
+  right, sitting on a **dark** background. So the logo screen IS on dark, and the Pestulon screen wipes in
+  over it.
+- **IMG_1775:** settled full screen — "The Pirates of Pestulon" red script on **flat white**, logo gone.
+- **Two refinements this gives us:** (1) the **red script decodes perfectly** (correct shape/colour/stair-
+  stepping) → the cel/text path is fine; the bug is **purely the background** (white where it should be
+  logo-on-dark). (2) There is a **real wipe transition** logo→white — a wipe is a `kDrawPic` *open
+  animation*, i.e. SQ3 issues a genuine **new pic draw**, not a cel overlay on the persisting logo. So the
+  white is a *decoded pic background*, not a failure to composite a picview over the logo.
+
+**Narrowed hypotheses (post-photo):**
+- **H-bg-colour:** the new Pestulon pic's background should be dark (logo/space showing or a dark card) and
+  is decoding/filling **white** — a palette / fill-colour / `color_key` issue on the *background* of that
+  specific pic (cf. the `color_key` int→byte fix, but here the wrong colour is white not transparent). The
+  flat (un-dithered) white argues for a fill/clear-colour bug rather than a dithered light card.
+- **H-no-overlay:** the logo is supposed to **persist** under the Pestulon text (text added via picview /
+  `kAddToPic`, NOT a full new pic), and Pico is wrongly doing a full white pic redraw. The visible wipe
+  transition makes this **less likely** (desktop would show no wipe if it were a pure overlay) but not
+  impossible — confirm by whether desktop shows the same wipe.
+
+**DESKTOP CONFIRMED CORRECT (user, 2026-06-22) → this is a Pico-ONLY background-loss bug.** The SDL build
+shows the **SQ3 logo persisting behind** the red Pestulon script; Pico fills **flat white** and loses the
+logo. So **H-bg-colour is the live hypothesis and H-no-overlay is essentially confirmed**: SQ3 draws the
+Pestulon title as an **overlay that preserves the existing logo screen** (an add-to-pic / picview style draw,
+NOT a fresh full background), and Pico is wrongly **clearing `visual[0]`/`static_bg` to white** instead of
+keeping the logo underneath. This is the same single-`visual[0]` / static-bake family as the PQ2
+missing-object work (`pico_bake_static_region`) — except here the failure is the *background* being wiped, not
+a picview failing to bake.
+
+**SECOND CASE + REGRESSION CONFIRMED (user, IMG_1776 Pico vs IMG_1777 desktop, 2026-06-22).** Another SQ3
+intro scene — the "Two Guys"/Pestulon panel scene: two green-bordered view panels (a red ship on the left, an
+alien-runic text block on the right) over a **black space starfield**.
+- **IMG_1777 (desktop, correct):** dense blue/white **starfield** behind the panels; stars show *through* the
+  panel interiors.
+- **IMG_1776 (Pico, wrong):** ship + alien text render fine, but the background is **flat dark gray — the
+  starfield is gone**.
+- **The user states this is a REGRESSION — the intro rendered correctly on Pico before — and that it appeared
+  at the same time as the Pestulon-on-white bug.** So treat both as ONE regression in the Pico **background**
+  path: **foreground cels (red script, ship, alien text) draw correctly; the background pic content is lost
+  and replaced by a flat colour** (white for the logo screen, gray for the starfield).
+
+**SUSPECT (git, narrowed) — `4be87cb4` "bake static picviews into static_bg" is the prime suspect.** Only
+three recent commits touch the Pico background path: `d5ba144e` (stage-without-eager-flush — pure flush
+*timing*, leaves `visual[0]` content unchanged → unlikely, the symptom is wrong *content* not a flash),
+`2b9f75db` (chooser/restore arena reset only — cannot affect a single fresh boot's intro), and **`4be87cb4`**,
+the only one that changed what pixels land in the background buffer. `4be87cb4` did TWO things: (1) the
+`color_key` int→byte fix in `pico_blit_indexed` (a NONE-keyed background now paints **all** pixels incl.
+index-255 white, where before index-255 was dropped as transparent), and (2) added `pico_bake_static_region`,
+which copies each just-drawn `GFX_BUFFER_STATIC` cel's bounding rect from `visual[0]` into the PSRAM
+`static_bg`. Candidate mechanisms (not yet isolated): the bake **clobbers the background in `static_bg`** with
+a static picview's opaque/white-filled rect (intro panels are `kAddToPic` STATIC picviews), so the next BACK
+restore reproduces the clobbered background; and/or the `color_key` change now paints a white add-to-pic
+overlay fill over the logo instead of dropping it. NB the `color_key` fix is *needed* for the PQ2 white-holes,
+so a plain revert is not the answer — but it may be the lever that exposes the regression.
+
+**Decisive next step — A/B revert test (one flash) over more probes.** Build a test firmware with `4be87cb4`'s
+TWO changes split and tested independently: first revert *only* the `pico_bake_static_region` call (the
+`if (buffer == GFX_BUFFER_STATIC) pico_bake_static_region(...)` in `pico_draw_pixmap`) and check the intro; if
+still broken, restore that and revert *only* the `color_key` hunk. Whichever revert restores the starfield +
+logo names the cause. Confirm the chosen revert does NOT re-break PQ2 (cars/face) before settling on a fix.
+Alternatively/additionally an `FSCI_PROBE_GFX` intro log (grep `[pblit]`/`[pbuf]`/`[pupd]` for a STATIC bake
+or a white background composite right before the panel cels). Held per the run-first /
+don't-touch-the-shared-compositing-path rule; this is Pico-driver-local, not the shared path.
 
 ### Known graphics limitations on Pico (not yet fixed)
 

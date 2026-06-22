@@ -155,6 +155,24 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   below must be skipped — it is owned by the driver and repainted after
 		   the decode by pico_render_background. */
 		int visual_borrowed = g_pico_decode_visual_borrowed;
+
+		/* OVERLAY (overlay: selector → add_to_pic): this pic is composited onto
+		   the cached base pic, whose visual+priority were offloaded to PSRAM
+		   (index_data NULL) by its own earlier decode.  Desktop preserves the
+		   base by copying undithered_buffer back before drawing the overlay
+		   commands (see the #else branch); the Pico analogue is to load the base
+		   maps back from PSRAM into the fresh decode buffers and SKIP the white
+		   clear, so untouched areas keep the base (logo/starfield) instead of
+		   becoming gfxr_clear_pic0's 0xff fill.  psram_valid/psram_addr survive
+		   here because the PSRAM bump arena is only rewound on a fresh drawPic
+		   (gfxop_new_pic → psram_reset), never on add_to_pic; and the fields are
+		   not overwritten until the re-offload below (after the clear point). */
+		int restore_base = (flags & DRAWPIC01_FLAG_OVERLAID_PIC)
+			&& scaled_pic->visual_map->psram_valid
+			&& scaled_pic->priority_map->psram_valid;
+		uint32_t base_vis_addr = scaled_pic->visual_map->psram_addr;
+		uint32_t base_pri_addr = scaled_pic->priority_map->psram_addr;
+
 		if (g_pico_decode_visual_buf) {
 			scaled_pic->visual_map->index_data = g_pico_decode_visual_buf;
 			g_pico_decode_visual_buf = NULL;
@@ -211,7 +229,18 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		}
 		scaled_pic->priority_map->nibble_packed = 1;
 
-		gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
+		if (restore_base) {
+			/* Restore the base pic from PSRAM into the fresh buffers instead of
+			   clearing to white; the overlay's own commands then draw on top. */
+			gfx_pixmap_t *vmap = scaled_pic->visual_map;
+			gfx_pixmap_t *pmap = scaled_pic->priority_map;
+			size_t vsz = (size_t)(vmap->index_xl * vmap->index_yl);
+			size_t pnpix = (size_t)(pmap->index_xl * pmap->index_yl);
+			psram_load(base_vis_addr, vmap->index_data, vsz);
+			psram_load(base_pri_addr, pmap->index_data, (pnpix + 1) >> 1);
+		} else {
+			gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
+		}
 
 		/* Merged pass: draw visual + priority together.  control_map->index_data
 		   is still NULL (control gets its own pass below), so control draws no-op
