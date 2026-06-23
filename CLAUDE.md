@@ -2,6 +2,31 @@
 
 FreeSCI is a Sierra SCI game interpreter (circa 2007), ported to SDL2 with a CMake build system. The original codebase used SDL1 and Autotools.
 
+## Branch / merge status (2026-06-23)
+
+All Pico work lives on **`pico-wip-render-debug`**, currently **51 commits ahead of `master`, 0 behind** → a
+clean **fast-forward** merge (no conflicts possible). Local `master` is itself 2 commits ahead of
+`origin/master` (`origin` = upstream `wjp/freesci-archive`; `fork` = `chneeb/freesci`), so a merge would be
+purely local; pushing is a separate decision. **Kept as a branch for now — not merged.**
+
+**Merge-risk assessment (low on correctness, but it's a WIP debug branch):**
+- **Desktop-live code is well-isolated.** The only changed code that runs on the desktop SDL build is the sound
+  stack, properly gated: the OPL2 flash-table refactor is behind `FMOPL_FLASH_TABLES` (defined only on
+  `-DPICO_PWM_AUDIO=ON`), so desktop falls through to the original `OPLBuildTables()` malloc path and stays
+  stereo. Desktop audio behavior unchanged.
+- **Shared engine changes are all net-positive bugfixes** (improve desktop too): `said.y`/`said.c` wordset-paren
+  fix, `sci_view_0.c` mirrored view-RLE `yl` bound, `resource.c`/`tools.c` cwd-leak free, `seg_manager.c`
+  clone-`variables` teardown free, `kernel.c` `kmem()` null guard, `hashmap.c` `sci_malloc`. Footnote:
+  `FSCI_PROBE_STR` defaults ON → desktop gains `[strprobe]` diagnostic log lines (no behavior change).
+- **Caveats are hygiene, not breakage:** merging enshrines diagnostic scaffolding in master
+  (`pico_mem_census.c`, `scidisasm_safe.c`, `FSCI_PROBE_*` options, the large CLAUDE.md,
+  `PICO_SQ3_SRAM_CEILING_ASSESSMENT.md`) and carries two still-open graphics bugs (PQ2 fade rectangle,
+  Colonel's Bequest dialog boxes). Untracked clutter (`build-asan/`, `build-pico-clean/`, `asan.log`,
+  `PICO_SRAM_PSRAM_REVIEW.md`) is **not** gitignored (only `build-pico` is) — won't be part of an FF merge, but
+  worth a `.gitignore` line before any future commit.
+- **Open verification gap:** no recent full **desktop** build + smoke-test is on record — that's the one thing
+  to do before actually merging (the desktop-build check has not yet been completed this session).
+
 ## Build
 
 ```bash
@@ -2543,6 +2568,52 @@ logo names the cause. Confirm the chosen revert does NOT re-break PQ2 (cars/face
 Alternatively/additionally an `FSCI_PROBE_GFX` intro log (grep `[pblit]`/`[pbuf]`/`[pupd]` for a STATIC bake
 or a white background composite right before the panel cels). Held per the run-first /
 don't-touch-the-shared-compositing-path rule; this is Pico-driver-local, not the shared path.
+
+### OPEN (diagnosed, not fixed) — pic-open transition shows a shrinking garbage rectangle (Pico): `old_screen` clobbered by `psram_reset()`
+
+User-reported on device: the PQ2 parking-lot fade-in (and pic-open transitions generally) shows a **rectangle of
+garbage that shrinks then disappears** as the new room wipes in — "indicates a non-initialized graphics buffer."
+**Root-caused (code, not yet fixed):** the transition draws a **stale screenshot** (`old_screen`) whose PSRAM bytes
+were overwritten before it is read back. Sequence:
+
+1. **`kgraphics.c:1472`** — `s->old_screen = gfxop_grab_pixmap(..., gfx_rect(0,10,320,190))`. The 320×190 = 60800-byte
+   grab is >4096, so `pico_grab_pixmap` (`pico_driver.c:836`) bump-allocates it in the **PSRAM arena**
+   (`psram_alloc(60800)`) at the current top.
+2. **`kgraphics.c:1493`** — `gfxop_new_pic` → `gfxr_free_all_pics` → **`psram_reset()`** (`resmgr.c:245`) rewinds the
+   bump offset to **0** (`psram_alloc.c:23`, no floor). The new pic then offloads its `visual_map` (64000) + priority
+   (~16000) + view cels from offset 0 — **overwriting the bytes `old_screen` points at.**
+3. **`kgraphics.c:3171`** — `animate_do_animation` grabs `newscreen` (valid — taken *after* the reset).
+4. **`kgraphics.c:3189`** — draws the **corrupted** `s->old_screen` full-screen, then the `switch` reveals `newscreen`
+   over it. The garbage = the overwritten region of `old_screen`; "shrinks then disappears" = the normal reveal
+   covering it. It's a *rectangle* (not full screen) because the new pic's offloads only overlap part of `old_screen`'s
+   stale offset; the non-overlapping high part still holds genuine old pixels.
+
+Shared-engine grab-before-new-pic ordering, correct on desktop (3 real SRAM buffers survive); on Pico `old_screen` is
+the one grabbed pixmap whose lifetime straddles a `psram_reset()`. Same family as the RESOLVED "garbage rectangle
+during shadow/priority redraws" (that fixed cached *views*; this is the transition grab). **Recommended fix (not
+built):** give `old_screen` a **dedicated fixed PSRAM slot** outside the bump arena — exactly the
+`PICO_PARSE_SCRATCH_ADDR` (0x700000) visual-borrow pattern; reserve e.g. 0x710000. `newscreen` stays in the bump arena
+(grabbed post-reset, freed before next room). Routing detail: `pico_grab_pixmap` is generic, so only the
+`kgraphics.c:1472` `old_screen` grab must be steered to the fixed slot (a small Pico flag around the grab/free sites,
+or a dedicated helper). ~1–2 file change; deferred per ask-first.
+
+### OPEN — The Colonel's Bequest (SCI0): OOMs sooner + dialog boxes render transparent with sticky corners (Pico)
+
+User-reported on device (2026-06-23): **The Colonel's Bequest** generally **loads and plays** on Pico, but:
+- **Hits OOM sooner than SQ3** — a heavier SCI0 game (more/larger resources), so the working set runs nearer the
+  ceiling. The captured `[OOM]` LCD dump (IMG_1780) is the **legible halt working as designed, NOT a HardFault**:
+  `size=0xc` (12 B), `free=0x10` (16 B), `arena=0x73fe0` (**475,104 = the exact clean-build physical ceiling**),
+  `line=0x2a` (42), `reg_t_hashmap.c` `reg_t_hash_map_check_value` — i.e. a 12-byte **GC** hashmap node alloc failing
+  with the arena maxed at the absolute ceiling and only 16 B free. Same fragmentation-at-the-ceiling class as the SQ3
+  notes; this game simply reaches it faster. No Pico-specific fix beyond the standing
+  fragmentation/transient-churn levers (the port is at the practical SRAM ceiling).
+- **Dialog boxes render incorrectly:** the box **stays transparent instead of a white background**, and the **fancy
+  (ornate) box corners stick on the background and are not repainted** when the box is dismissed. The transparent-fill
+  symptom is likely the same `color_key` / window-fill family as the PQ2 white-background and SQ3 dialogue-dismiss work
+  (single-`visual[0]` vs SDL's dedicated buffers; box fill not painting, dismiss not restoring the region). NOT yet
+  investigated — recorded as a known issue. Next step if pursued: an `FSCI_PROBE_GFX` capture of a Colonel's Bequest
+  dialog open+dismiss, compared against the SDL render, to see whether the box-fill pixmap is dropped at blit
+  (color_key) or the dispose path skips the BACK/static restore over the corner regions.
 
 ### Known graphics limitations on Pico (not yet fixed)
 
