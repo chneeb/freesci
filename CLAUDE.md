@@ -42,7 +42,8 @@ The leftover instrumentation from the SQ3 bring-up is kept in the tree for debug
 gated behind compile-time CMake `option()`s so default builds are clean. They are **top-level**
 (not Pico-scoped) so the desktop mirror probes compile on desktop too; Pico-only probes also require
 `HAVE_PICO` in their own `#if`. Default OFF for clean builds, **except `FSCI_PROBE_STR`** (default ON,
-it guards the still-open "aspb" heap-corruption bug).
+kept as cheap standing insurance — it was the canary for the now-CLOSED "aspb" heap-corruption family
+(2026-06-23); left ON only to catch any recurrence, no longer guarding an open bug).
 
 | Option (default) | Define | Probes gated | Where |
 |---|---|---|---|
@@ -1117,6 +1118,35 @@ The binding constraint is picolibc fragmentation denying small/medium contiguous
 free bytes and NOT PSRAM capacity (PSRAM is already used for everything offloadable; `script_t.buf` is hot RW VM
 memory, ruled out).
 
+### CURRENT STATUS (2026-06-22) — the "arena ratchet" is no longer a restore-chain problem; the remaining issue is gameplay-time FRAGMENTATION to the ceiling
+
+Reframing after the 2026-06-21 fixes: **the arena ratchet does NOT have a restore-chain problem anymore.** The
+two places it was *fatal* are closed and device-confirmed (post-restore visual[0] kept resident; the chooser
+resets the arena between games — see the RESOLVED 2026-06-21 note). Long in-game restore chains run with
+comfortable headroom. So "fix the restore-time transient peak / un-ratchet the restore" is **no longer the
+framing** — do not chase it as a restore bug.
+
+**What actually remains is plain heap fragmentation, and it is a GAMEPLAY phenomenon, not a restore one** (the
+KEY FINDING above is the evidence): the arena climbs to the physical ceiling during ordinary room-2 *play*,
+before any restore is involved, because normal play shreds the free list — room changes re-decode pics (big
+transient alloc/free) interleaved with message-window / parser churn (small alloc/free). picolibc never
+coalesces or returns the sbrk'd top, so:
+
+- **The binding constraint is CONTIGUITY, not total free bytes, and not PSRAM capacity.** A 12-byte GC alloc
+  forcing a +4096 sbrk grow (line 1109) proves the free space — tens of KB total — was shattered into chunks
+  with no hole even for 12 bytes. Fresh boot is 17–40 chunks; play drives it to 100–200.
+- **No leak is involved** — the leaks are fixed (cwd + console scrollback, clone-variables). This is pure
+  fragmentation pressure, so byte-reclaim levers can't help: `malloc_trim` returns bytes the next peak
+  re-grabs (RULED OUT), GC-on-OOM faults at unsafe points (RULED OUT), `.bss` mining is tapped out, and a
+  read-only PSRAM script cache is impossible (`buf` is hot RW).
+- **The ONLY safe attack is reducing transient-allocation CHURN** so the free list stops shredding — reuse a
+  resettable scratch for the clearly-serial transient decode/parse buffers, exactly the pattern already
+  applied: the permanent priority/decompress scratches (B-1/B-1.2) and the view-cel decode-into-idle-scratch
+  (B-1.3). The remaining candidates of the same shape: the control/priority decode temporaries and the GNF
+  parse transients (and the `gfx_tools.c:307` / `reg_t_hashmap.c:42` churn the `[arenagrow]` log names). This
+  is incremental fragmentation reduction, not a single fix — and per the Codex assessment below, do not expect
+  it to buy comfortable margin, only to push the ceiling-hit later.
+
 ### ASSESSMENT (Codex, `PICO_SQ3_SRAM_CEILING_ASSESSMENT.md`, 2026-06-12) — at the practical SRAM ceiling
 
 An independent Codex assessment (file in repo root) concurs with the above and adds two load-bearing facts:
@@ -1301,7 +1331,19 @@ Builds clean desktop + pico. **Awaiting device retest** to confirm the room-13 f
 HardFault with a garbage/ASCII BFAR still appears after this, there is a *second* overflow source (the
 string-kernel suspects below remain the next ASan target).
 
-### WATCHED (apparently resolved, not positively confirmed) — heap corruption surfacing as a GC fault ("aspb")
+### CLOSED (2026-06-23) — heap corruption surfacing as a GC fault ("aspb")
+
+**CLOSED (2026-06-23, user decision).** Removed from the open/watch list: the "aspb" corruption signature has
+**not reappeared** on any clean- or diagnostic-build session since the view-RLE + decrypt1 fixes landed
+(2026-06-08), so the every-observed instance is accounted for by those two fixes. The unconfirmed string-kernel
+theory (below) is treated as resolved — most likely (b): the observed "aspb"-signature fault was always a
+downstream symptom of the view-RLE overrun, already fixed. The `FSCI_PROBE_STR` canary stays **ON** as cheap
+standing insurance (it costs only its small share of the ~26 KB diagnostic-probe ceiling and is the one probe
+left at default-ON); if a `[strprobe]` line ever fires just before a `[FAULT]`, or a garbage/ASCII-BFAR +
+no-`[OOM]` HardFault recurs, **re-open** this and run the desktop ASan hammer below. The detail is retained
+for that contingency, but it is no longer tracked as active or watched work.
+
+*Historical (the DOWNGRADED analysis that led to closing it):*
 
 **DOWNGRADED from top-priority OPEN (2026-06-12).** The "aspb" family was a *conflation* of several
 distinct faults. The ones we **actually observed on device** have each been individually root-caused and
@@ -1928,6 +1970,41 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
      dynamic, paid only when sound is enabled**: HQ stereo ~165 KB (**won't fit**), LQ mono default
      tables ~70 KB, LQ mono + shrunk tables (`EG_ENT=128`, `SIN_ENT=512`, drop the stereo OPL) ~40 KB.
      Need ≥~80 KB free before enabling — gated purely on measured steady-state headroom.
+   - **CHEAPEST-SRAM DESIGN — flash-resident `const` tables drop the ask to ~10–13 KB, NOT ~40 KB
+     (byte-split sanity-check, 2026-06-23).** The decisive point: the five big tables are pure functions
+     of `EG_ENT`/`SIN_ENT` (`pow/log10/sin`, **sample-rate-independent**), so they can be **precomputed
+     `const` and stored in flash** (RP2350 has MBs free). Once they're flash, **table resolution stops
+     mattering for SRAM** — so pick HQ for quality and let flash eat it:
+
+     | Table | Formula | HQ (EG_ENT=4096, SIN_ENT=2048) | LQ (EG_ENT=128, SIN_ENT=512) |
+     |---|---|---|---|
+     | `TL_TABLE` | `EG_ENT*16` | 65,536 | 2,048 |
+     | `SIN_TABLE`* | `SIN_ENT*16` | 32,768 | 8,192 |
+     | `AMS_TABLE` | `AMS_ENT*8` (512) | 4,096 | 4,096 |
+     | `VIB_TABLE` | `VIB_ENT*8` (512) | 4,096 | 4,096 |
+     | `ENV_CURVE` | `(2*EG_ENT+1)*4` | 32,772 | 1,028 |
+     | **flash total** | | **~136 KB** | **~19 KB** |
+
+     *`SIN_TABLE` is currently `int**` (pointers INTO `TL_TABLE`, `fmopl.c:181/612/647`). To be
+     flash-storable it must become `int` **offsets** into `TL_TABLE` (same byte size); `OP_OUT`
+     (`fmopl.c:445`) then indexes `TL_TABLE[base + sin_offset]` instead of dereferencing. **This is the
+     only non-mechanical representation change.**
+
+     **What genuinely stays in SRAM (mutated every sample, can NOT go to flash):**
+     | SRAM cost | Size | Note |
+     |---|---|---|
+     | `FM_OPL` per-chip state | **~7 KB/chip** | `FN_TABLE[1024]`=4096 + `AR/DR_TABLE[75]`×2=600 + 9× `OPL_CH` (~190 B ea ≈ 1.7 KB) + scalars. **Mono=1 chip ≈7 KB; stereo=2 ≈14 KB.** |
+     | mixer block buffer | ~1–2 KB | scimixer working block |
+     | PCM ring → PWM IRQ | ~2–4 KB | 8-bit downconverted samples |
+     | **SRAM total (mono)** | **~10–13 KB** | |
+
+     **Bottom line:** cheapest sound ≈ **~10–13 KB resident, dominated by the OPL *chip state*, not the
+     tables** (the prior ~40 KB plan assumed tables live in SRAM). Go **HQ + flash tables + mono** (PWM is
+     mono anyway; mono halves the chip-state floor). Changes vs the current build: (1) `SIN_TABLE` →
+     offsets; (2) precompute the five tables `const`; (3) `opl2.c:544` keep HQ but select the const tables
+     instead of `malloc`; (4) `opl2.c:546-547` drop `ym3812_R` (stereo→mono); plus the five deliverables
+     below. **NB the current build is HQ *stereo* (`opl2.c:544` + dual `ym3812_L/R`)** — the ~165 KB
+     "won't fit" config; the cheap path is HQ mono with flash tables.
    - **Five deliverables:** (A) `src/sfx/pcm_device/pico_pwm.c` implementing `sfx_pcm_device_t` +
      ring buffer, downconverting the mixer's 16-bit samples to 8-bit; (B) rewrite `pwm_synth.c`'s
      IRQ to pop the PCM ring (also frees ~44 KB flash by dropping `pwm_strings.h`); (C)
@@ -2420,31 +2497,48 @@ don't-touch-the-shared-compositing-path rule; this is Pico-driver-local, not the
 These are correctness gaps in the Pico render path vs the SDL pipeline. Lower priority than the
 roadmap above (gameplay works without them), but documented so they aren't rediscovered cold.
 
-- **Per-pixel priority occlusion is wrong — "last drawn wins" instead of "highest priority wins."**
-  `pico_blit_indexed` (`pico_driver.c`) writes the color unconditionally (gated only on the cel's
-  `color_key`) and gates *only* the priority write on `row_pri[x] <= priority`. The SDL crossblit
-  (`gfx_crossblit.c`) instead gates the **color** write on the priority test, so background priority
-  occludes actors. Effect on Pico: the ego won't hide behind higher-priority scenery (e.g. walking
-  behind a desk). Fix: gate `row_dst[x] = lut[idx]` on the same `pri_row[x] <= priority` test, after
-  paging the priority rows in (they're resident in SRAM via the disowned priority buffer, so no
-  PSRAM read needed unless that changes).
-- **`static_priority_map` is aliased to `priority_map`** (`operations.c` `_gfxop_init_common`, under
-  `HAVE_PICO`). On SDL these are distinct: the static one holds the pic's base priority and is copied
-  back over the working map each frame to erase last frame's sprite priorities. Aliased, that copy
-  (`gfx_copy_pixmap_box_i`) is a no-op, so sprite priorities accumulate and z-ordering degrades the
-  longer you stand in a room. Proper fix: keep the static priority map PSRAM-resident and page the
-  dirty rect back into an SRAM scratch on BACK-buffer update (same scratch the occlusion fix uses).
-- **Actors draw OVER static picviews (`kAddToPic` scene objects) instead of being occluded by them.**
-  Device-observed (user-reported 2026-06-22): in PQ2 the ego/characters paint over the **parking-lot
-  cars**; in SQ3 over the **ship engine/motivator**. **This is NOT a new regression** — it is the
-  documented residual of the `pico_bake_static_region` fix (see the FIXED glovebox/PQ2 note above):
-  that fix bakes a static picview's *color* into the PSRAM `static_bg` so it renders, but its *priority*
-  is never baked into the priority map (Pico's `priority_map`/`static_priority_map` `index_data` is in
-  PSRAM/NULL, so `_gfxop_draw_priority` is skipped for picviews). With no picview priority in the map,
-  the per-pixel occlusion test always lets the later-drawn actor win → the actor paints over the
-  car/motivator. Same root family as the two limitations above (last-drawn-wins + `static_priority_map`
-  aliasing). Fix folds into the priority-occlusion work: bake static-picview priority into the
-  (PSRAM-resident) priority map alongside the color bake, then gate the actor's color write on it.
+**PARKED (2026-06-22, user decision) — investigated, root-caused, not pursued. The three bullets below are
+ONE root cause (no SRAM working priority map on Pico), and the first bullet's old "writes color
+unconditionally" claim is now CORRECTED: background occlusion already works.** The fix is real but spends
+scarce resident SRAM directly against the OOM work (the port is at the SRAM ceiling), so it is documented
+and left as a known limitation rather than built.
+
+- **Background→actor occlusion ALREADY WORKS — the old "writes color unconditionally" note was STALE.**
+  `pico_blit_indexed` (`pico_driver.c:559-584`) already gates the **color** write on the background
+  priority: it reads the priority row back from PSRAM (`s_shared_priority`, nibble-unpacked per row into
+  `s_pri_row`) and does `if ((int)pri_row[x] <= priority) row_dst[x] = lut[idx];` — exactly matching the
+  SDL crossblit gating (`gfx_crossblit.c:79-84`). So the ego DOES hide behind higher-priority background
+  scenery (e.g. walking behind a desk). Do **not** re-file this as a bug; verified by code read 2026-06-22.
+- **The REAL gap = inter-sprite / actor-over-picview z-order ("last drawn wins" among sprites).** The one
+  line that differs from SDL is `pico_driver.c:574`: `if (row_pri) row_pri[x] = (uint8_t)priority;` —
+  Pico writes the drawn sprite's priority back ONLY to an SRAM working map (`pri_buf`/`row_pri`), but that
+  map is always **NULL** on Pico (the 64KB working priority buffer was offloaded to PSRAM and is read-only
+  there). SDL instead writes priority back into its resident working map (`gfx_crossblit.c:80`), so each
+  drawn sprite raises priority at its pixels and the next sprite is gated against it → true z-order.
+  Without the writeback, a later sprite's color is gated only against the *background* priority, never
+  against an earlier sprite's → sprites paint over each other in draw order.
+- **Static picviews have the same gap, plus their priority is never in the map at all.** `kAddToPic`
+  picviews are baked into the PSRAM `static_bg` for *color* (`pico_bake_static_region`) but their
+  *priority* is never written into the priority map (`_gfxop_draw_priority` is skipped — `index_data` is
+  PSRAM/NULL), so actors at any priority paint over the **PQ2 parking-lot cars** / **SQ3 ship motivator**
+  (device-observed 2026-06-22). Same root cause as the sprite bullet.
+- **`static_priority_map` is aliased to `priority_map`** (`operations.c:724`, `_gfxop_init_common`,
+  `HAVE_PICO`), so the per-frame static→working copyback (`operations.c:1557`,
+  `gfx_copy_pixmap_box_i(priority_map, static_priority_map, box)`) is a self-copy no-op (and `index_data`
+  is NULL anyway). On SDL these are distinct buffers and the copyback erases last frame's sprite
+  priorities; aliased, there is nothing to erase because nothing was ever written.
+
+**The blit code is already fix-ready — what's missing is a frame-level SRAM working priority map.** Lines
+`559-587` fully support an SRAM `pri_buf`: pass one in and the existing logic reads from it, gates color,
+AND writes priority back (so sprites gate against each other). The fix is therefore plumbing + SRAM, not
+blit-logic: (1) maintain a resident SRAM working priority map; (2) at BACK-buffer reset, page the
+background priority PSRAM→working for the dirty region; (3) bake static-picview priority into it alongside
+the color bake; (4) pass it as `pri_buf` to every sprite blit. **Cost options weighed:** A = full unpacked
+64KB (simplest, mirrors SDL, likely a non-starter at the ceiling); B = nibble-packed 32KB (half cost,
+needs pack/unpack on read+write); C = dirty-rect scratch sized to the cast region (most memory-responsible,
+most invasive — needs a shared per-frame buffer). **Decision: parked.** All three cost resident SRAM, the
+scarcest resource, so the visual payoff (correct sprite/picview occlusion) does not currently justify the
+SRAM + complexity. If revisited, C is the only memory-responsible route; the blit side needs no changes.
 
 ### SCI version support on Pico — SCI0 ONLY (SCI1/VGA legibly rejected, not supported)
 
