@@ -23,6 +23,9 @@
 #include "lcdspi.h"
 #include "kbd_input.h"
 #include "psram_alloc.h"
+#ifdef PICO_PWM_AUDIO
+#include "../../platform/pico/audio/pwm_synth.h"
+#endif
 
 /* define_region_spi is in lcdspi.c but not declared in lcdspi.h */
 extern void define_region_spi(int xstart, int ystart, int xend, int yend, int rw);
@@ -968,6 +971,11 @@ static int pico_set_pointer(struct _gfx_driver *drv, gfx_pixmap_t *pointer)
 
 static sci_event_t pico_get_event(struct _gfx_driver *drv)
 {
+#ifdef PICO_PWM_AUDIO
+    /* Drive the SCI sound pipeline in normal (non-IRQ) context once per
+       frame; the trivial ring-pop runs in the PWM IRQ (pwm_synth.c). */
+    pico_sfx_poll();
+#endif
     poll_keyboard(drv);
     return pop_event(S);
 }

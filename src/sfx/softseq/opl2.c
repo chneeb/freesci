@@ -25,7 +25,9 @@
 
 #include "fmopl.h"
 
-#ifdef _DREAMCAST
+#if defined(_DREAMCAST) || defined(PICO_PWM_AUDIO)
+/* PicoCalc PWM is an 8-bit mono 22kHz sink (see Pico sound roadmap): one OPL
+   chip, mono output. Halves the OPL chip-state SRAM floor (~7KB vs ~14KB). */
 #define SAMPLE_RATE 22050
 #define CHANNELS SFX_PCM_MONO
 #define STEREO 0
@@ -157,6 +159,8 @@ static inline int opl_write_L (int a, int v)
 static inline int opl_write_R (int a, int v)
 {
 	adlib_reg_R[a] = v;
+	if (!ym3812_R)
+		return 0; /* mono build: no right chip (OPLCreate is #if STEREO) */
 	OPLWrite (ym3812_R, 0x388, a);
 	return OPLWrite (ym3812_R, 0x389, v);
 }
@@ -543,8 +547,11 @@ opl2_init(sfx_softseq_t *self, byte *data_ptr, int data_length, byte *data2_ptr,
 
 	OPLBuildTables(FMOPL_ENV_BITS_HQ, FMOPL_EG_ENT_HQ);
 
-	if (!(ym3812_L = OPLCreate (OPL_TYPE_YM3812, OPL_INTERNAL_FREQ, SAMPLE_RATE)) ||
-	    !(ym3812_R = OPLCreate (OPL_TYPE_YM3812, OPL_INTERNAL_FREQ, SAMPLE_RATE))) {
+	if (!(ym3812_L = OPLCreate (OPL_TYPE_YM3812, OPL_INTERNAL_FREQ, SAMPLE_RATE))
+#if STEREO
+	    || !(ym3812_R = OPLCreate (OPL_TYPE_YM3812, OPL_INTERNAL_FREQ, SAMPLE_RATE))
+#endif
+	    ) {
 		sciprintf ("[sfx:seq:opl2] Failure: Emulator init failed!\n");
 		return SFX_ERROR;
 	}
@@ -562,9 +569,11 @@ opl2_exit(sfx_softseq_t *self)
 	FM_OPL *opl = ym3812_L;
 	ym3812_L = NULL;
 	OPLDestroy(opl);
+#if STEREO
 	opl = ym3812_R;
 	ym3812_R = NULL;
 	OPLDestroy(opl);
+#endif
 
 	// XXX deregister with pcm layer.
 }
@@ -579,7 +588,9 @@ opl2_allstop(sfx_softseq_t *self)
 	adlibemu_init_lists();
 
 	OPLResetChip (ym3812_L);
+#if STEREO
 	OPLResetChip (ym3812_R);
+#endif
 
 	opl_write(0x01, 0x20);
 	opl_write(0xBD, 0xc0);

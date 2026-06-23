@@ -47,6 +47,12 @@ pico_decompress_alloc(int type, unsigned int size)
 	    && g_pico_decompress_scratch
 	    && size <= PICO_DECOMPRESS_SCRATCH_SIZE)
 		return g_pico_decompress_scratch;
+	/* Sound is non-essential: on the SRAM-tight Pico its resource may not find
+	   a contiguous block.  Use raw malloc so OOM returns NULL (the caller fails
+	   the song load and the game keeps running silently) instead of sci_malloc's
+	   fatal pico_oom_report halt.  Every other resource type still halts legibly. */
+	if (type == sci_sound)
+		return (unsigned char *) malloc(size);
 	return (unsigned char *) sci_malloc(size);
 }
 
@@ -347,6 +353,17 @@ int decompress0(resource_t *result, int resh, int sci_version)
 
 	buffer = (guint8*)sci_malloc(compressedLength);
 	result->data = DECOMPRESS_ALLOC_DATA(result->type, result->size);
+
+#ifdef HAVE_PICO
+	/* A NULL here means the graceful (raw-malloc) path in pico_decompress_alloc
+	   OOM'd on a non-essential (sound) resource.  Fail the decode cleanly so the
+	   resource load returns empty and the game keeps running without the song. */
+	if (!result->data) {
+		free(buffer);
+		result->status = SCI_STATUS_NOMALLOC;
+		return SCI_ERROR_DECOMPRESSION_INSANE;
+	}
+#endif
 
 	if (read(resh, buffer, compressedLength) != compressedLength) {
 		DECOMPRESS_FREE_DATA(result->data);

@@ -78,8 +78,9 @@ typedef struct fm_opl_slot {
 	/* LFO */
 	guint8 ams;		/* ams flag                            */
 	guint8 vib;		/* vibrate flag                        */
-	/* wave selector */
-	int **wavetable;
+	/* wave selector: points into SIN_TABLE; each entry is an OFFSET into
+	   TL_TABLE (a sample is TL_TABLE[wavetable[idx] + env]) */
+	const int *wavetable;
 } OPL_SLOT;
 
 /* ---------- OPL one of channel  ---------- */
@@ -128,8 +129,8 @@ typedef struct fm_opl_f {
 	guint32 FN_TABLE[1024];/* fnumber -> increment counter		*/
 
 	/* LFO */
-	int *ams_table;
-	int *vib_table;
+	const int *ams_table;
+	const int *vib_table;
 	int amsCnt;
 	int amsIncr;
 	int vibCnt;

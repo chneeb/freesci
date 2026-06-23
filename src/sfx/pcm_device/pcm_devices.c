@@ -33,6 +33,9 @@ extern sfx_pcm_device_t sfx_pcm_driver_alsa;
 #	ifdef _DREAMCAST
 extern sfx_pcm_device_t sfx_pcm_driver_dc;
 #	endif
+#	ifdef PICO_PWM_AUDIO
+extern sfx_pcm_device_t sfx_pcm_driver_pico_pwm;
+#	endif
 #endif // SCUMMVM
 #endif
 
@@ -41,6 +44,9 @@ sfx_pcm_device_t *pcmout_drivers[] = {
 #ifdef SCUMMVM
 		&sfx_pcm_driver_scummvm,
 #else // SCUMMVM
+#	ifdef PICO_PWM_AUDIO
+		&sfx_pcm_driver_pico_pwm,
+#	endif
 #	ifdef HAVE_SDL
 		&sfx_pcm_driver_sdl,
 #	endif

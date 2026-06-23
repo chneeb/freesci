@@ -214,7 +214,18 @@ int main(void)
 
         /* Use short options: -d gamedir, -g graphics, -q no-sound.
            HAVE_GETOPT_LONG is not enabled for the pico build so
-           main.c falls back to plain getopt which needs short forms. */
+           main.c falls back to plain getopt which needs short forms.
+           When PICO_PWM_AUDIO is ON, drop -q so the SCI sound pipeline
+           runs and feeds the PWM PCM device. */
+#ifdef PICO_PWM_AUDIO
+        char *argv[] = {
+            "freesci",
+            "-d", game_dir,
+            "-g", "pico",
+            NULL
+        };
+        int argc = 5;
+#else
         char *argv[] = {
             "freesci",
             "-d", game_dir,
@@ -223,6 +234,7 @@ int main(void)
             NULL
         };
         int argc = 6;
+#endif
 
         {
             MEMPRINT("pre-launch");

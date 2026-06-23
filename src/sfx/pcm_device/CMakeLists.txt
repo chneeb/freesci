@@ -4,6 +4,10 @@ if(PLATFORM STREQUAL "desktop")
     list(APPEND pcm_sources sdl.c)
 endif()
 
+if(PICO_PWM_AUDIO)
+    list(APPEND pcm_sources pico_pwm.c)
+endif()
+
 add_library(scipcm STATIC ${pcm_sources})
 
 if(PLATFORM STREQUAL "desktop")

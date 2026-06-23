@@ -158,6 +158,58 @@ To bring sound back:
 - Add a Pico PCM device driver under `src/sfx/pcm_device/pico_pwm.c`
 - Remove `--no-sound` from `pico_main.c`'s argv
 
+#### Sound stack now wired (default OFF) + the SQ3-intro sound OOM (graceful-skip DONE, music still doesn't fit)
+
+The PCM/softseq plumbing above is now **implemented behind `PICO_PWM_AUDIO` (still default OFF)**: a Pico PCM
+device (`src/sfx/pcm_device/pico_pwm.c`, polled at 60Hz from the main loop → lock-free ring → 22050Hz mono
+8-bit PWM IRQ), the OPL2 softseq with **flash-resident `const` tables** (`fmopl_tables.{c,h}`,
+`FMOPL_FLASH_TABLES`, ~136KB in `.rodata`, zero heap; mono = one ~7KB `FM_OPL` chip), and the CMake wiring.
+**Default builds stay sound-off** — none of this links or runs unless `-DPICO_PWM_AUDIO=ON`.
+
+**The blocker is unchanged: there is no SRAM headroom for music on SQ3.** With sound ON, the SQ3 intro OOM'd
+**before the first note** at `decompress0.c:50` (`malloc 18996 failed`) — a **fragmentation OOM**: ~25KB free
+but no 18996-contiguous run, arena 456416 of the ~469216 PWM-build physical ceiling (**~13KB growth room
+left**). The resident sound stack (OPL chip + mixer compbuf + ring) ate the margin that the intro pic/view
+decodes need.
+
+**DONE — graceful skip for non-essential sound resources** (`decompress0.c`, `HAVE_PICO`). Per the directive
+"assume it's a sound resource, don't touch pic/view": `pico_decompress_alloc` now routes `sci_sound` decodes
+through **raw `malloc`** (not `sci_malloc`), so an OOM returns **NULL** instead of the fatal `pico_oom_report`
+halt; a NULL-guard right after the alloc fails the decode cleanly (`SCI_STATUS_NOMALLOC` →
+`SCI_ERROR_DECOMPRESSION_INSANE`), and `resource.c`'s existing decompressor-error path leaves `res->data=NULL`
+so the song load returns empty and **the game keeps playing silently**. Every *other* resource type still
+halts legibly (pic/view/script unchanged — they MUST fit). This makes a too-big song a non-event, but it does
+NOT make music play — it just stops sound from crashing the intro.
+
+**Levers assessed for actually fitting intro music — only one is viable, and it's unbuilt:**
+- **`PICO_PWM_BUF_FRAMES` 512→256 — REJECTED.** Frees only ~2KB steady-state, and breaks audio: 256 frames =
+  11.6ms produced/poll < the 16.6ms 60Hz drain → ring underrun/stutter. 512 (23.2ms/poll) is the floor.
+- **Lazy OPL chip alloc — only shifts the peak.** Defers the ~7KB chip, but the intro is *where* music starts,
+  so the chip is live exactly when the intro decode peaks. Helps only music-free rooms, not the intro OOM.
+- **A fixed "intro-only" sound buffer — relocates the OOM, doesn't remove it.** It would have to be
+  boot-allocated (you can't grab a contiguous block mid-intro on the fragmented heap — that's the OOM itself),
+  so it's permanently resident; and it can't be a *reusable* scratch because song data is read every tick
+  during playback (`iterator.c` reads `self->data` per tick, refcounted) — it must stay resident while
+  playing. The intro is the peak, so reserving for it just moves the wall.
+- **Share one buffer with vocab/grammar — fails on lifetime overlap.** Vocab is permanently resident; the GNF
+  parse peak is already solved via the visual-borrow and overlaps *gameplay* music; every large buffer is
+  busy during the intro.
+- **Borrow the VOCAB blob to PSRAM during the intro — THE one viable path (NOT built).** The packed vocab blob
+  (`g_pico_vocab_blob`, ~21419B, contiguous, > the 18996B song) is **idle during the intro** — its only
+  gameplay reader is `vocab_tokenize_string` inside `kParse` (`kstring.c:325`), and you can't type a parser
+  command during the intro. So mirror the `pico_borrow_visual`/`pico_return_visual` pattern: page the vocab
+  blob to PSRAM for the duration of intro sound, freeing ~21KB SRAM for the song decode, then restore it
+  before the first parse. **Mechanism must be borrow-to-PSRAM, NOT destroy-and-reload** (re-packing the blob
+  needs a 21KB contiguous run → would re-OOM on the fragmented post-intro heap). **Catches (why it's a spike,
+  not a quick edit):** the song must be **cut off / handed back before the first parse** (intro-only — it does
+  nothing for in-room music, which overlaps the parser); it needs **sfx↔parser coordination** (who owns the
+  blob when); it assumes a **single** large sound resource at a time; and the borrow/return `sci_malloc` on
+  restore could itself halt if the heap fragmented (degrades loudly via `pico_oom_report`, never corrupts).
+  Deferred — not worth the multi-file coordination for intro-only music while the port is at the ceiling.
+
+**Bottom line: sound stays disabled.** The stack is ready to switch on (`-DPICO_PWM_AUDIO=ON`) and won't crash
+the intro anymore (graceful skip), but real intro music needs the vocab-borrow spike above, which isn't built.
+
 ### Pico correctness fixes (do NOT re-apply the old RAM optimizations)
 
 Earlier Pico work freed several vocab tables after use to save RAM. Two of those frees

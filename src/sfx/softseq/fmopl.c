@@ -43,6 +43,12 @@
 
 #include "fmopl.h"
 
+#ifdef FMOPL_FLASH_TABLES
+/* Pico (PICO_PWM_AUDIO): the five big OPL lookup tables live in flash as const
+   .rodata (zero SRAM). SIN_TABLE holds integer OFFSETS into TL_TABLE. */
+#include "fmopl_tables.h"
+#endif
+
 #ifndef PI
 #define PI 3.14159265358979323846
 #endif
@@ -175,20 +181,22 @@ static const guint32 SL_TABLE_SEED[16] = {
 /* TotalLevel : 48 24 12  6  3 1.5 0.75 (dB) */
 /* TL_TABLE[ 0      to TL_MAX          ] : plus  section */
 /* TL_TABLE[ TL_MAX to TL_MAX+TL_MAX-1 ] : minus section */
-static int *TL_TABLE;
+static const int *TL_TABLE;
 
-/* pointers to TL_TABLE with sinwave output offset */
-static int **SIN_TABLE;
+/* OFFSETS into TL_TABLE with sinwave output offset (was int**; now a sample is
+   TL_TABLE[ SIN_TABLE[idx] + env ]). Unified representation for both the
+   flash-const and the desktop malloc+fill providers. */
+static const int *SIN_TABLE;
 
 /* LFO table */
-static int *AMS_TABLE;
-static int *VIB_TABLE;
+static const int *AMS_TABLE;
+static const int *VIB_TABLE;
 
 /* envelope output curve table */
 /* attack + decay + OFF */
 /* Heap-allocated in OPLOpenTable() so NOSOUND builds (Pico) don't waste 32KB BSS.
    Sized 2*EG_ENT+1 ints once EG_ENT is known via OPLBuildTables(). */
-static int *ENV_CURVE = NULL;
+static const int *ENV_CURVE = NULL;
 
 /* multiple table */
 #define ML(a) (int)(a * 2)
@@ -219,8 +227,8 @@ OPL_SLOT *SLOT7_1, *SLOT7_2, *SLOT8_1, *SLOT8_2;
 static int outd[1];
 static int ams;
 static int vib;
-int *ams_table;
-int *vib_table;
+const int *ams_table;
+const int *vib_table;
 static int amsIncr;
 static int vibIncr;
 static int feedback2;		/* connect for SLOT 2 */
@@ -442,7 +450,7 @@ INLINE void set_sl_rr(FM_OPL *OPL, int slot, int v) {
 }
 
 /* operator output calcrator */
-#define OP_OUT(slot,env,con)   slot->wavetable[((slot->Cnt + con) / (0x1000000 / SIN_ENT)) & (SIN_ENT-1)][env]
+#define OP_OUT(slot,env,con)   TL_TABLE[ slot->wavetable[((slot->Cnt + con) / (0x1000000 / SIN_ENT)) & (SIN_ENT-1)] + (env) ]
 /* ---------- calcrate one of channel ---------- */
 INLINE void OPL_CALC_CH(OPL_CH *CH) {
 	guint32 env_out;
@@ -600,65 +608,88 @@ static void init_timetables(FM_OPL *OPL, int ARRATE, int DRRATE) {
 }
 
 /* ---------- generic table initialize ---------- */
+#ifdef FMOPL_FLASH_TABLES
+
+/* Flash provider: tables are precomputed const .rodata (see fmopl_tables.c).
+   OPLBuildTables() must have been called with the matching HQ resolution
+   (FMOPL_ENV_BITS_HQ / FMOPL_EG_ENT_HQ) so the runtime ENV_BITS/EG_ENT/EG_*
+   scalars agree with the baked-in tables. No SRAM allocation. */
+static int OPLOpenTable(void) {
+	TL_TABLE  = fmopl_TL_TABLE;
+	SIN_TABLE = fmopl_SIN_TABLE;
+	AMS_TABLE = fmopl_AMS_TABLE;
+	VIB_TABLE = fmopl_VIB_TABLE;
+	ENV_CURVE = fmopl_ENV_CURVE;
+	return 1;
+}
+
+static void OPLCloseTable(void) {
+	/* flash-resident: nothing to free */
+}
+
+#else /* desktop: malloc + fill, SIN_TABLE stored as TL_TABLE offsets */
+
 static int OPLOpenTable(void) {
 	int s,t;
 	double rate;
 	int i,j;
 	double pom;
+	int *tl, *sin_tab, *ams, *vib, *env;
 
-	/* allocate dynamic tables */
-	if((TL_TABLE = (int *)malloc(TL_MAX * 2 * sizeof(int))) == NULL)
+	/* allocate dynamic tables (filled via local non-const pointers, then
+	   published to the const globals) */
+	if((tl = (int *)malloc(TL_MAX * 2 * sizeof(int))) == NULL)
 		return 0;
-	if((SIN_TABLE = (int **)malloc(SIN_ENT * 4 * sizeof(int *))) == NULL) {
-		free(TL_TABLE);
-		return 0;
-	}
-	if((AMS_TABLE = (int *)malloc(AMS_ENT * 2 * sizeof(int))) == NULL) {
-		free(TL_TABLE);
-		free(SIN_TABLE);
+	if((sin_tab = (int *)malloc(SIN_ENT * 4 * sizeof(int))) == NULL) {
+		free(tl);
 		return 0;
 	}
-	if((VIB_TABLE = (int *)malloc(VIB_ENT * 2 * sizeof(int))) == NULL) {
-		free(TL_TABLE);
-		free(SIN_TABLE);
-		free(AMS_TABLE);
+	if((ams = (int *)malloc(AMS_ENT * 2 * sizeof(int))) == NULL) {
+		free(tl);
+		free(sin_tab);
 		return 0;
 	}
-	if((ENV_CURVE = (int *)malloc((2 * EG_ENT + 1) * sizeof(int))) == NULL) {
-		free(TL_TABLE);
-		free(SIN_TABLE);
-		free(AMS_TABLE);
-		free(VIB_TABLE);
+	if((vib = (int *)malloc(VIB_ENT * 2 * sizeof(int))) == NULL) {
+		free(tl);
+		free(sin_tab);
+		free(ams);
+		return 0;
+	}
+	if((env = (int *)malloc((2 * EG_ENT + 1) * sizeof(int))) == NULL) {
+		free(tl);
+		free(sin_tab);
+		free(ams);
+		free(vib);
 		return 0;
 	}
 	/* make total level table */
 	for (t = 0; t < EG_ENT - 1 ; t++){
 		rate = ((1 << TL_BITS) - 1) / pow(10.0, EG_STEP * t / 20);	/* dB -> voltage */
-		TL_TABLE[         t] =  (int)rate;
-		TL_TABLE[TL_MAX + t] = -TL_TABLE[t];
+		tl[         t] =  (int)rate;
+		tl[TL_MAX + t] = -tl[t];
 	}
 	/* fill volume off area */
 	for (t = EG_ENT - 1; t < TL_MAX; t++){
-		TL_TABLE[t] = TL_TABLE[TL_MAX + t] = 0;
+		tl[t] = tl[TL_MAX + t] = 0;
 	}
 
-	/* make sinwave table (total level offet) */
+	/* make sinwave table (total level offset, stored as TL_TABLE indices) */
 	/* degree 0 = degree 180                   = off */
-	SIN_TABLE[0] = SIN_TABLE[SIN_ENT /2 ]         = &TL_TABLE[EG_ENT - 1];
+	sin_tab[0] = sin_tab[SIN_ENT /2 ]         = EG_ENT - 1;
 	for (s = 1;s <= SIN_ENT / 4; s++){
 		pom = sin(2 * PI * s / SIN_ENT); /* sin     */
 		pom = 20 * log10(1 / pom);	   /* decibel */
 		j = (int)(pom / EG_STEP);         /* TL_TABLE steps */
 
 		/* degree 0   -  90    , degree 180 -  90 : plus section */
-		SIN_TABLE[          s] = SIN_TABLE[SIN_ENT / 2 - s] = &TL_TABLE[j];
+		sin_tab[          s] = sin_tab[SIN_ENT / 2 - s] = j;
 		/* degree 180 - 270    , degree 360 - 270 : minus section */
-		SIN_TABLE[SIN_ENT / 2 + s] = SIN_TABLE[SIN_ENT - s] = &TL_TABLE[TL_MAX + j];
+		sin_tab[SIN_ENT / 2 + s] = sin_tab[SIN_ENT - s] = TL_MAX + j;
 	}
 	for (s = 0;s < SIN_ENT; s++) {
-		SIN_TABLE[SIN_ENT * 1 + s] = s < (SIN_ENT / 2) ? SIN_TABLE[s] : &TL_TABLE[EG_ENT];
-		SIN_TABLE[SIN_ENT * 2 + s] = SIN_TABLE[s % (SIN_ENT / 2)];
-		SIN_TABLE[SIN_ENT * 3 + s] = (s / (SIN_ENT / 4)) & 1 ? &TL_TABLE[EG_ENT] : SIN_TABLE[SIN_ENT * 2 + s];
+		sin_tab[SIN_ENT * 1 + s] = s < (SIN_ENT / 2) ? sin_tab[s] : EG_ENT;
+		sin_tab[SIN_ENT * 2 + s] = sin_tab[s % (SIN_ENT / 2)];
+		sin_tab[SIN_ENT * 3 + s] = (s / (SIN_ENT / 4)) & 1 ? EG_ENT : sin_tab[SIN_ENT * 2 + s];
 	}
 
 	/* envelope counter -> envelope output table */
@@ -666,36 +697,44 @@ static int OPLOpenTable(void) {
 		/* ATTACK curve */
 		pom = pow(((double)(EG_ENT - 1 - i) / EG_ENT), 8) * EG_ENT;
 		/* if( pom >= EG_ENT ) pom = EG_ENT-1; */
-		ENV_CURVE[i] = (int)pom;
+		env[i] = (int)pom;
 		/* DECAY ,RELEASE curve */
-		ENV_CURVE[(EG_DST >> ENV_BITS) + i]= i;
+		env[(EG_DST >> ENV_BITS) + i]= i;
 	}
 	/* off */
-	ENV_CURVE[EG_OFF >> ENV_BITS]= EG_ENT - 1;
+	env[EG_OFF >> ENV_BITS]= EG_ENT - 1;
 	/* make LFO ams table */
 	for (i=0; i < AMS_ENT; i++) {
 		pom = (1.0 + sin(2 * PI * i / AMS_ENT)) / 2; /* sin */
-		AMS_TABLE[i]         = (int)((1.0 / EG_STEP) * pom); /* 1dB   */
-		AMS_TABLE[AMS_ENT + i] = (int)((4.8 / EG_STEP) * pom); /* 4.8dB */
+		ams[i]         = (int)((1.0 / EG_STEP) * pom); /* 1dB   */
+		ams[AMS_ENT + i] = (int)((4.8 / EG_STEP) * pom); /* 4.8dB */
 	}
 	/* make LFO vibrate table */
 	for (i=0; i < VIB_ENT; i++) {
 		/* 100cent = 1seminote = 6% ?? */
 		pom = (double)VIB_RATE * 0.06 * sin(2 * PI * i / VIB_ENT); /* +-100sect step */
-		VIB_TABLE[i]         = (int)(VIB_RATE + (pom * 0.07)); /* +- 7cent */
-		VIB_TABLE[VIB_ENT + i] = (int)(VIB_RATE + (pom * 0.14)); /* +-14cent */
+		vib[i]         = (int)(VIB_RATE + (pom * 0.07)); /* +- 7cent */
+		vib[VIB_ENT + i] = (int)(VIB_RATE + (pom * 0.14)); /* +-14cent */
 	}
+
+	TL_TABLE  = tl;
+	SIN_TABLE = sin_tab;
+	AMS_TABLE = ams;
+	VIB_TABLE = vib;
+	ENV_CURVE = env;
 	return 1;
 }
 
 static void OPLCloseTable(void) {
-	free(TL_TABLE);
-	free(SIN_TABLE);
-	free(AMS_TABLE);
-	free(VIB_TABLE);
-	free(ENV_CURVE);
+	free((void *)TL_TABLE);
+	free((void *)SIN_TABLE);
+	free((void *)AMS_TABLE);
+	free((void *)VIB_TABLE);
+	free((void *)ENV_CURVE);
 	ENV_CURVE = NULL;
 }
+
+#endif /* FMOPL_FLASH_TABLES */
 
 /* CSM Key Controll */
 INLINE void CSMKeyControll(OPL_CH *CH) {

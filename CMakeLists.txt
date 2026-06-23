@@ -221,6 +221,10 @@ if(PLATFORM STREQUAL "pico")
     option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" OFF)
     if(PICO_PWM_AUDIO)
         add_compile_definitions(PICO_PWM_AUDIO=1)
+        # OPL2 lookup tables come from flash .rodata (fmopl_tables.c) instead of
+        # SRAM malloc — zero-SRAM HQ tables. Gates fmopl.c's table provider and
+        # adds the generated table file to scisoftseq (see src/sfx/softseq).
+        add_compile_definitions(FMOPL_FLASH_TABLES=1)
     endif()
 endif()
 
