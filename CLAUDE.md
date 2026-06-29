@@ -2453,6 +2453,27 @@ tag added, for this diagnosis; restore the throttle and drop the every-cel/`<TOP
 starfield behind the Two-Guys panels, AND a third overlay scene — now composite correctly. The fix is in
 `gfxr_interpreter_calculate_pic` (`sci_resmgr.c`, SCI0 Pico decode block, `HAVE_PICO`-only).
 
+**RE-INVESTIGATED + STILL-RESOLVED-AT-HEAD (2026-06-29) — a reported "Pestulon disappeared again" was NOT a
+committed regression; it renders correctly at clean HEAD.** A device session reported the title hidden *behind*
+the SQ3 logo (not on white). Findings:
+- **No committed change broke it.** `6e38cb56` is the sole fix commit; the only render-path commit since
+  (`7d5d767d`, sound) is entirely `PICO_PWM_AUDIO`-gated (default OFF), the rest are docs. So nothing in the
+  default-build render path changed since the 2026-06-22 confirmation.
+- **Added a gated `[ovl]` probe** (`sci_resmgr.c` overlay decode, `FSCI_PROBE_GFX`): logs `restore_base`, the
+  base PSRAM `vaddr`, and the visual-buffer sum **before/after** the overlay's own draw (`delta`). It names the
+  failing link directly — `restore_base=0` or `sum_before≈255*N`=white/no-base, garbage `sum_before`=stale
+  `vaddr`, `delta=0`=overlay drew nothing.
+- **Device: 3/3 cold boots on the probe build (≈HEAD) AND the clean shipping build rendered Pestulon
+  correctly.** Healthy `[ovl]` baseline (pic id=2974, the overlay): `restore_base=1 vaddr=4904
+  sum_before=2929353` (a real logo — NOT ~16.3M=white) `delta=405509` (the overlay **drew**). The 2nd `[ovl]`
+  line is the `pic_unscaled` re-decode (`gfxop_add_to_pic` calls `gfxr_add_to_pic` twice): it reloads the
+  composite (`sum_before` = prior `sum_after`) and redraws the same pixels (`delta=0`). Both correct.
+- **Conclusion:** the overlay path is **runtime-state-fragile but correct at clean HEAD**; the earlier
+  "disappeared" was almost certainly an artifact of *uncommitted* in-session experiments (an `operations.c`
+  dirty-rect freelist, an overlay re-stage attempt, and ~9KB of extra GC-pool resident pressure — all
+  reverted), not a HEAD bug. The `[ovl]` probe is **kept as standing diagnostic**: if it ever flickers again,
+  capture the `[ovl]` line and diff against the baseline above to name the flip.
+
 **Root cause — the Pico SCI0 overlay decode never preserved the base pic.** `overlay:` (sel 0x0111) →
 `kDrawPic` with `add_to_pic=1` → `gfxop_add_to_pic` → `gfxr_add_to_pic`, which composites the overlay pic
 onto the cached base pic (`res->scaled_data.pic`) with `DRAWPIC01_FLAG_OVERLAID_PIC`. Desktop preserves the

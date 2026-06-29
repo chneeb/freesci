@@ -242,12 +242,40 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
 		}
 
+#ifdef FSCI_PROBE_GFX
+		/* [ovl] overlay-decode probe: sum the visual buffer right after the base
+		   restore/white-clear and again after the overlay's own draw, so a capture
+		   shows whether restore_base engaged + from what PSRAM addr, what the base
+		   looked like (sum_before ~= 0xff*N => white clear, varied => real logo,
+		   odd => stale/wrong addr) and whether the overlay actually drew (delta!=0). */
+		unsigned long _ovl_before = 0;
+		if (flags & DRAWPIC01_FLAG_OVERLAID_PIC) {
+			gfx_pixmap_t *_vm = scaled_pic->visual_map;
+			size_t _n = (size_t)(_vm->index_xl * _vm->index_yl), _i;
+			for (_i = 0; _i < _n; _i++) _ovl_before += _vm->index_data[_i];
+		}
+#endif
+
 		/* Merged pass: draw visual + priority together.  control_map->index_data
 		   is still NULL (control gets its own pass below), so control draws no-op
 		   via the index_data / NULL-buffer guards in the draw helpers. */
 		gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
 				&style, res->id, 0,
 				state->static_palette, state->static_palette_entries);
+
+#ifdef FSCI_PROBE_GFX
+		if (flags & DRAWPIC01_FLAG_OVERLAID_PIC) {
+			gfx_pixmap_t *_vm = scaled_pic->visual_map;
+			size_t _n = (size_t)(_vm->index_xl * _vm->index_yl), _i;
+			unsigned long _ovl_after = 0;
+			for (_i = 0; _i < _n; _i++) _ovl_after += _vm->index_data[_i];
+			sciprintf("[ovl] id=%d restore_base=%d vaddr=%lu N=%lu "
+				  "sum_before=%lu sum_after=%lu delta=%ld\n",
+				  res->id, restore_base, (unsigned long)base_vis_addr,
+				  (unsigned long)_n, _ovl_before, _ovl_after,
+				  (long)(_ovl_after - _ovl_before));
+		}
+#endif
 
 		byte *reuse_aux_buf = NULL;
 		{	/* Push visual to PSRAM; pico_blit_indexed handles psram_valid==1.
