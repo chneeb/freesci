@@ -4,7 +4,7 @@ FreeSCI is a Sierra SCI game interpreter (circa 2007), ported to SDL2 with a CMa
 
 ## Branch / merge status (2026-06-23)
 
-All Pico work lives on **`pico-wip-render-debug`**, currently **51 commits ahead of `master`, 0 behind** → a
+All Pico work lives on **`pico-wip-render-debug`**, currently **54 commits ahead of `master`, 0 behind** → a
 clean **fast-forward** merge (no conflicts possible). Local `master` is itself 2 commits ahead of
 `origin/master` (`origin` = upstream `wjp/freesci-archive`; `fork` = `chneeb/freesci`), so a merge would be
 purely local; pushing is a separate decision. **Kept as a branch for now — not merged.**
@@ -73,7 +73,7 @@ kept as cheap standing insurance — it was the canary for the now-CLOSED "aspb"
 | Option (default) | Define | Probes gated | Where |
 |---|---|---|---|
 | `FSCI_PROBE_STR` (**ON**) | `FSCI_PROBE_STR` | `[strprobe]` — SCI string kernels writing past the dest buffer's real size; `kFormat` overflow check in `CHECK_OVERFLOW1` | `kstring.c` |
-| `FSCI_PROBE_GFX` (OFF) | `FSCI_PROBE_GFX` | `[pcol]`/`[ctl]` (priority/control decode), `[oc]` (onControl scans), `[pblit]` (occlusion) + desktop mirrors `[dpcol]`/`[dpblit]` (env `FREESCI_PRIPROBE=1`) | `sci_resmgr.c`, `kgraphics.c`, `pico_driver.c`, `operations.c`, `gfx_support.c` |
+| `FSCI_PROBE_GFX` (OFF) | `FSCI_PROBE_GFX` | `[pcol]`/`[ctl]` (priority/control decode), `[ovl]` (overlay base-restore/composite: `restore_base`, base PSRAM `vaddr`, visual-sum `delta`), `[oc]` (onControl scans), `[pblit]` (occlusion), `[pstat]`/`[pbuf]`/`[pupd]` (driver static-buffer swap / cel-buffer target / flush+BACK-restore rects) + desktop mirrors `[dpcol]`/`[dpblit]` (env `FREESCI_PRIPROBE=1`) | `sci_resmgr.c`, `kgraphics.c`, `pico_driver.c`, `operations.c`, `gfx_support.c` |
 | `FSCI_PROBE_MEM` (OFF) | `FSCI_PROBE_MEM` | `[mem] BREAKDOWN`/`PXM`/`room enter`/`room ready` lines; desktop `desktop_mem_probe` (env `FREESCI_MEMPROBE=1`) | `kgraphics.c`, `operations.c` |
 | `FSCI_PROBE_MEM_CENSUS` (OFF) | `FSCI_PROBE_MEM_CENSUS` | `[mem] CENSUS`/`SITES` + the `--wrap` malloc histogram & call-site tagger (~27.6KB `.bss`). **Implies `FSCI_PROBE_MEM`** (the dump prints inside the breakdown). | `kgraphics.c`, `pico_mem_census.c` |
 | `FSCI_PROBE_PARSER` (OFF) | `FSCI_PROBE_PARSER` | `[gnf]` per-command GNF-rebuild transient byte size | `kstring.c` |
@@ -1223,6 +1223,35 @@ coalesces or returns the sbrk'd top, so:
   parse transients (and the `gfx_tools.c:307` / `reg_t_hashmap.c:42` churn the `[arenagrow]` log names). This
   is incremental fragmentation reduction, not a single fix — and per the Codex assessment below, do not expect
   it to buy comfortable margin, only to push the ceiling-hit later.
+- **NB the `reg_t_hashmap.c:42` GC-churn candidate above was TRIED and is net-negative — see the next note.**
+
+### TRIED + REVERTED (2026-06-28) — GC/dirty-rect churn pools (L1/L2/L3) + GC-interval raise; do NOT re-attempt cold
+
+The churn-reduction candidates named in the bullet above were all built behind `HAVE_PICO`, device-tested, and
+**fully reverted** (`git checkout` — never committed). Recorded so they aren't redone blind:
+
+- **L3 — persist the two GC `reg_t_hash_map`s** (a `clear_##TYPE##_hash_map` macro fn + `gc_acquire_map` in
+  `gc.c`, allocate-once + clear-for-reuse instead of new/free per GC). **It WORKS at its narrow goal** —
+  device `[arenagrow]` showed `reg_t_hashmap.c:42` (the named ratchet driver) fire **once** instead of
+  repeatedly. **But it is net-negative:** the ~9KB resident (2 map headers + node pool) is **peak-NOT-neutral**
+  and was held *through* in-game restores, raising the restore peak → the spaceship-hatch scene OOM'd at the
+  physical ceiling (`malloc 9128 failed` → `kScriptID` no-dispatch → debugger) on a scene that was playable
+  before. The GC churn it removes helps *steady play*, not the *restore peak* that's actually binding. A
+  `game_exit`-time pool-free was considered (would make it restore-neutral) but not pursued — the fragmentation
+  wall is at the ceiling regardless. **Lesson: a permanent GC-working-set scratch is the wrong shape — its cost
+  lands on the restore peak, its benefit doesn't.**
+- **L1 (dirty-rect node freelist, `operations.c`) + L2 (GC worklist chunk pool, `gc.c`)** — cheap (<2KB), low
+  risk, but their fragmentation benefit was **unproven in the device log** (they don't force `[arenagrow]`
+  grows, so the win is invisible). Reverted alongside L3.
+- **`GC_INTERVAL` 2048→4096** (collect half as often to cut GC-churn) — device-tested clean (no debug console,
+  **no `alloc_clone_entry` OOM** across a 3-restore session) but its benefit was **unattributable** (the L3
+  revert in the same build did the real work) and it re-opens the documented clone-table-growth risk (2048 was
+  chosen *because* a longer interval OOM'd `alloc_clone_entry` — see `vm.h`). Reverted to 2048.
+
+**Bottom line:** the `reg_t_hashmap`/GC churn lever is *exhausted* (works but net-negative); the dirty-rect and
+worklist pools are *unproven and not worth the complexity*; raising `GC_INTERVAL` trades GC-churn for
+clone-table-growth and didn't clearly help. The still-untried churn candidates are only the **control/priority
+decode temporaries and the GNF parse transients** — and per Codex, don't expect comfortable margin from them.
 
 ### ASSESSMENT (Codex, `PICO_SQ3_SRAM_CEILING_ASSESSMENT.md`, 2026-06-12) — at the practical SRAM ceiling
 
