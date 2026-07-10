@@ -207,6 +207,9 @@ halts legibly (pic/view/script unchanged — they MUST fit). This makes a too-bi
 NOT make music play — it just stops sound from crashing the intro.
 
 **Levers assessed for actually fitting intro music — only one is viable, and it's unbuilt:**
+*(SUPERSEDED 2026-07-10 — see the "RE-ANALYSIS" section below: three cheaper levers were missed here; the
+vocab-borrow is now a last-mile helper, not the sole path. Kept for the rejection reasoning on PWM_BUF/lazy
+chip/fixed buffer, which still stands.)*
 - **`PICO_PWM_BUF_FRAMES` 512→256 — REJECTED.** Frees only ~2KB steady-state, and breaks audio: 256 frames =
   11.6ms produced/poll < the 16.6ms 60Hz drain → ring underrun/stutter. 512 (23.2ms/poll) is the floor.
 - **Lazy OPL chip alloc — only shifts the peak.** Defers the ~7KB chip, but the intro is *where* music starts,
@@ -234,6 +237,119 @@ NOT make music play — it just stops sound from crashing the intro.
 
 **Bottom line: sound stays disabled.** The stack is ready to switch on (`-DPICO_PWM_AUDIO=ON`) and won't crash
 the intro anymore (graceful skip), but real intro music needs the vocab-borrow spike above, which isn't built.
+
+#### RE-ANALYSIS (2026-07-10, code-read — the "vocab-borrow is the ONLY path" conclusion above is SUPERSEDED)
+
+A fresh read of the actual sound stack (not the CLAUDE.md summary) found **three levers the earlier analysis
+missed**, two of them cheap and mechanical, which together change the recommended plan. The vocab-borrow
+(above) is now **demoted from "the one viable path" to a small last-mile helper** — see lever 4. Nothing
+built yet; this records the corrected plan. All line numbers verified in-tree this session.
+
+**Corrected budget (the earlier "~10–13KB resident, ~19KB transient" was wrong on the transient):**
+- **Resident with sound ON ≈ 13KB** (verified): OPL chip state ~7KB (`fmopl.c:1094-1105`, one `calloc` of
+  `sizeof(FM_OPL)` + `sizeof(OPL_CH)*9`), mixer compbufs 2×512×4 = 4KB (`mixer/soft.c:95-96`) + feed buf
+  ~1KB (`:180`) + writebuf ~0.5KB (`:311`), PCM ring `pcm_ring[2048]` = 2KB `.bss`
+  (`audio/pwm_synth.c:15`), **plus the song data resident for the whole playback** (18,996B for the SQ3
+  intro).
+- **Transient at song START ≈ 38KB, NOT 19KB (finding #2 below):** the resource's decompressed copy AND the
+  iterator's `memdup` copy are co-resident. The recorded intro OOM (`malloc 18996 failed`,
+  `decompress0.c:50`) died at the *decompress* (step 1) before the doubling even happened — so the doubling
+  was never in the earlier accounting. Contiguity, not total free, remains the binding ask.
+
+**Finding #1 (CHEAP, verified) — ~4.7KB of the ~7KB OPL "chip state" can move to flash `const`.**
+`FN_TABLE[1024]` (4096B) + `AR_TABLE[75]` + `DR_TABLE[75]` (600B) live *inside* `FM_OPL` (`fmopl.h:127-129`)
+but are computed **only** in `OPL_initalize`/`init_timetables` (`fmopl.c:588-608`, `:764-768`) as pure
+functions of `freqbase = ((double)clock/rate)/72` — both compile-time constants on Pico (fixed 22050Hz,
+fixed clock). They are never rewritten after init (the per-slot `AR`/`DR` pointers just index into them, and
+`FN_TABLE` is read-only in `OPLWriteReg`). So they can be precomputed `const` in `fmopl_tables.c` exactly
+like the five big tables already are (`FMOPL_FLASH_TABLES`, `OPLOpenTable`, `fmopl.c:610-624`), dropping the
+per-chip SRAM from ~7KB → **~2.3KB**. Mechanical extension of the existing flash-table pattern; low risk.
+(Caveat: they'd have to move OUT of the `FM_OPL` struct to a shared const — the struct is `calloc`'d as one
+block, so this is a small representation change like the `SIN_TABLE`→offsets one already done.)
+
+**Finding #2 (CHEAP, verified) — the iterator DOUBLES every song; halve the song-start transient for free.**
+`songit_new` does `it->data = sci_refcount_memdup(data, size)` (`iterator.c:1985`), and the caller
+`ksound.c:116-121` (`_pick_song`/`kDoSound`) passes `song->data` from `scir_find_resource(..., lock=0)`
+(`ksound.c:97,116`) — i.e. the resource copy is **still live in the LRU** when the memdup runs, so both are
+resident. **Pico-gated fix:** steal `res->data` into the iterator and immediately evict the resource (the
+exact evict-immediately pattern pic/view decode already uses), instead of memdup+leave-in-LRU. The iterator
+is the sole reader after that point (loop-rewinds read `self->data`, never the resource;
+`iterator.c:172,386,419`; teardown `sci_refcount_decref(self->data)` `:722`). Halves the ~38KB peak → ~19KB.
+
+**Finding #3 (the NEW real lever, verified) — song playback reads are SEQUENTIAL → the song can live in
+PSRAM, streamed through a small SRAM window.** Playback consumes the song strictly as
+`cmd = self->data[channel->offset++]` (`iterator.c:172`) plus tiny `memcpy(buf+1, self->data+offset,
+paramsleft)` of ≤ a few param bytes (`:209`) and `_parse_ticks(self->data+offset, ...)` (`:419`) — monotonic
+per channel, single-digit bytes per 60Hz tick, with only occasional loop-point rewinds. On the ~4MB/s PSRAM
+SPI link a 1–2KB SRAM window refilled on a boundary crossing costs ~0.5ms and rarely — imperceptible at
+60Hz. So a song resource can sit in a **fixed PSRAM slot** (the `0x700000` visual-borrow scratch pattern,
+`pico_driver.c:101`) with playback SRAM cost ≈ the window, not the whole song — this is what unlocks
+**in-room** music (which overlaps the parser, so the vocab borrow can't help it). **Exclusion:** embedded-PCM
+songs (`self->data[0] == 2`, `iterator.c:518,710`) read bulk digitized-sample data, not a byte stream — those
+keep the current graceful-skip or an SRAM fallback.
+
+**Revised ranked levers:**
+| # | Lever | Effect | Risk | Effort |
+|---|---|---|---|---|
+| 1 | FN/AR/DR → flash `const` | −4.7KB resident/chip | low | small (`fmopl.c` + `fmopl_tables.{c,h}`) |
+| 2 | Steal `res->data` + evict, drop the memdup | −~19KB song-start transient | med-low | small (`iterator.c`/`ksound.c`, `HAVE_PICO`) |
+| 3 | Song → fixed PSRAM slot, streamed SRAM window | song size → ~1–2KB during playback; **enables in-room music** | medium (loop rewind across window, PCM-song fallback, refcount teardown from PSRAM) | the real spike (SCI0 `iterator.c` read path) |
+| 4 | Vocab-borrow (above) — **demoted** | with #2+#3 the vocab hole is needed only for the ms of *decode*, not the whole intro → the recorded sfx↔parser-coordination problem largely evaporates | low once #3 exists | small |
+
+**Do NOT** trade away the B-1.2 16KB decompress scratch to fund sound — it is what holds restore chains
+together; sound must not regress restores.
+
+**Recommended scope (honest, given the Codex "sound + long restore chains + comfortable margin = out of
+reach" verdict):**
+- **Phase A (cheap, ~1 session): levers 1+2.** Resident ~8.5KB, song-start transient ~19KB. Flash
+  `-DPICO_PWM_AUDIO=ON`, measure with `[arenagrow]`/`[mem] BREAKDOWN` whether the intro song now decodes
+  (graceful skip still catches misses). May already yield in-room music where the heap is calmer.
+- **Phase B (the spike): lever 3 (+4 if needed).** Full music incl. intro; playback ~12KB total resident.
+- Even A+B spends roughly **half** the ~26KB clean-build margin, so **sound remains best-effort alongside
+  long restore chains** — declare that scope rather than chase "sound + robust arbitrary-length restores".
+
+#### PHASE A BUILT + DEVICE-TESTED → REVERTED (2026-07-10) — sound stays disabled; two findings banked
+
+Levers 1 and 2 were built (`FMOPL_FLASH_TABLES`/`HAVE_PICO`-gated), both builds clean, flashed with
+`-DPICO_PWM_AUDIO=ON`, and **device-tested for the first time ever** (the sound stack had never actually
+driven the PWM before). Result: **not viable — reverted (all code back to HEAD; sound stays OFF by default).**
+Two concrete, load-bearing findings were captured before reverting:
+
+- **FINDING (decisive) — the OPL synth output is garbled ("broken tractor"), and it is NOT the memory
+  changes.** Lever 1 baked `FN_TABLE[1024]`+`AR_TABLE[75]`+`DR_TABLE[75]` into flash `.rodata` for the fixed
+  Pico config (mono/22050Hz/clock 3579545), dropping ~4.7KB from the per-chip `FM_OPL` (ELF-verified: symbols
+  at `0x100bxxxx`, sizes 0x1000/0x12c/0x12c = 4696B). **Those baked tables are byte-for-byte CORRECT** —
+  proven by an independent re-derivation of `OPL_initalize`/`init_timetables` at 22050Hz diffed against
+  `fmopl_tables.c` (`OK: … EXACTLY match the fmopl.c runtime formula`, not via the generator). So the bad
+  audio is **the PWM/mixer/OPL output path itself, which is untested/untuned** (ring underrun at the 60Hz
+  poll vs 22050Hz drain, sample-rate/format, or mixer immaturity) — a **separate, larger Phase-B-class job**,
+  NOT lever 1. **A future sound attempt starts from "tune the PWM/mixer path," not "re-derive tables."**
+- **FINDING — sound is fatal at the SRAM ceiling on game load (confirms the Codex verdict quantitatively).**
+  With sound ON, a game load OOM'd: `calloc 16384 failed` at `sm_allocate_stack` (`seg_manager.c`) — the
+  **VM value stack** (one of the three irreducible 16KB baselines) couldn't find a contiguous 16KB block
+  (`free=80752` total but `arena=469216`, i.e. maxed + fragmented). The resident sound stack (~13KB + song
+  data) ate the margin the load needs. **Phase A's ~5KB (lever 1) + evict (lever 2) cannot close this** — the
+  arena still maxes and fragments during play. This is the documented "sound doesn't fit at the ceiling" wall,
+  now reproduced with sound actually on.
+
+- **Levers as built (reverted, but recorded so a Phase-B restart doesn't re-derive them):** *Lever 1* — flash
+  FN/AR/DR via `tools/gen_fmopl_tables.c` `build_rate()` (mirrors the runtime math; regen per the file
+  header), struct members `#ifndef FMOPL_FLASH_TABLES`'d out, init write-loops compiled out, 4 read sites
+  through `OPL_{FN,AR,DR}_TABLE()` accessor macros. *Lever 2 (safe half)* — `build_iterator` (`ksound.c`,
+  `HAVE_PICO`) evicts the sound resource via `scir_evict_resource_data` right after `songit_new` (guarded
+  `lockers==0`), killing the steady-state duplicate copy; the `memdup` **2× transient** is unchanged (its
+  removal needs the fragile refcount-ownership transfer — `res->data` is plain `sci_malloc`, tee-iterators
+  incref/decref-share it, `iterator.c:616,1165,722` — do NOT attempt as a "steal the pointer" one-liner).
+- **A `[pwm]` boot marker** was added to `pico_main.c` (also reverted) to confirm the sound firmware actually
+  ran (`[pwm] sound-enabled firmware: launching freesci_main argc=5 (no -q)`) — it settled an initial
+  wrong-uf2 upload. Keep in mind for the next attempt: the DEFAULT build (`build-pico`, no `PICO_PWM_AUDIO`)
+  still passes `-q` and prints `[SFX] Sound disabled.`; only the PWM build drops `-q`.
+
+**Bottom line unchanged:** sound stays disabled. Phase A's memory wins are real but small and only matter with
+sound ON, so they were reverted with it. The two blockers for audible music are now sharply named: (1) the
+PWM/mixer output path needs actual DSP tuning (garbled today), and (2) even tuned, the resident stack OOMs
+game-load at the ceiling — needs Lever 3 (Phase B: PSRAM-streamed song data, the real unlock) AND likely a
+"sound incompatible with restore chains" scope. Neither is a quick edit.
 
 ### Pico correctness fixes (do NOT re-apply the old RAM optimizations)
 
