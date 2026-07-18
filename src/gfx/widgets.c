@@ -898,6 +898,27 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 	gfxw_dyn_view_t *view = (gfxw_dyn_view_t *) widget;
 	DRAW_ASSERT(widget, GFXW_DYN_VIEW);
 
+#if defined(HAVE_PICO) && defined(PICO_STATIC_VIEW_BAKE)
+	/* A settled stopUpd view (NO_UPDATE) is conceptually part of the background.
+	   Desktop keeps it via a persistent back buffer; Pico has a single visual[0]
+	   that gets wholesale-restored from static_bg on every GFX_BUFFER_BACK, so a
+	   NO_UPDATE view that no longer redraws (e.g. PQ2's glovebox registration /
+	   businessCard, which never move) is erased and never comes back.  Draw it
+	   through the static path too (GFX_BUFFER_STATIC -> pico_bake_static_region),
+	   exactly like a picview, so BACK restores reproduce it.  Live actors have
+	   NO_UPDATE clear and fall through to the BACK-only draw below, so they are
+	   never baked (no motion trails).  0x0004 == _K_VIEW_SIG_FLAG_NO_UPDATE
+	   (kernel.h; the engine flag is not visible in this gfx-layer file).
+	   Caveat: a view that is baked and *later* animates (SQ3's door opens after
+	   its stopUpd) can leave a ghost, since the single buffer cannot cheaply
+	   restore the original background under it. */
+	if (view->signal & 0x0004)
+		GFX_ASSERT(gfxop_draw_cel_static(view->visual->gfx_state, view->view,
+						 view->loop, view->cel,
+						 _move_point(view->draw_bounds, pos),
+						 view->color, view->palette));
+#endif
+
 	GFX_ASSERT(gfxop_draw_cel(view->visual->gfx_state, view->view, view->loop,
 				  view->cel, _move_point(view->draw_bounds, pos),
 				  view->color, view->palette));

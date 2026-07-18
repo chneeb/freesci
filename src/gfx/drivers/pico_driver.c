@@ -456,7 +456,9 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                   uint8_t *destbuf,    /* already homed to (dest.x, dest.y) */
                   int dest_stride,
                   uint8_t *pri_buf,    /* priority index_data, or NULL */
-                  int pri_stride)
+                  int pri_stride,
+                  int bake_static_pri) /* 1: also write this cel's priority into the
+                                          PSRAM priority map (GFX_BUFFER_STATIC only) */
 {
     int xl = src.xl, yl = src.yl;
     /* color_key is an int (-1 == GFX_PIXMAP_COLOR_KEY_NONE); test has_alpha on the
@@ -508,14 +510,32 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
     /* Priority source for occlusion gating.  The engine's priority_map holds the
        background's baked-in priorities, but on Pico its index_data is offloaded to
        PSRAM after decode (operations.c:2334), so the caller passes pri_buf=NULL.
-       When that happens, read the priority row back from PSRAM per row (read-only —
-       we never write sprite priorities back, so the PSRAM map stays the clean
-       background base and no cross-frame priority trail accumulates).  This gives
-       correct background occlusion; inter-sprite z-order is not gated. */
+       When that happens, read the priority row back from PSRAM per row.
+
+       The PSRAM map plays the role of SDL's static_priority_map: background plus
+       baked-in picviews, read-only to moving actors.  Actors (GFX_BUFFER_BACK) only
+       READ it, so no cross-frame priority trail accumulates.  Static picviews
+       (GFX_BUFFER_STATIC) additionally WRITE their priority back — see
+       bake_static_pri below.  Inter-actor z-order is still not gated (that needs an
+       SRAM working map we can't afford). */
     int psram_pri = (!row_pri && priority >= 0 && s_shared_priority
                      && !s_shared_priority->index_data && s_shared_priority->psram_valid);
     int pri_xl = psram_pri ? s_shared_priority->index_xl : 0;
     int pri_yl = psram_pri ? s_shared_priority->index_yl : 0;
+
+    /* Bake this cel's priority into the PSRAM map, the analogue of the desktop
+       _gfxop_draw_priority(static_priority_map, ...) (operations.c:380) that is
+       skipped on Pico because priority_map->index_data is NULL.  Without it a
+       kAddToPic/stopUpd picview (SQ3's door + motivator, PQ2's parking-lot cars)
+       is drawn and colour-baked but leaves no priority, so actors paint over it.
+       Only for GFX_BUFFER_STATIC, and only for the SCI0 0..15 range the packed
+       nibble map can represent. */
+#ifdef PICO_STATIC_VIEW_BAKE
+    int bake_pri = (bake_static_pri && psram_pri && priority <= 15);
+#else
+    int bake_pri = 0;      /* feature off -> priority map stays the clean background */
+    (void)bake_static_pri;
+#endif
 
     /* [pblit] probe: per-sprite occlusion summary (throttled, strip later). */
     int pb_drawn = 0, pb_supp = 0, pb_min = 99, pb_max = -1, pb_opaque = 0;
@@ -531,6 +551,12 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
         }
 
         const uint8_t *pri_row = row_pri;  /* SRAM priority row, or NULL */
+        /* Row-scope state for the optional bake write-back (see below). */
+        int      pri_loaded = 0;    /* s_pri_row holds this row's PSRAM priorities */
+        int      pri_dirty  = 0;    /* a bake modified s_pri_row -> store it back   */
+        int      pri_pidx = 0, pri_byte0 = 0;
+        size_t   pri_nbytes = 0;
+        uint32_t pri_addr = 0;
         if (psram_pri) {
             int py = dest.y + y;
             if (py >= 0 && py < pri_yl && dest.x >= 0 && dest.x + xl <= pri_xl) {
@@ -538,23 +564,25 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                     /* Priority map is 2 px/byte in PSRAM (merged-decode packing).
                        Read the packed byte span covering this row and unpack the
                        nibbles into s_pri_row (mirrors _gfxop_scan_one_bitmask). */
-                    int pidx  = py * pri_xl + dest.x;
-                    int byte0 = pidx >> 1;
-                    int byteN = (pidx + xl - 1) >> 1;
-                    size_t nbytes = (size_t)(byteN - byte0 + 1);
-                    psram_load(s_shared_priority->psram_addr + (uint32_t)byte0,
-                               s_pri_pack, nbytes);
+                    int byteN;
+                    pri_pidx  = py * pri_xl + dest.x;
+                    pri_byte0 = pri_pidx >> 1;
+                    byteN     = (pri_pidx + xl - 1) >> 1;
+                    pri_nbytes = (size_t)(byteN - pri_byte0 + 1);
+                    psram_load(s_shared_priority->psram_addr + (uint32_t)pri_byte0,
+                               s_pri_pack, pri_nbytes);
                     for (int px = 0; px < xl; px++) {
-                        int p = pidx + px;
-                        uint8_t b = s_pri_pack[(p >> 1) - byte0];
+                        int p = pri_pidx + px;
+                        uint8_t b = s_pri_pack[(p >> 1) - pri_byte0];
                         s_pri_row[px] = (p & 1) ? (b >> 4) : (b & 0x0f);
                     }
                 } else {
-                    psram_load(s_shared_priority->psram_addr
-                               + (uint32_t)(py * pri_xl + dest.x),
-                               s_pri_row, (size_t)xl);
+                    pri_addr = s_shared_priority->psram_addr
+                               + (uint32_t)(py * pri_xl + dest.x);
+                    psram_load(pri_addr, s_pri_row, (size_t)xl);
                 }
                 pri_row = s_pri_row;   /* gate against background base priority */
+                pri_loaded = 1;
             }
             /* else: row off the priority map -> pri_row stays NULL -> write through */
         }
@@ -574,8 +602,16 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                     }
                     if ((int)pri_row[x] <= priority) {
                         row_dst[x] = lut[idx];
-                        if (row_pri)  /* only the SRAM map is written back */
+                        if (row_pri)  /* SRAM working map, when one exists */
                             row_pri[x] = (uint8_t)priority;
+                        else if (bake_pri && pri_loaded
+                                 && (int)s_pri_row[x] < priority) {
+                            /* Same "draw only lower priority" condition as the
+                               desktop _gfxop_draw_priority DRAW_LOOP; the row is
+                               stored back to PSRAM once, after the x loop. */
+                            s_pri_row[x] = (uint8_t)priority;
+                            pri_dirty = 1;
+                        }
                         if (psram_pri) pb_drawn++;
                     } else if (psram_pri) {
                         pb_supp++;
@@ -586,6 +622,26 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                 }
             }
         }
+        /* Store the baked picview priorities back.  Only the byte span that was
+           loaded is written, and only nibbles inside [dest.x, dest.x+xl) were
+           modified, so a pixel sharing an edge byte with a neighbour outside the
+           cel keeps its original nibble. */
+        if (pri_dirty) {
+            if (s_shared_priority->nibble_packed) {
+                for (int px = 0; px < xl; px++) {
+                    int p = pri_pidx + px;
+                    uint8_t *b = &s_pri_pack[(p >> 1) - pri_byte0];
+                    uint8_t v = (uint8_t)(s_pri_row[px] & 0x0f);
+                    *b = (p & 1) ? (uint8_t)((*b & 0x0f) | (v << 4))
+                                 : (uint8_t)((*b & 0xf0) | v);
+                }
+                psram_store(s_shared_priority->psram_addr + (uint32_t)pri_byte0,
+                            s_pri_pack, pri_nbytes);
+            } else {
+                psram_store(pri_addr, s_pri_row, (size_t)xl);
+            }
+        }
+
         row_dst += dest_stride;
         if (row_pri) row_pri += pri_stride;
     }
@@ -625,7 +681,7 @@ void pico_render_background(gfx_driver_t *drv)
     gfx_pixmap_t *bg = ps->static_bg;
     rect_t full = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
     rect_t dst  = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
-    pico_blit_indexed(ps, bg, -1, full, dst, ps->visual[0], PICO_XSIZE, NULL, 0);
+    pico_blit_indexed(ps, bg, -1, full, dst, ps->visual[0], PICO_XSIZE, NULL, 0, 0);
     /* Stage the new background in visual[0] but do NOT flush it to the LCD here.
        gfxop_new_pic runs this from inside kDrawPic, before kAnimate's open
        transition; an eager flush snapped the full new pic onto the screen, then
@@ -765,7 +821,8 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
                           : NULL;
         int pri_stride = pridata ? s_shared_priority->index_xl : 0;
         pico_blit_indexed(S, pxm, priority, src, dest, destptr, PICO_XSIZE,
-                          priptr, pri_stride);
+                          priptr, pri_stride,
+                          buffer == GFX_BUFFER_STATIC);
     } else if (s_shared_priority && s_shared_priority->index_data) {
         gfx_crossblit_pixmap(drv->mode, pxm, priority, src, dest,
                               destptr, PICO_XSIZE,
@@ -890,7 +947,7 @@ static int pico_update(struct _gfx_driver *drv,
             rect_t bgsrc = gfx_rect(src.x, src.y, src.xl, src.yl);
             rect_t bgdst = gfx_rect(0, 0, src.xl, src.yl);
             pico_blit_indexed(S, S->static_bg, -1, bgsrc, bgdst,
-                              destptr, PICO_XSIZE, NULL, 0);
+                              destptr, PICO_XSIZE, NULL, 0, 0);
         }
         break;
 

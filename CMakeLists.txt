@@ -192,6 +192,21 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_DECODE_CONTROL_MAP=1)
     endif()
 
+    # Bake settled stopUpd/kAddToPic views (NO_UPDATE + GFX_BUFFER_STATIC picviews)
+    # into the single Pico visual buffer so actors are occluded by them and static
+    # scene items persist. Desktop has 3 buffers; Pico has one, so this is the only
+    # way to get sprite-vs-static-view z-order and NO_UPDATE-view persistence.
+    # OFF by default because the COLOR half is un-bakeable on one buffer: a view that
+    # is baked and then animates/disposes (SQ3 door opening, a picked-up glovebox
+    # item, the Pestulon-logo overlay) leaves a ghost, and baked foreground (car
+    # windshield / police-dept door) redraws over later dialog boxes. The PRIORITY
+    # half (occlusion) is clean; the COLOR half needs save-unders we can't afford.
+    # See CLAUDE.md "Static-view occlusion on Pico". Flip ON to A/B on device.
+    option(PICO_STATIC_VIEW_BAKE "Bake static/NO_UPDATE views into the Pico buffer (occlusion + persistence)" OFF)
+    if(PICO_STATIC_VIEW_BAKE)
+        add_compile_definitions(PICO_STATIC_VIEW_BAKE=1)
+    endif()
+
     # THROWAWAY measurement build for roadmap #1 (text parser). When ON,
     # _init_vocabulary loads the full vocab once, prints its SRAM cost + the
     # GNF-build transient peak ([vocab] lines), then frees it and runs the game

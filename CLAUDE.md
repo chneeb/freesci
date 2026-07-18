@@ -2786,6 +2786,12 @@ User-reported on device (2026-06-23): **The Colonel's Bequest** generally **load
 These are correctness gaps in the Pico render path vs the SDL pipeline. Lower priority than the
 roadmap above (gameplay works without them), but documented so they aren't rediscovered cold.
 
+**UPDATE 2026-07-18 — PARTLY SUPERSEDED: the occlusion half was since BUILT and is a zero-SRAM win (behind
+`PICO_STATIC_VIEW_BAKE`, default OFF). The parked framing below assumed the only fix was a 32–64KB working
+map; that was wrong for the actual user bug (actors over STATIC views), which is fixed by baking static-view
+priority into the existing PSRAM map at zero new SRAM. The "inter-sprite z-order among MOVING actors" gap
+below is still genuinely parked. See the "BUILT + DEVICE-TESTED → TOGGLED OFF (2026-07-18)" section below.**
+
 **PARKED (2026-06-22, user decision) — investigated, root-caused, not pursued. The three bullets below are
 ONE root cause (no SRAM working priority map on Pico), and the first bullet's old "writes color
 unconditionally" claim is now CORRECTED: background occlusion already works.** The fix is real but spends
@@ -2828,6 +2834,71 @@ needs pack/unpack on read+write); C = dirty-rect scratch sized to the cast regio
 most invasive — needs a shared per-frame buffer). **Decision: parked.** All three cost resident SRAM, the
 scarcest resource, so the visual payoff (correct sprite/picview occlusion) does not currently justify the
 SRAM + complexity. If revisited, C is the only memory-responsible route; the blit side needs no changes.
+
+### BUILT + DEVICE-TESTED → TOGGLED OFF (2026-07-18) — static-view occlusion bake: PRIORITY half is a clean zero-SRAM win, COLOR half is un-bakeable on one buffer
+
+The "parked" occlusion gap above was re-attacked and the outcome splits cleanly in two: **priority occlusion
+can be baked for free and works; color persistence cannot be baked on a single buffer and regresses dynamic
+scenes.** All of it is now behind CMake `option(PICO_STATIC_VIEW_BAKE)` (**default OFF** = exact pre-2026-07-18
+baseline). Device-tested ON; **left OFF pending the user's baseline retest.** NOT committed at time of writing.
+
+**Corrected root-cause read (supersedes the "occlusion already works / only inter-sprite is broken" note
+above):** the actual user-visible bug was **actors drawn OVER static views** — Roger over SQ3's door +
+motivator (room 2), the PQ2 parking-lot cars over the character, glovebox items missing. Diagnosis via the
+disassembler (`stopUpd`/`setPri` in the scripts) proved these are **not** inter-*sprite* z-order: they are
+`kAddToPic` picviews **and** settled `stopUpd`→NO_UPDATE dynviews whose **priority was never written into the
+map** on Pico (the desktop `_gfxop_draw_priority(static_priority_map,…)` at `operations.c:380` is skipped
+because `priority_map->index_data` is NULL/PSRAM). So the fix is *not* the 32–64KB working map the parked note
+demanded — it is baking the **static** view's priority into the PSRAM map, which is **zero new SRAM**.
+
+**Change A — priority bake (CLEAN, the keeper) — `pico_driver.c` `pico_blit_indexed`.** `pico_blit_indexed`
+already reads the background priority row back from PSRAM every row to gate color (`s_pri_row`/`s_pri_pack`);
+it just never wrote anything. Added a `bake_static_pri` param (set by `buffer == GFX_BUFFER_STATIC` in
+`pico_draw_pixmap`): for a STATIC draw it now writes the cel's priority back into the PSRAM map, reusing the
+same scratch, with the exact desktop `_gfxop_draw_priority` condition (`existing < priority`). The
+nibble-pack read-modify-write was unit-tested off-device (312 alignment/width/priority cases + a mutation
+negative-control; harness in scratch). **Cost measured, not asserted:** `__end__`/`.bss` byte-identical with
+vs without (heap ceiling stays 475,104 clean), +312 B flash. This is the analogue of SDL writing priority into
+`static_priority_map`; moving actors (`GFX_BUFFER_BACK`) only READ the map, so no cross-frame priority trail.
+**Result:** PQ2 cars correctly occlude the character; SQ3 motivator correctly hides Roger. Priority occlusion
+is a real, free win.
+
+**Change B — route NO_UPDATE dynviews through the STATIC path — `widgets.c` `_gfxwop_dyn_view_draw`.** Change
+A only fires for STATIC-buffer draws (=`kAddToPic` picviews). SQ3's door/motivator are `stopUpd`→NO_UPDATE
+**dynviews** drawn to BACK, so A alone did NOT fix them (device-confirmed on the A-only flash: Roger still over
+both). B makes a settled NO_UPDATE dynview (`view->signal & 0x0004`) draw STATIC-then-BACK like a picview
+(`_gfxwop_pic_view_draw` already does this), so A bakes its priority AND `pico_bake_static_region` bakes its
+color. **This is what makes the glovebox items appear and fixes the SQ3 door/motivator z-order — and it is
+also what regresses every dynamic scene**, because the COLOR half is permanent and a single buffer cannot
+un-bake it:
+- **Picked-up items ghost** — PQ2 glovebox: take the ID, the view is removed but the baked pixels stay in
+  `static_bg`.
+- **Baked foreground redraws over dialogs** — PQ2 car windshield / police-dept front door are `stopUpd`
+  views; once baked into `static_bg` a later BACK restore blits them back **on top of** an open dialog box
+  → "dialogs overshadowed/corrupted."
+- **Animating-away leaves a ghost** — SQ3 door baked closed, then its open animation plays but the closed
+  door stays in the background; PQ2 glovebox "close animation then flips back open"; and the **SQ3 intro
+  Pestulon-logo overlay disappears again** (the overlay path re-clobbered by the bake, cf. the RESOLVED
+  overlay note — the color bake re-breaks it).
+
+**The clean split (the load-bearing conclusion):** **priority (occlusion) is safe to bake; color (appearance)
+is not.** Priority-only would fix SQ3 motivator + PQ2 cars + SQ3 door-occlusion with **none** of the four
+regressions (no color in `static_bg` → nothing to ghost or overdraw dialogs), at the cost of leaving the
+glovebox items *missing* (their appearance genuinely needs color persistence = save-unders, the parked memory
+cost) and a minor door **priority**-ghost (Roger clipped by the now-open door's stale priority footprint —
+far less visible than the color ghost). **Priority-only is a better axis than the user's mooted PQ2-vs-SQ3
+runtime switch**: it is correct for both games at once (occlusion vs appearance), not a per-game guess.
+
+**Current state (as toggled):** `PICO_STATIC_VIEW_BAKE` gates BOTH A and B together; **OFF** compiles B out
+(`#if defined(HAVE_PICO) && defined(PICO_STATIC_VIEW_BAKE)`) and forces `bake_pri = 0` in A, so OFF is the
+exact pre-2026-07-18 render path (the `pico_blit_indexed` signature/refactor is behaviorally inert when
+`bake_pri==0`). **ON** = the full A+B bake the user device-tested (z-order fixed, four color regressions).
+Desktop untouched (both files gated `HAVE_PICO`). All four builds clean (clean-OFF, ON, desktop, diag-OFF).
+
+**Next step if resumed:** split the toggle — keep A always-effective (or a `…_PRIORITY` toggle, default ON:
+free, fixes occlusion, no regressions) and demote B's COLOR bake to a separate default-OFF `…_COLOR` toggle
+(only safe for never-animating static items, which we can't detect at bake time). The glovebox-items case is
+genuinely blocked on per-view save-unders (the 64KB-class memory work), NOT on this bake.
 
 ### SCI version support on Pico — SCI0 ONLY (SCI1/VGA legibly rejected, not supported)
 
