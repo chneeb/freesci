@@ -2902,8 +2902,8 @@ half stays opt-in:
   actors are occluded by SQ3 door/motivator + PQ2 cars, **zero color regressions** (nothing in `static_bg`
   to ghost or overdraw dialogs), +4 B `.bss` (the one global int), heap ceiling unchanged. Residual: a
   view that later animates leaves a stale **invisible** priority footprint (minor door clip) — the accepted
-  trade. **Awaiting device retest** (verify occlusion holds, dialogs/overlay/glovebox-close all clean, and
-  gauge the door priority-ghost).
+  trade. **DEVICE-CONFIRMED (2026-07-18): SQ3 "worked great"** — Roger correctly occluded by the door +
+  motivator, dialogs/overlay/glovebox-close all clean, no color regressions. Shipped ON.
 - **`PICO_STATIC_VIEW_BAKE` (default OFF, implies PRIORITY)** — additionally persist NO_UPDATE-dynview
   **color** into `static_bg` (flag stays 0 → color bakes). Makes the PQ2 glovebox items *appear*, at the
   cost of the four device-confirmed color regressions above (picked-up-item ghost, dialog overdraw,
@@ -2914,6 +2914,27 @@ half stays opt-in:
 Desktop untouched (both files `HAVE_PICO`-gated). All four configs build clean (priority-ON default, BAKE-ON,
 desktop, priority-OFF baseline). The glovebox-items case remains genuinely blocked on per-view save-unders
 (the 64KB-class memory work), NOT on this bake — priority-only cannot and does not try to fix it.
+
+### OPEN (separate track, NOT the render work) — PQ2 clone-table OOM at copy-protection (2026-07-18)
+
+On the priority-only build (above), PQ2 booted, played the intro, showed the copy-protection screen briefly,
+then halted with a legible `[OOM]` LCD dump (photo, not a serial log — exact `free`/`arena` obscured by panel
+reflections): **`realloc` failed in `alloc_clone_entry` (`seg_manager.c`)** — the documented clone-table
+realloc-grow fragmentation OOM (see the `GC_INTERVAL 2048` correctness note: "if it OOMs again under heavy
+animation, lower it"). **This is NOT caused by the render change and is not a crash:**
+- The priority-only change is **gfx-layer only** — it does not create VM clones (clones come from `kClone` in
+  scripts); the failing allocation is the VM clone table.
+- It is **SRAM-neutral** — it writes priority into the PSRAM map (not SRAM) and in priority-only mode *skips*
+  the `static_bg` color store, so it does **less** heap work than baseline.
+- The full-BAKE build (which does *more*) got *past* copy-protection into the glovebox/car earlier, so
+  priority-only cannot be consuming more SRAM to fail earlier — most likely run-to-run fragmentation variance
+  (PQ2 runs closer to the ceiling than SQ3: more resources, 1843 vocab words vs SQ3's 1489).
+
+**Not chased this session (user chose to commit the render win and park this).** Levers when picked up, in
+order: (1) capture a `pico.log` for the exact `free`/`arena` (fragmentation = free ≫ size but no contiguous
+block, vs true exhaustion); (2) lower `GC_INTERVAL` (2048→1024, `vm.h`) so disposed clones are reclaimed
+before the table's `realloc`-grow can't find a contiguous run — the cheapest, lowest-risk shot, and exactly
+the tunable the GC note calls out. Orthogonal to all the static-view render work.
 
 ### SCI version support on Pico — SCI0 ONLY (SCI1/VGA legibly rejected, not supported)
 
