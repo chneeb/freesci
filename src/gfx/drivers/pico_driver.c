@@ -59,6 +59,12 @@ void pico_connect_engine_priority(gfx_pixmap_t *priority_map)
     s_shared_priority = priority_map;
 }
 
+/* Set by widgets.c around a NO_UPDATE dynview's static-routed draw in priority-only
+   mode (PICO_STATIC_VIEW_PRIORITY without PICO_STATIC_VIEW_BAKE): bake the view's
+   priority but do NOT persist its color into static_bg (so it can't ghost).  Always
+   0 for picviews and in full-bake mode, so their color still bakes. */
+int pico_priority_only_static = 0;
+
 void pico_free_visual(gfx_driver_t *drv)
 {
     struct _pico_state *ps = (struct _pico_state *)drv->state;
@@ -530,7 +536,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
        is drawn and colour-baked but leaves no priority, so actors paint over it.
        Only for GFX_BUFFER_STATIC, and only for the SCI0 0..15 range the packed
        nibble map can represent. */
-#ifdef PICO_STATIC_VIEW_BAKE
+#if defined(PICO_STATIC_VIEW_BAKE) || defined(PICO_STATIC_VIEW_PRIORITY)
     int bake_pri = (bake_static_pri && psram_pri && priority <= 15);
 #else
     int bake_pri = 0;      /* feature off -> priority map stays the clean background */
@@ -837,8 +843,10 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
     }
 
     /* Static picviews (kAddToPic scene objects) must survive BACK restores: bake
-       the drawn region into the PSRAM static_bg (see pico_bake_static_region). */
-    if (buffer == GFX_BUFFER_STATIC)
+       the drawn region into the PSRAM static_bg (see pico_bake_static_region).
+       Skipped when a NO_UPDATE dynview is routed here in priority-only mode — it
+       gets its priority baked (above) but must NOT persist color, or it ghosts. */
+    if (buffer == GFX_BUFFER_STATIC && !pico_priority_only_static)
         pico_bake_static_region(S, dest);
 
 #ifdef FSCI_PROBE_GFX

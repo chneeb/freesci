@@ -898,25 +898,35 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 	gfxw_dyn_view_t *view = (gfxw_dyn_view_t *) widget;
 	DRAW_ASSERT(widget, GFXW_DYN_VIEW);
 
-#if defined(HAVE_PICO) && defined(PICO_STATIC_VIEW_BAKE)
+#if defined(HAVE_PICO) && (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE))
 	/* A settled stopUpd view (NO_UPDATE) is conceptually part of the background.
-	   Desktop keeps it via a persistent back buffer; Pico has a single visual[0]
-	   that gets wholesale-restored from static_bg on every GFX_BUFFER_BACK, so a
-	   NO_UPDATE view that no longer redraws (e.g. PQ2's glovebox registration /
-	   businessCard, which never move) is erased and never comes back.  Draw it
-	   through the static path too (GFX_BUFFER_STATIC -> pico_bake_static_region),
-	   exactly like a picview, so BACK restores reproduce it.  Live actors have
-	   NO_UPDATE clear and fall through to the BACK-only draw below, so they are
-	   never baked (no motion trails).  0x0004 == _K_VIEW_SIG_FLAG_NO_UPDATE
-	   (kernel.h; the engine flag is not visible in this gfx-layer file).
-	   Caveat: a view that is baked and *later* animates (SQ3's door opens after
-	   its stopUpd) can leave a ghost, since the single buffer cannot cheaply
-	   restore the original background under it. */
-	if (view->signal & 0x0004)
+	   Desktop keeps it via a persistent back buffer; Pico has a single visual[0].
+	   Route the view through the static path (GFX_BUFFER_STATIC) so the driver
+	   writes its PRIORITY into the PSRAM map (actors are then occluded by it —
+	   e.g. Roger behind SQ3's door/motivator).  0x0004 == _K_VIEW_SIG_FLAG_NO_UPDATE
+	   (kernel.h; the engine flag is not visible in this gfx-layer file).  Live
+	   actors have NO_UPDATE clear and fall through to the BACK-only draw below, so
+	   their priority is never baked (no motion trails).
+
+	   In priority-only mode (PICO_STATIC_VIEW_PRIORITY without _BAKE) we set
+	   pico_priority_only_static so the driver bakes priority but does NOT persist
+	   the view's COLOR into static_bg — color still lands in this frame's visual[0]
+	   via the fall-through draw below, exactly like baseline, so nothing can ghost.
+	   With _BAKE the flag stays 0 and the color is also persisted (glovebox items
+	   stay visible, at the cost of the documented ghost regressions). */
+	if (view->signal & 0x0004) {
+#if defined(PICO_STATIC_VIEW_PRIORITY) && !defined(PICO_STATIC_VIEW_BAKE)
+		extern int pico_priority_only_static;
+		pico_priority_only_static = 1;
+#endif
 		GFX_ASSERT(gfxop_draw_cel_static(view->visual->gfx_state, view->view,
 						 view->loop, view->cel,
 						 _move_point(view->draw_bounds, pos),
 						 view->color, view->palette));
+#if defined(PICO_STATIC_VIEW_PRIORITY) && !defined(PICO_STATIC_VIEW_BAKE)
+		pico_priority_only_static = 0;
+#endif
+	}
 #endif
 
 	GFX_ASSERT(gfxop_draw_cel(view->visual->gfx_state, view->view, view->loop,

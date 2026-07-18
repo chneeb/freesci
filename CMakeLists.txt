@@ -192,19 +192,32 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_DECODE_CONTROL_MAP=1)
     endif()
 
-    # Bake settled stopUpd/kAddToPic views (NO_UPDATE + GFX_BUFFER_STATIC picviews)
-    # into the single Pico visual buffer so actors are occluded by them and static
-    # scene items persist. Desktop has 3 buffers; Pico has one, so this is the only
-    # way to get sprite-vs-static-view z-order and NO_UPDATE-view persistence.
-    # OFF by default because the COLOR half is un-bakeable on one buffer: a view that
-    # is baked and then animates/disposes (SQ3 door opening, a picked-up glovebox
-    # item, the Pestulon-logo overlay) leaves a ghost, and baked foreground (car
-    # windshield / police-dept door) redraws over later dialog boxes. The PRIORITY
-    # half (occlusion) is clean; the COLOR half needs save-unders we can't afford.
-    # See CLAUDE.md "Static-view occlusion on Pico". Flip ON to A/B on device.
-    option(PICO_STATIC_VIEW_BAKE "Bake static/NO_UPDATE views into the Pico buffer (occlusion + persistence)" OFF)
+    # Static-view occlusion/persistence on the single Pico visual buffer. Two levels:
+    #
+    #   PICO_STATIC_VIEW_PRIORITY (default ON, the clean/free win): write a static
+    #     view's PRIORITY into the PSRAM priority map so actors are occluded by it —
+    #     kAddToPic picviews (PQ2 cars) AND settled stopUpd/NO_UPDATE dynviews (SQ3
+    #     door/motivator). Zero new SRAM (reuses the row scratch the blit already
+    #     reads priority through; +312 B flash). No color is persisted, so nothing
+    #     ghosts: dynview color goes only to this frame's visual[0], never static_bg.
+    #     Minor residual: a view that later animates leaves a stale (invisible)
+    #     priority footprint (Roger slightly clipped by an opened door). ON because
+    #     it is a strict occlusion improvement with no color regressions.
+    #
+    #   PICO_STATIC_VIEW_BAKE (default OFF, the regressing extra): additionally
+    #     persist NO_UPDATE-dynview COLOR into static_bg so static items that never
+    #     redraw stay visible (PQ2 glovebox registration/businessCard). The COLOR
+    #     half is un-bakeable on one buffer — a baked view that later animates or is
+    #     removed (SQ3 door opening, picked-up glovebox item, Pestulon-logo overlay)
+    #     leaves a ghost, and baked foreground (car windshield / police-dept door)
+    #     redraws over later dialog boxes. Needs save-unders we can't afford; kept as
+    #     an opt-in experiment. Implies PRIORITY. See CLAUDE.md "Static-view occlusion".
+    option(PICO_STATIC_VIEW_PRIORITY "Bake static-view priority on Pico (occlusion, no color)" ON)
+    option(PICO_STATIC_VIEW_BAKE "Also persist NO_UPDATE-view color into static_bg (regresses dynamic scenes)" OFF)
     if(PICO_STATIC_VIEW_BAKE)
-        add_compile_definitions(PICO_STATIC_VIEW_BAKE=1)
+        add_compile_definitions(PICO_STATIC_VIEW_BAKE=1 PICO_STATIC_VIEW_PRIORITY=1)
+    elseif(PICO_STATIC_VIEW_PRIORITY)
+        add_compile_definitions(PICO_STATIC_VIEW_PRIORITY=1)
     endif()
 
     # THROWAWAY measurement build for roadmap #1 (text parser). When ON,

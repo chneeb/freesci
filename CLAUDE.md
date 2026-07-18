@@ -2889,16 +2889,31 @@ cost) and a minor door **priority**-ghost (Roger clipped by the now-open door's 
 far less visible than the color ghost). **Priority-only is a better axis than the user's mooted PQ2-vs-SQ3
 runtime switch**: it is correct for both games at once (occlusion vs appearance), not a per-game guess.
 
-**Current state (as toggled):** `PICO_STATIC_VIEW_BAKE` gates BOTH A and B together; **OFF** compiles B out
-(`#if defined(HAVE_PICO) && defined(PICO_STATIC_VIEW_BAKE)`) and forces `bake_pri = 0` in A, so OFF is the
-exact pre-2026-07-18 render path (the `pico_blit_indexed` signature/refactor is behaviorally inert when
-`bake_pri==0`). **ON** = the full A+B bake the user device-tested (z-order fixed, four color regressions).
-Desktop untouched (both files gated `HAVE_PICO`). All four builds clean (clean-OFF, ON, desktop, diag-OFF).
+**TOGGLE SPLIT DONE (2026-07-18, commit after `308d356d`) — two levels, priority-only is now the default:**
+The single `PICO_STATIC_VIEW_BAKE` switch was split into two so the clean half ships on and the regressing
+half stays opt-in:
 
-**Next step if resumed:** split the toggle — keep A always-effective (or a `…_PRIORITY` toggle, default ON:
-free, fixes occlusion, no regressions) and demote B's COLOR bake to a separate default-OFF `…_COLOR` toggle
-(only safe for never-animating static items, which we can't detect at bake time). The glovebox-items case is
-genuinely blocked on per-view save-unders (the 64KB-class memory work), NOT on this bake.
+- **`PICO_STATIC_VIEW_PRIORITY` (default ON)** — bake static-view **priority** only. Enables `bake_pri` in
+  `pico_blit_indexed` (so kAddToPic picviews write priority) AND routes settled NO_UPDATE dynviews through
+  the static path so they write priority too (`widgets.c` `_gfxwop_dyn_view_draw`, `view->signal & 0x0004`).
+  For the dynview case it sets the new `pico_priority_only_static` global so `pico_draw_pixmap` **skips
+  `pico_bake_static_region`** — priority is baked, color is NOT persisted to `static_bg` (the view's color
+  still lands in this frame's `visual[0]` via the fall-through BACK draw, exactly like baseline). Net:
+  actors are occluded by SQ3 door/motivator + PQ2 cars, **zero color regressions** (nothing in `static_bg`
+  to ghost or overdraw dialogs), +4 B `.bss` (the one global int), heap ceiling unchanged. Residual: a
+  view that later animates leaves a stale **invisible** priority footprint (minor door clip) — the accepted
+  trade. **Awaiting device retest** (verify occlusion holds, dialogs/overlay/glovebox-close all clean, and
+  gauge the door priority-ghost).
+- **`PICO_STATIC_VIEW_BAKE` (default OFF, implies PRIORITY)** — additionally persist NO_UPDATE-dynview
+  **color** into `static_bg` (flag stays 0 → color bakes). Makes the PQ2 glovebox items *appear*, at the
+  cost of the four device-confirmed color regressions above (picked-up-item ghost, dialog overdraw,
+  door/glovebox animate-away ghost, Pestulon overlay loss). Opt-in experiment only.
+- **True baseline escape hatch:** `-DPICO_STATIC_VIEW_PRIORITY=OFF` compiles both halves out (`bake_pri=0`,
+  the widgets.c routing `#if`'d out) → exact pre-2026-07-18 render path.
+
+Desktop untouched (both files `HAVE_PICO`-gated). All four configs build clean (priority-ON default, BAKE-ON,
+desktop, priority-OFF baseline). The glovebox-items case remains genuinely blocked on per-view save-unders
+(the 64KB-class memory work), NOT on this bake — priority-only cannot and does not try to fix it.
 
 ### SCI version support on Pico — SCI0 ONLY (SCI1/VGA legibly rejected, not supported)
 
