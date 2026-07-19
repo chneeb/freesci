@@ -2912,8 +2912,52 @@ half stays opt-in:
   the widgets.c routing `#if`'d out) → exact pre-2026-07-18 render path.
 
 Desktop untouched (both files `HAVE_PICO`-gated). All four configs build clean (priority-ON default, BAKE-ON,
-desktop, priority-OFF baseline). The glovebox-items case remains genuinely blocked on per-view save-unders
-(the 64KB-class memory work), NOT on this bake — priority-only cannot and does not try to fix it.
+desktop, priority-OFF baseline).
+
+**PQ2 DEVICE RESULTS (2026-07-19) — priority-only default: 3 wins, 2 minor known limitations. LEFT AS-IS
+(user decision).** Same priority-only build, PQ2 (parking lot / Lytton PD, room 10):
+- ✅ **Cars occlude the officer correctly** (they are `kAddToPic` picviews — genuinely static, so permanent
+  priority baking matches desktop's `static_priority_map` exactly).
+- ✅ **Glovebox items show AND pick up cleanly** — UNEXPECTED (priority-only skips the `static_bg` color
+  bake, so the earlier model predicted them *missing*). Best current theory: a settled `stopUpd` view is
+  drawn twice — once via the static path (**fullscreen clip**) and once via the normal **port-clipped** draw
+  — and in that closeup the port-clipped draw is clipped away, so the fullscreen-clip static draw is what
+  makes the items visible (bypassing the clip that hid them in baseline). Unverified, but it means the
+  glovebox win is **entangled** with the fullscreen-clip static draw (below).
+- ⚠️ **Officer over-occluded by the "Detective Div" door** (device photo IMG_2159). The door is a `stopUpd`
+  view (disasm: `door::cue` → `stopUpd`), same class as SQ3's door, so priority-only bakes its priority
+  **permanently**. Desktop keeps a `stopUpd` view's priority **transient** (written to the per-frame working
+  map, cleared each frame, re-applied only when the view is redrawn), so the officer passes *in front*;
+  Pico's permanent bake stands the door priority in the map forever → over-occludes. **Same mechanism that
+  is the SQ3 fix** — SQ3 *wanted* the persistent occlusion, PQ2 does not. Permanent baking of `stopUpd`-view
+  priority therefore produces opposite correctness per scene; it cannot be "right" for all games without a
+  transient map.
+- ⚠️ **Door bleeds slightly over a dialog's top edge** (IMG_2160). The static routing uses
+  `gfxop_draw_cel_static`'s **fullscreen clip**, so when the scene redraws (room 10 has continuous traffic
+  → `kAnimate` runs even under the narration box) the door's color is written fullscreen-clipped, ignoring
+  the message-window clip, landing over the dialog. The dialog fill itself is *not* priority-gated (it is a
+  box fill), so this is a color-draw-over, not priority suppression.
+
+**Why not fixed:** the obvious surgical fix for the dialog bleed (stop the static routing from writing color,
+letting the normal port-clipped draw supply it) would very likely **also remove the glovebox items**, since
+the same fullscreen-clip static draw appears to be what makes them visible — the win and the two bugs share
+plumbing. So the two limitations are accepted as-is rather than risk the three wins on an offline guess.
+
+**The real fix (parked) = the transient working priority map** (the 32–64 KB `.bss`/scratch weighed in "Known
+graphics limitations", option C). That is the *only* thing that makes `stopUpd`-view priority behave per-frame
+like desktop (occlude only where/when the view is actually active), fixing PQ2's door + dialog while keeping
+SQ3 + the cars + the glovebox. Blocked on SRAM headroom (port is at the ceiling).
+
+**On a runtime per-game/per-room mode (user idea):** the axis that actually decides correctness is **not**
+per-game or per-room — it is **per-frame, per-pixel** (does an actor currently share the view's priority
+band?), which is exactly what the transient working map computes. A hand-tuned per-room "bake this view or
+not" table is *possible* as a stopgap but is fragile and game-specific (every affected room needs authoring,
+and a wrong entry silently over/under-occludes). Recommendation: treat the working map as the real
+"adopt-at-runtime" answer; a per-room table is a last resort, not the plan.
+
+The glovebox-items case remains genuinely blocked on per-view save-unders / a working buffer (the 64KB-class
+memory work); priority-only appears to get it "for free" in the static closeup but this is incidental to the
+fullscreen-clip draw, not a general solution.
 
 ### OPEN (separate track, NOT the render work) — PQ2 clone-table OOM at copy-protection (2026-07-18)
 
