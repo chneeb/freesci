@@ -53,6 +53,15 @@ elseif(PLATFORM STREQUAL "pico")
         "LINKER:--wrap=realloc"
         "LINKER:--wrap=free")
 
+    # Make USB-CDC stdout non-blocking: default is a 500 ms per-write wait when the
+    # host has enumerated the port but nothing is draining it (PicoCalc is
+    # USB-powered, so the OS opens the CDC even with no terminal). FreeSCI prints
+    # heavily during the intro, so that stalls the game until a console attaches and
+    # drains the buffer. 0 = drop instead of wait (debug output is best-effort).
+    # Set before pico_sdk_init() so the SDK's stdio_usb.c picks it up. Not
+    # SDK-version-specific — the stdio_usb defaults/logic are identical in 2.2.0/2.3.0.
+    add_compile_definitions(PICO_STDIO_USB_STDOUT_TIMEOUT_US=0)
+
     pico_sdk_init()
 
     # ── FatFS + SD SPI driver (vendored under src/platform/pico/fatfs/) ─────────
