@@ -3076,17 +3076,34 @@ and CMake wiring. Timing + direct-mode ordering were adopted from the **device-t
 (`drivers/psram_init.c`) on the identical board; built as `PICO_BOARD=pico2` driving **GPIO 47** for the PSRAM
 CS at runtime (works on RP2350B silicon regardless of the pico2 A-config, exactly as frank-snes relies on).
 
-**STATUS: does NOT boot on device — parked, needs a debugger.** TFT noise, no serial (crashes in early boot,
-before `stdio_init_all`). A **full flash erase** (uf2loader removed) still crashed → it is genuinely our
-firmware in early boot, **not uf2loader**. frank-snes proves it IS solvable on this exact board, so some
-early-boot config difference remains unfound. Blind bring-up (no serial, no debugger) was exhausted across
-several flash cycles: tried the `pimoroni` board config (16 MB flash) → then `pico2` (like frank) → adding
-frank's `set_flash_timings(133,66)` before `set_sys_clock_khz` → none fixed it. Pinpointing this needs an **SWD
-debugger (Picoprobe)** to get the crash PC in one session; blind guessing is the wrong tool. Untried levers for
-a future attempt: `vreg_set_voltage` (frank sets it, though 133 MHz shouldn't need it); booting *without* the
-`set_sys_clock_khz` override to isolate whether the crash is the clock/flash path vs something earlier (our
-`-Wl,--wrap` malloc / `pico_mem_census.c` owning the allocator during early runtime init is a suspect worth
-checking). NB the mapped-PSRAM design itself is sound; only the RP2350B early-boot bring-up is unsolved.
+**STATUS: does not fully run yet, but RE-SCOPED to a narrow, debugger-FREE bug (2026-09-03).** The device
+symptom is TFT noise + no serial on the Pimoroni — BUT a decisive test reframed it: **the same uf2 booted
+cleanly on a plain RP2350 (a Pico 2, no PSRAM) all the way to the "PSRAM not detected" LCD message.** That
+proves the ENTIRE early-boot path is correct — clock change, `set_flash_timings`, `stdio_init_all`, LCD init,
+SD init, AND `psram_qmi_init`'s no-PSRAM path all work. **The earlier "crashes in early boot / needs a
+debugger" conclusion is RETRACTED.**
+
+**The crash is triggered specifically by the PRESENCE of real PSRAM** — the code path in `psram_qmi_init` that
+only runs once a chip actually answers the ID read: enter QPI (0x35) → write `m[1]` timing/formats → enable M1
+writes → return → the smoke-test `memcpy` to `0x11000000`. On the plain RP2350 that whole path is skipped
+(no chip → `size=0` → early return → clean "not detected"); on the Pimoroni it runs and faults there.
+
+**PRIME SUSPECT + first fix to try (no debugger needed — the smoke test is the signal):** my `psram_qmi_init`
+differs from the device-tested `frank-snes` (`~/Source/frank-snes drivers/psram_init.c`) in exactly the risky
+part — **frank uses `AUTO_CS1N` (hardware-managed chip-select) and NO ID read (it hardcodes 8 MB)**, whereas
+mine uses **manual `ASSERT_CS1N` toggling plus a custom `0x9F` ID read** to detect size. The manual CS
+handling / extra ID transaction most likely leaves the QMI or PSRAM chip in a bad state before the real
+config. **FIX: replace `psram_qmi_init` with frank's exact sequence verbatim** (AUTO_CS1N, `NOPUSH`, no ID
+read, return a hardcoded 8 MB), and let the boot smoke test be the presence/integrity check. Then flash and
+read the LCD/serial: "PSRAM not detected" → detection/CS issue; "PSRAM test FAILED" → timing; boots to the
+chooser/game → solved. Iterating is now cheap (the smoke test tells you which), so **this no longer needs an
+SWD debugger** — the earlier debugger recommendation applied to the mis-diagnosed early-boot theory.
+
+*History (mis-diagnosis trail, kept so it isn't repeated): the boot path was suspected first — tried the
+`pimoroni` board config (16 MB flash) → `pico2` (like frank) → frank's `set_flash_timings(133,66)` before
+`set_sys_clock_khz`; a full flash erase (uf2loader removed) still showed noise, so uf2loader was exonerated.
+All of that was chasing the wrong layer — the plain-RP2350 boot test above shows the boot path was fine all
+along.* NB the mapped-PSRAM design is sound; only the PSRAM-present QMI bring-up needs the frank-verbatim swap.
 
 **SDK note for a future attempt:** installed pico-sdk is **2.2.0**, which ships **no turnkey PSRAM** — hence the
 vendored QMI init. (2.3.0 exists but wasn't needed for PSRAM.)
