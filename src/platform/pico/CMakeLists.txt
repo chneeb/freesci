@@ -3,10 +3,20 @@
 #   fatfs/   — FatFS + SD SPI driver
 #   hw/      — i2ckbd + lcdspi (PicoCalc hardware drivers)
 
-set(PSRAM_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/psram/psram_spi.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/psram_alloc.c
-)
+# PSRAM backend: memory-mapped QMI (Pimoroni Pico Plus 2) OR PicoCalc PIO-SPI.
+# Both implement the same offset-based psram_alloc/reset/store/load API, so every
+# offload site is unchanged; only the backend differs. Selected by the top-level
+# PICO_PSRAM_MAPPED option (default OFF -> PicoCalc PIO driver).
+if(PICO_PSRAM_MAPPED)
+    set(PSRAM_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/psram_mapped.c
+    )
+else()
+    set(PSRAM_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/psram/psram_spi.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/psram_alloc.c
+    )
+endif()
 
 set(FATFS_SOURCES
     ${FATFS_DIR}/ff15/source/ff.c
@@ -47,20 +57,29 @@ add_library(scipicoplatform STATIC
     ${HW_SOURCES}
 )
 
-pico_generate_pio_header(scipicoplatform
-    ${CMAKE_CURRENT_SOURCE_DIR}/psram/psram_spi.pio
-)
+# PIO PSRAM header + pins are only needed by the PicoCalc PIO driver.
+if(NOT PICO_PSRAM_MAPPED)
+    pico_generate_pio_header(scipicoplatform
+        ${CMAKE_CURRENT_SOURCE_DIR}/psram/psram_spi.pio
+    )
+endif()
 
 target_compile_definitions(scipicoplatform PUBLIC
     HAVE_PICO=1
-    PSRAM_PIN_CS=20
-    PSRAM_PIN_SCK=21
-    PSRAM_PIN_MOSI=2
-    PSRAM_PIN_MISO=3
-    PSRAM_MUTEX=1
     PICO_DEBUG_MALLOC=1
     PICO_DEBUG_MALLOC_LOW_WATER=0x20080000
 )
+
+# PicoCalc PIO PSRAM pin assignments (unused by the mapped-PSRAM backend).
+if(NOT PICO_PSRAM_MAPPED)
+    target_compile_definitions(scipicoplatform PUBLIC
+        PSRAM_PIN_CS=20
+        PSRAM_PIN_SCK=21
+        PSRAM_PIN_MOSI=2
+        PSRAM_PIN_MISO=3
+        PSRAM_MUTEX=1
+    )
+endif()
 
 target_include_directories(scipicoplatform PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}           # pico_sdcard.h, kbd_input.h, psram_alloc.h, etc.

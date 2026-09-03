@@ -10,9 +10,12 @@
 #endif
 #include "lcdspi.h"
 #include "psram_alloc.h"
+#ifdef PICO_PSRAM_MAPPED
+#include "psram_qmi.h"
+#else
 #include "psram/psram_spi.h"
-
 extern psram_spi_inst_t g_psram;
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <malloc.h>
@@ -141,6 +144,12 @@ void __attribute__((naked)) isr_hardfault(void)
 
 int main(void)
 {
+#ifdef PICO_PSRAM_MAPPED
+    /* Pimoroni Pico Plus 2: reprogram the 16 MB flash's QMI timing for 133 MHz
+       BEFORE raising the clock, or XIP reads corrupt and it crashes here (before
+       any serial) with TFT noise. Not needed on the Pico 2 (PicoCalc) flash. */
+    psram_set_flash_timings(133, 66);
+#endif
     set_sys_clock_khz(133000, true);
     stdio_init_all();
     /* Give the USB host time to enumerate the CDC device before we print */
@@ -168,23 +177,51 @@ int main(void)
     MEMPRINT("after pwm_init");
 #endif
 
+#ifdef PICO_PSRAM_MAPPED
+    /* Memory-mapped QMI PSRAM (Pimoroni Pico Plus 2, APS6404 on CS1 GPIO 47). */
+    {
+        size_t psram_bytes = psram_qmi_init(PSRAM_CS_PIN);
+        printf("[psram] mapped QMI init: %u bytes detected\n", (unsigned)psram_bytes);
+        if (psram_bytes == 0) {
+            lcd_clear();
+            lcd_print_string("PSRAM not detected!\n(QMI CS1)");
+            while (1) tight_loop_contents();
+        }
+    }
+#else
     /* PSRAM on PIO1 (CS=20, SCK=21, MOSI=2, MISO=3) */
     g_psram = psram_spi_init_clkdiv(pio1, -1, 1.0f, true);
+#endif
     MEMPRINT("after psram_init");
 
-    /* PSRAM smoke test: write a pattern and read it back */
+    /* PSRAM smoke test.  A wrong PSRAM setup can pass a tiny read-back yet corrupt
+       under load, so sweep a patterned block across several offsets that cross
+       chunk (PIO) and 1024-byte page (QMI) boundaries and exercise high address
+       bits — without a big permanent buffer (256B on the stack, freed after; the
+       shared code must not cost the memory-tight PicoCalc any .bss). */
     {
-        static const uint8_t wr[8] = {0xDE,0xAD,0xBE,0xEF,0x01,0x23,0x45,0x67};
-        uint8_t rd[8] = {0};
-        psram_store(0, wr, 8);
-        psram_load(0, rd, 8);
-        if (memcmp(wr, rd, 8) == 0) {
-            printf("[psram] OK\n");
+        enum { SMOKE_LEN = 256 };
+        static const uint32_t offsets[] = { 0u, 900u, 0x100000u };  /* .rodata */
+        uint8_t buf[SMOKE_LEN];
+        int ok = 1;
+        for (unsigned o = 0; o < sizeof(offsets)/sizeof(offsets[0]) && ok; o++) {
+            for (int i = 0; i < SMOKE_LEN; i++)
+                buf[i] = (uint8_t)(i * 31 + 7 + offsets[o]);   /* offset-tagged */
+            psram_store(offsets[o], buf, SMOKE_LEN);
+        }
+        for (unsigned o = 0; o < sizeof(offsets)/sizeof(offsets[0]) && ok; o++) {
+            memset(buf, 0, SMOKE_LEN);
+            psram_load(offsets[o], buf, SMOKE_LEN);
+            for (int i = 0; i < SMOKE_LEN && ok; i++)
+                if (buf[i] != (uint8_t)(i * 31 + 7 + offsets[o])) ok = 0;
+        }
+        if (ok) {
+            printf("[psram] OK (pattern sweep across %u offsets)\n",
+                   (unsigned)(sizeof(offsets)/sizeof(offsets[0])));
         } else {
-            printf("[psram] FAIL: got %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   rd[0],rd[1],rd[2],rd[3],rd[4],rd[5],rd[6],rd[7]);
+            printf("[psram] FAIL: pattern mismatch\n");
             lcd_clear();
-            lcd_print_string("PSRAM test FAILED!\nCheck SPI wiring.");
+            lcd_print_string("PSRAM test FAILED!");
             while (1) tight_loop_contents();
         }
     }

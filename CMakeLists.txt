@@ -2,8 +2,22 @@ cmake_minimum_required(VERSION 3.16)
 
 set(PLATFORM "desktop" CACHE STRING "Target platform: desktop or pico")
 
+# Memory-mapped QMI PSRAM target (Pimoroni Pico Plus 2, RP2350B) instead of the
+# PicoCalc's PIO-SPI PSRAM. Declared here (before project()) because it selects
+# the board the SDK imports. Default OFF -> unchanged PicoCalc build. See
+# src/platform/pico/psram_mapped.c and CLAUDE.md "Pimoroni mapped-PSRAM target".
+option(PICO_PSRAM_MAPPED "Use memory-mapped QMI PSRAM (Pimoroni Pico Plus 2)" OFF)
+
 # ── Pico SDK must be imported BEFORE project() so the cross-compiler is found ──
 if(PLATFORM STREQUAL "pico")
+    # Always build as pico2 (RP2350A config), even for the mapped-PSRAM target on
+    # the Pimoroni Pico Plus 2 (RP2350B).  The device-tested frank-snes firmware
+    # runs on the exact same board+PicoCalc built as pico2 and drives GPIO 47 for
+    # the PSRAM chip-select at runtime (the register write works on the B silicon
+    # regardless of the compile-time variant).  The pimoroni_pico_plus2_rp2350
+    # board config pulls in a 16 MB-flash setup that does NOT boot cleanly here
+    # (early crash, TFT noise, no serial) — pico2 is the known-good flash config
+    # our PicoCalc build already boots with. See CLAUDE.md "Pimoroni mapped-PSRAM".
     set(PICO_BOARD "pico2" CACHE STRING "")
 
     if(DEFINED PICO_SDK_PATH)
@@ -190,6 +204,15 @@ if(PLATFORM STREQUAL "pico")
     option(PICO_CONTROL_MAP "Decode SCI control map on Pico (collision)" ON)
     if(PICO_CONTROL_MAP)
         add_compile_definitions(PICO_DECODE_CONTROL_MAP=1)
+    endif()
+
+    # Memory-mapped QMI PSRAM (Pimoroni Pico Plus 2). Option is declared at the top
+    # of this file (it selects PICO_BOARD before pico_sdk_init); the compile define
+    # is added here so psram_mapped.c / psram_qmi.h / pico_main.c see it. When ON,
+    # src/platform/pico/CMakeLists.txt swaps the PIO PSRAM driver for the memcpy
+    # backend. Default OFF = unchanged PicoCalc PIO PSRAM.
+    if(PICO_PSRAM_MAPPED)
+        add_compile_definitions(PICO_PSRAM_MAPPED=1)
     endif()
 
     # Static-view occlusion/persistence on the single Pico visual buffer. Two levels:
