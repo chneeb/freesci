@@ -32,6 +32,27 @@
 #include <resource.h>
 #include <sci_memory.h>
 
+/* On the Pimoroni mapped-PSRAM target the clone/node/list/hunk tables (below) —
+   the realloc-grow fragmentation drivers that never leave SRAM on the PicoCalc —
+   are allocated from the 8 MB PSRAM heap instead, off the 475 KB SRAM ceiling.
+   The free/realloc macros are OWNERSHIP-AWARE (psram_heap_owns): a table that came
+   from sci_malloc (e.g. the savegame restore path, not yet routed) is still freed
+   with sci_free, so there is no allocator mismatch regardless of where a given
+   table was allocated. Everywhere else (desktop, PicoCalc) these are plain sci_*. */
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
+extern void *psram_hmalloc(size_t n);
+extern void *psram_hrealloc(void *p, size_t n);
+extern void  psram_hfree(void *p);
+extern int   psram_heap_owns(const void *p);
+#  define HEAP_TBL_MALLOC(n)     psram_hmalloc(n)
+#  define HEAP_TBL_REALLOC(p, n) (psram_heap_owns(p) ? psram_hrealloc((p), (n)) : sci_realloc((p), (n)))
+#  define HEAP_TBL_FREE(p)       do { if (psram_heap_owns(p)) psram_hfree(p); else sci_free(p); } while (0)
+#else
+#  define HEAP_TBL_MALLOC(n)     sci_malloc(n)
+#  define HEAP_TBL_REALLOC(p, n) sci_realloc((p), (n))
+#  define HEAP_TBL_FREE(p)       sci_free(p)
+#endif
+
 #define HEAPENTRY_INVALID -1
 
 #define ENTRY_IS_VALID(t, i) ((i) >= 0 && (i) < (t)->max_entry && (t)->table[(i)].next_free == (i))
@@ -67,7 +88,7 @@ init_##ENTRY##_table(ENTRY##_table_t *table)					\
 	table->max_entry = 0;							\
 	table->entries_used = 0;						\
 	table->first_free = HEAPENTRY_INVALID;					\
-	table->table = (ENTRY##_entry_t*)sci_malloc(sizeof(ENTRY##_entry_t) * INITIAL);\
+	table->table = (ENTRY##_entry_t*)HEAP_TBL_MALLOC(sizeof(ENTRY##_entry_t) * INITIAL);\
 	memset(table->table, 0, sizeof(ENTRY##_entry_t) * INITIAL);		\
 }										\
 										\
@@ -102,7 +123,7 @@ alloc_##ENTRY##_entry(ENTRY##_table_t *table)					\
 		if (table->max_entry == table->entries_nr) {			\
 			table->entries_nr += INCREMENT;				\
 										\
-			table->table = (ENTRY##_entry_t*)sci_realloc(table->table,\
+			table->table = (ENTRY##_entry_t*)HEAP_TBL_REALLOC(table->table,\
 						   sizeof(ENTRY##_entry_t)	\
 						   * table->entries_nr);	\
 			memset(&table->table[table->entries_nr-INCREMENT],	\

@@ -10,6 +10,7 @@
 if(PICO_PSRAM_MAPPED)
     set(PSRAM_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/psram_mapped.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/psram_heap.c
     )
 else()
     set(PSRAM_SOURCES

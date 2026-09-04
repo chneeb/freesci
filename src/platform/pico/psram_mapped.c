@@ -28,7 +28,9 @@
 
 #include "psram_qmi.h"
 #include "psram_alloc.h"          /* the shared 4-function API signatures */
+#include "psram_heap.h"           /* the persistent malloc/free/realloc heap */
 #include <string.h>
+#include <stdio.h>
 
 #include "hardware/regs/qmi.h"
 #include "hardware/regs/xip.h"
@@ -49,6 +51,13 @@ psram_alloc(size_t bytes)
 {
     uint32_t addr = s_psram_offset;
     s_psram_offset += (uint32_t)bytes;
+    /* The bump arena must not grow into the persistent heap region above it. */
+    if (s_psram_offset > PSRAM_HEAP_OFFSET) {
+        printf("[psram] BUMP OVERFLOW: offset %u > heap base %u\n",
+               (unsigned)s_psram_offset, (unsigned)PSRAM_HEAP_OFFSET);
+        s_psram_offset = addr;   /* refuse; caller sees the same addr twice, but
+                                    the overflow print flags the misconfiguration */
+    }
     return addr;
 }
 
@@ -207,6 +216,9 @@ psram_qmi_init(unsigned cs_pin)
 {
     s_psram_size = psram_qmi_init_inner(cs_pin);
     s_psram_offset = 0;
+    /* Bring up the persistent heap in the high 6 MiB, above the bump arena. */
+    psram_heap_init((void *)(uintptr_t)(PSRAM_XIP_BASE + PSRAM_HEAP_OFFSET),
+                    PSRAM_HEAP_SIZE);
     return s_psram_size;
 }
 

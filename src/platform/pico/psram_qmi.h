@@ -12,6 +12,18 @@
 
 #define PSRAM_XIP_BASE  0x11000000u
 
+/* PSRAM address-space split (8 MiB total on the Pimoroni Pico Plus 2):
+   - [0, PSRAM_HEAP_OFFSET)         : the per-room offload BUMP arena
+     (psram_alloc/psram_reset — visual/priority/view maps; rewound each room).
+   - [PSRAM_HEAP_OFFSET, 8 MiB)     : the persistent malloc/free/realloc HEAP
+     (psram_heap.*), for long-lived VM working memory (clone/node/list tables).
+   The bump arena is capped at PSRAM_HEAP_OFFSET so it can never grow into the
+   heap; 2 MiB is far more than a room's offload (~64 KB visual + 32 KB priority
+   + view cels). */
+#define PSRAM_TOTAL_BYTES  0x800000u              /* 8 MiB */
+#define PSRAM_HEAP_OFFSET  0x200000u              /* 2 MiB: bump arena ceiling */
+#define PSRAM_HEAP_SIZE    (PSRAM_TOTAL_BYTES - PSRAM_HEAP_OFFSET)  /* 6 MiB */
+
 /* PSRAM chip-select GPIO on the Pimoroni Pico Plus 2 (= the board header's
    PIMORONI_PICO_PLUS2_PSRAM_CS_PIN, but we build as pico2 so that define is not
    available — GPIO 47 exists on the RP2350B silicon regardless of the pico2

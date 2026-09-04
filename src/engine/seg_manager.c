@@ -317,12 +317,12 @@ _sm_deallocate (seg_manager_t* self, int seg, int recursive)
 		mobj->data.stack.entries = NULL;
 		break;
 	case MEM_OBJ_LISTS:
-		sci_free(mobj->data.lists.table);
+		HEAP_TBL_FREE(mobj->data.lists.table);
 		mobj->data.lists.table = NULL;
 		mobj->data.lists.entries_nr = mobj->data.lists.max_entry = 0;
 		break;
 	case MEM_OBJ_NODES:
-		sci_free(mobj->data.nodes.table);
+		HEAP_TBL_FREE(mobj->data.nodes.table);
 		mobj->data.nodes.table = NULL;
 		mobj->data.nodes.entries_nr = mobj->data.nodes.max_entry = 0;
 		break;
@@ -341,12 +341,12 @@ _sm_deallocate (seg_manager_t* self, int seg, int recursive)
 					mobj->data.clones.table[ci].entry.variables = NULL;
 				}
 		}
-		sci_free(mobj->data.clones.table);
+		HEAP_TBL_FREE(mobj->data.clones.table);
 		mobj->data.clones.table = NULL;
 		mobj->data.clones.entries_nr = mobj->data.clones.max_entry = 0;
 		break;
 	case MEM_OBJ_HUNK:
-		sci_free(mobj->data.hunks.table);
+		HEAP_TBL_FREE(mobj->data.hunks.table);
 		mobj->data.hunks.table = NULL;
 		mobj->data.hunks.entries_nr = mobj->data.hunks.max_entry = 0;
 		break;

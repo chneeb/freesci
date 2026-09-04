@@ -12,6 +12,7 @@
 #include "psram_alloc.h"
 #ifdef PICO_PSRAM_MAPPED
 #include "psram_qmi.h"
+#include "psram_heap.h"
 #else
 #include "psram/psram_spi.h"
 extern psram_spi_inst_t g_psram;
@@ -20,11 +21,23 @@ extern psram_spi_inst_t g_psram;
 #include <string.h>
 #include <malloc.h>
 
+#ifdef PICO_PSRAM_MAPPED
+/* Mapped-PSRAM build: show the SRAM heap AND the PSRAM heap (clone/node/list/hunk
+   tables now live there). psheap used should climb during play while SRAM used
+   stays lower than the PicoCalc build at the same point. */
+#define MEMPRINT(label) do { \
+    struct mallinfo _mi = mallinfo(); \
+    printf("[mem] %s: free=%d arena=%d used=%d | psheap used=%u maxfree=%u\n", \
+           (label), _mi.fordblks, _mi.arena, _mi.uordblks, \
+           (unsigned)psram_heap_used(), (unsigned)psram_heap_free_largest()); \
+} while(0)
+#else
 #define MEMPRINT(label) do { \
     struct mallinfo _mi = mallinfo(); \
     printf("[mem] %s: free=%d arena=%d used=%d\n", \
            (label), _mi.fordblks, _mi.arena, _mi.uordblks); \
 } while(0)
+#endif
 
 /* FreeSCI's main(), renamed under HAVE_PICO */
 int freesci_main(int argc, char **argv);
