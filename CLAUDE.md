@@ -2237,7 +2237,44 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
 
 Suggested order: 1 ∥ 2 ∥ 3 (all independent; pick by user-visible value vs. measured headroom).
 
-#### The 16 KB XIP-RAM lever for PicoCalc sound (pico-sdk 2.3.0 — NOT the installed 2.2.0)
+#### The 16 KB XIP-RAM lever for PicoCalc sound — TRIED + ABANDONED (device-measured, 2026-09-04)
+
+**DEAD END. Rolled back.** The idea (below) was built behind an `FSCI_XIP_RAM` CMake option on pico-sdk 2.3.0,
+device-tested, and abandoned: pinning the XIP cache as SRAM **disables the flash instruction cache**, and
+FreeSCI runs from flash, so decode craters. Measured with an `[perf]` pic-decode timer (`FSCI_PROBE_PERF`,
+kept — a reusable gated diagnostic in `operations.c` `gfxop_new_pic` + `pico_perf_us` in `pico_time.c`),
+same SQ3 rooms, flash-cache-ON baseline vs XIP-cache-as-RAM:
+
+| room | cache ON | cache OFF (XIP RAM) | slowdown |
+|---|---|---|---|
+| pic 777 | 88 ms | **980 ms** | **11.1×** |
+| pic 900 | 91 ms | **593 ms** | **6.5×** |
+
+An **order of magnitude** slower. Fatal two ways: (1) room loads become ~0.6–1.0 s (very noticeable), and
+(2) — decisively — the 22 kHz synth IRQ needs a sample every ~45 µs; flash-resident synth code running ~10×
+slow cannot keep up, so this would break the very sound it was meant to enable. The `xip_cache_pin_range()`
+sub-range pin (keep ~3 KB cache) **won't save it either**: the decoder's hot-code working set is far larger
+than 3 KB, so it still thrashes. **Whole-16 KB pin or sub-range, XIP-cache-as-RAM is not viable for a
+flash-resident interpreter.** (A hypothetical alternative — put only the *synth code* in RAM via
+`__not_in_flash_func` and keep the cache — doesn't need XIP-RAM at all and doesn't solve the *memory* problem
+this was for; the sound *data* still has nowhere to live off the fragmenting main heap.)
+
+**Bottom line for PicoCalc sound: still unsolved, and XIP RAM is off the table.** The remaining paths are the
+non-XIP memory levers (flash OPL tables + mono + evict — which CLAUDE.md already found don't fully fit at the
+ceiling) or the **Pimoroni mapped-PSRAM** track (branch `pico-pimoroni-mapped-psram`), which dissolves the
+ceiling but has its own bring-up bug.
+
+**pico-sdk 2.3.0 upgrade (done for this, now moot):** validated — FreeSCI builds clean against 2.3.0 (the
+`pico_malloc` override + moved RP2350 memmaps survive), costs only **+472 bytes** static SRAM, needs picotool
+2.3.0 (`-DPICOTOOL_FORCE_FETCH_FROM_GIT=ON`). It lives isolated in the worktree `~/Source/pico-sdk-2.3.0`; the
+default `~/Source/pico-sdk` stays 2.2.0. Since XIP-RAM was the only reason to upgrade, 2.3.0 is **not needed**
+now — keep or remove the worktree (`git worktree remove ~/Source/pico-sdk-2.3.0`) at will. **Kept on master:**
+the `PICO_STDIO_USB_STDOUT_TIMEOUT_US=0` fix (non-blocking stdout — a real standalone-run improvement, commit
+`7a4f9623`) and the `FSCI_PROBE_PERF` decode timer.
+
+---
+
+*Original (optimistic) analysis, SUPERSEDED by the measurement above — kept for the mechanism detail:*
 
 The most promising way to make sound *fit* on the PicoCalc (as opposed to the Pimoroni board, which dissolves
 the ceiling entirely — see the RP2040/Pimoroni section) is to put the **resident sound stack in the RP2350's

@@ -17,3 +17,12 @@ void sci_get_current_time(GTimeVal *val)
     val->tv_sec  = sec;
     val->tv_usec = usec;
 }
+
+#ifdef FSCI_PROBE_PERF
+/* Free-running microsecond counter for perf A/B measurements (e.g. pic-decode
+   timing to compare flash-cache-on vs XIP-cache-as-RAM builds). */
+unsigned long long pico_perf_us(void)
+{
+    return (unsigned long long)time_us_64();
+}
+#endif
