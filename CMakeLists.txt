@@ -67,6 +67,15 @@ elseif(PLATFORM STREQUAL "pico")
         "LINKER:--wrap=realloc"
         "LINKER:--wrap=free")
 
+    # Make USB-CDC stdout non-blocking: default is a 500 ms per-write wait when the
+    # host has enumerated the port but nothing is draining it (PicoCalc is
+    # USB-powered, so the OS opens the CDC even with no terminal). FreeSCI prints
+    # heavily during the intro, so that stalls the game until a console attaches and
+    # drains the buffer. 0 = drop instead of wait (debug output is best-effort).
+    # Set before pico_sdk_init() so the SDK's stdio_usb.c picks it up. Not
+    # SDK-version-specific — the stdio_usb defaults/logic are identical in 2.2.0/2.3.0.
+    add_compile_definitions(PICO_STDIO_USB_STDOUT_TIMEOUT_US=0)
+
     pico_sdk_init()
 
     # ── FatFS + SD SPI driver (vendored under src/platform/pico/fatfs/) ─────────
@@ -170,6 +179,7 @@ option(FSCI_PROBE_MEM        "Probe: per-room SRAM/heap breakdown lines"        
 option(FSCI_PROBE_MEM_CENSUS "Probe: live-alloc size histogram + call sites"    OFF)
 option(FSCI_PROBE_PARSER     "Probe: per-command GNF-rebuild transient size"    OFF)
 option(FSCI_PROBE_ARENA      "Probe: name the alloc that grows the heap arena"  OFF)
+option(FSCI_PROBE_PERF       "Probe: [perf] per-room pic-decode timing (us)"    OFF)
 if(FSCI_PROBE_MEM_CENSUS AND NOT FSCI_PROBE_MEM)
     message(STATUS "FSCI_PROBE_MEM_CENSUS implies FSCI_PROBE_MEM (census dumps in the breakdown) — enabling it")
     set(FSCI_PROBE_MEM ON)
@@ -191,6 +201,9 @@ if(FSCI_PROBE_PARSER)
 endif()
 if(FSCI_PROBE_ARENA)
     add_compile_definitions(FSCI_PROBE_ARENA=1)
+endif()
+if(FSCI_PROBE_PERF)
+    add_compile_definitions(FSCI_PROBE_PERF=1)
 endif()
 
 if(PLATFORM STREQUAL "pico")

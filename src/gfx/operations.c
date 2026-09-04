@@ -2317,6 +2317,15 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	}
 #endif /* FSCI_PROBE_MEM */
 
+#ifdef FSCI_PROBE_PERF
+	/* Time the whole pic decode (decompress + build + offload) — the most
+	   flash-cache-sensitive per-room work. A/B: same game+room, compare cache-on
+	   (normal build) vs cache-off (PICO_XIP_RAM) builds. Prints in-game so it's
+	   catchable on serial after the console is attached. */
+	extern unsigned long long pico_perf_us(void);
+	unsigned long long _perf_t0 = pico_perf_us();
+#endif
+
 	/* Free all cached pics and reset PSRAM before decoding the new room. */
 	gfxr_free_all_pics(state->driver, state->resstate);
 
@@ -2503,6 +2512,11 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   the background from PSRAM so the room art appears immediately. */
 	pico_alloc_visual(state->driver);
 	pico_render_background(state->driver);
+
+#ifdef FSCI_PROBE_PERF
+	sciprintf("[perf] pic %d decode: %lu us\n", nr,
+		  (unsigned long)(pico_perf_us() - _perf_t0));
+#endif
 
 	/* Post-decode baseline: free heap once the new room is fully resident.
 	   Compare against the next room's "room enter" line — if this baseline

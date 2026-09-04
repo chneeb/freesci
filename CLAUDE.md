@@ -2237,6 +2237,74 @@ the "shared PSRAM read-cache keystone" idea below was investigated and ruled out
 
 Suggested order: 1 ∥ 2 ∥ 3 (all independent; pick by user-visible value vs. measured headroom).
 
+#### The 16 KB XIP-RAM lever for PicoCalc sound — TRIED + ABANDONED (device-measured, 2026-09-04)
+
+**DEAD END. Rolled back.** The idea (below) was built behind an `FSCI_XIP_RAM` CMake option on pico-sdk 2.3.0,
+device-tested, and abandoned: pinning the XIP cache as SRAM **disables the flash instruction cache**, and
+FreeSCI runs from flash, so decode craters. Measured with an `[perf]` pic-decode timer (`FSCI_PROBE_PERF`,
+kept — a reusable gated diagnostic in `operations.c` `gfxop_new_pic` + `pico_perf_us` in `pico_time.c`),
+same SQ3 rooms, flash-cache-ON baseline vs XIP-cache-as-RAM:
+
+| room | cache ON | cache OFF (XIP RAM) | slowdown |
+|---|---|---|---|
+| pic 777 | 88 ms | **980 ms** | **11.1×** |
+| pic 900 | 91 ms | **593 ms** | **6.5×** |
+
+An **order of magnitude** slower. Fatal two ways: (1) room loads become ~0.6–1.0 s (very noticeable), and
+(2) — decisively — the 22 kHz synth IRQ needs a sample every ~45 µs; flash-resident synth code running ~10×
+slow cannot keep up, so this would break the very sound it was meant to enable. The `xip_cache_pin_range()`
+sub-range pin (keep ~3 KB cache) **won't save it either**: the decoder's hot-code working set is far larger
+than 3 KB, so it still thrashes. **Whole-16 KB pin or sub-range, XIP-cache-as-RAM is not viable for a
+flash-resident interpreter.** (A hypothetical alternative — put only the *synth code* in RAM via
+`__not_in_flash_func` and keep the cache — doesn't need XIP-RAM at all and doesn't solve the *memory* problem
+this was for; the sound *data* still has nowhere to live off the fragmenting main heap.)
+
+**Bottom line for PicoCalc sound: still unsolved, and XIP RAM is off the table.** The remaining paths are the
+non-XIP memory levers (flash OPL tables + mono + evict — which CLAUDE.md already found don't fully fit at the
+ceiling) or the **Pimoroni mapped-PSRAM** track (branch `pico-pimoroni-mapped-psram`), which dissolves the
+ceiling but has its own bring-up bug.
+
+**pico-sdk 2.3.0 upgrade (done for this, now moot):** validated — FreeSCI builds clean against 2.3.0 (the
+`pico_malloc` override + moved RP2350 memmaps survive), costs only **+472 bytes** static SRAM, needs picotool
+2.3.0 (`-DPICOTOOL_FORCE_FETCH_FROM_GIT=ON`). It lives isolated in the worktree `~/Source/pico-sdk-2.3.0`; the
+default `~/Source/pico-sdk` stays 2.2.0. Since XIP-RAM was the only reason to upgrade, 2.3.0 is **not needed**
+now — keep or remove the worktree (`git worktree remove ~/Source/pico-sdk-2.3.0`) at will. **Kept on master:**
+the `PICO_STDIO_USB_STDOUT_TIMEOUT_US=0` fix (non-blocking stdout — a real standalone-run improvement, commit
+`7a4f9623`) and the `FSCI_PROBE_PERF` decode timer.
+
+---
+
+*Original (optimistic) analysis, SUPERSEDED by the measurement above — kept for the mechanism detail:*
+
+The most promising way to make sound *fit* on the PicoCalc (as opposed to the Pimoroni board, which dissolves
+the ceiling entirely — see the RP2040/Pimoroni section) is to put the **resident sound stack in the RP2350's
+16 KB XIP cache-as-SRAM**, off the fragmentation-prone main heap. The resident sound cost is a **fixed ~13 KB**
+(OPL chip state ~7 KB, mixer buffers, the PCM ring) — exactly the shape that wants a separate fixed pool. The
+main-heap fragmentation wall is the real blocker for sound; moving those ~13 KB out of the arena sidesteps it.
+
+**Hardware:** the RP2350 XIP SRAM window is `XIP_SRAM_BASE 0x13ffc000 … 0x14000000` = **16 KB**. On the PicoCalc
+this is a good fit because the XIP cache serves **only flash** there (the PIO PSRAM is uncached), so carving it
+costs only flash instruction-cache — unlike the Pimoroni target, where the cache also serves the mapped PSRAM,
+making the XIP-RAM lever counterproductive (they compete for the same 16 KB). So this lever is **PicoCalc-only**.
+
+**SDK support — needs an upgrade:** the **installed pico-sdk is 2.2.0, which has NO turnkey XIP-RAM** (the
+address is defined but there's no linker region, allocator, or enable helper — you'd roll it yourself with
+XIP_CTRL). **pico-sdk 2.3.0 adds turnkey support** (verified by reading the 2.3.0 tree):
+- `PICO_USE_XIP_CACHE_AS_RAM` config flag + an **`__in_xip_ram(...)`** attribute macro to place data/functions
+  in the `.xip_ram` section (linker region + `memmap_xip_ram` support, with `test/pico_xip_sram_test/`).
+- **`xip_cache_pin_range(offset, size)`** — pins a *sub-range* of the cache as SRAM, leaving the rest caching,
+  so the cache cost is **tunable** (sacrifice only what the sound buffers need, not all 16 KB).
+
+**How it'd be used:** `__in_xip_ram` is *static* placement (fits fixed sound buffers directly). FreeSCI currently
+`calloc`s the OPL chip (`fmopl.c`), so either make the chip state / mixer buffers / PCM ring static-in-xip-ram
+(the "flash tables + mono" plan already leans static) or run a tiny bump allocator over `0x13ffc000`.
+
+**Caveats:** (1) upgrade 2.2.0 → 2.3.0 first — real step, the RP2350 memmap paths moved between the two, so it's
+a rebuild + full PicoCalc retest, not a drop-in; (2) measure the (pinned-sub-range) cache cost against the
+22 kHz audio IRQ before relying on it. **Verdict:** the right-shaped lever for PicoCalc sound specifically —
+fixed pool, off the main heap, tunable cost — gated on an SDK upgrade and a perf check. Back-pocket for the
+sound track; orthogonal to the render and Pimoroni work.
+
 ### PARKED — LCD loading-progress display (planned, not implemented)
 
 Goal: after game selection clears the LCD, mirror the engine's load messages to the LCD until the
@@ -3027,6 +3095,55 @@ left to keep out of SRAM is view-cel and control-map data, which alone is unlike
 ~256 KB gap. The PSRAM PIO driver, `lcdspi`, `i2ckbd`, and FatFS all already run on RP2040; the sound
 path's software floats (no RP2040 FPU) would also need attention. Treat RP2040 as aspirational, not a
 near-term target, until a way to shrink the SCI0 decode peak and the resident VM working set is found.
+
+### Pimoroni Pico Plus 2 (memory-mapped PSRAM) — PARKED on branch `pico-pimoroni-mapped-psram`
+
+The single lever that would actually **dissolve the SRAM ceiling** (and reopen sound + long restore chains +
+maybe SCI1) is real, addressable PSRAM. The PicoCalc's onboard PSRAM is **PIO-SPI, not memory-mapped** —
+store/load only, so hot VM memory (`script_t.buf`) can never leave SRAM. The **Pimoroni Pico Plus 2** (RP2350B,
+8 MB PSRAM on the QMI second chip-select) maps PSRAM into the address space (cached XIP window at `0x11000000`),
+so it *can* hold the VM working set. It drops into the PicoCalc socket (community-confirmed).
+
+A **second build target** for it lives on branch **`pico-pimoroni-mapped-psram`** (pushed to `fork`; forked off
+this branch's `d14e4b37`). It is **behind CMake `option(PICO_PSRAM_MAPPED)` (default OFF)** so the PicoCalc and
+desktop builds are untouched — nothing here on `pico-wip-render-debug` is affected. What it contains (all three
+targets build clean): `src/platform/pico/psram_mapped.c` (the same offset-based `psram_alloc/reset/store/load`
+API, but store/load are **memcpy against `0x11000000`**; plus the QMI bring-up `psram_qmi_init`), `psram_qmi.h`,
+and CMake wiring. Timing + direct-mode ordering were adopted from the **device-tested `~/Source/frank-snes`**
+(`drivers/psram_init.c`) on the identical board; built as `PICO_BOARD=pico2` driving **GPIO 47** for the PSRAM
+CS at runtime (works on RP2350B silicon regardless of the pico2 A-config, exactly as frank-snes relies on).
+
+**STATUS: does not fully run yet, but RE-SCOPED to a narrow, debugger-FREE bug (2026-09-03).** The device
+symptom is TFT noise + no serial on the Pimoroni — BUT a decisive test reframed it: **the same uf2 booted
+cleanly on a plain RP2350 (a Pico 2, no PSRAM) all the way to the "PSRAM not detected" LCD message.** That
+proves the ENTIRE early-boot path is correct — clock change, `set_flash_timings`, `stdio_init_all`, LCD init,
+SD init, AND `psram_qmi_init`'s no-PSRAM path all work. **The earlier "crashes in early boot / needs a
+debugger" conclusion is RETRACTED.**
+
+**The crash is triggered specifically by the PRESENCE of real PSRAM** — the code path in `psram_qmi_init` that
+only runs once a chip actually answers the ID read: enter QPI (0x35) → write `m[1]` timing/formats → enable M1
+writes → return → the smoke-test `memcpy` to `0x11000000`. On the plain RP2350 that whole path is skipped
+(no chip → `size=0` → early return → clean "not detected"); on the Pimoroni it runs and faults there.
+
+**PRIME SUSPECT + first fix to try (no debugger needed — the smoke test is the signal):** my `psram_qmi_init`
+differs from the device-tested `frank-snes` (`~/Source/frank-snes drivers/psram_init.c`) in exactly the risky
+part — **frank uses `AUTO_CS1N` (hardware-managed chip-select) and NO ID read (it hardcodes 8 MB)**, whereas
+mine uses **manual `ASSERT_CS1N` toggling plus a custom `0x9F` ID read** to detect size. The manual CS
+handling / extra ID transaction most likely leaves the QMI or PSRAM chip in a bad state before the real
+config. **FIX: replace `psram_qmi_init` with frank's exact sequence verbatim** (AUTO_CS1N, `NOPUSH`, no ID
+read, return a hardcoded 8 MB), and let the boot smoke test be the presence/integrity check. Then flash and
+read the LCD/serial: "PSRAM not detected" → detection/CS issue; "PSRAM test FAILED" → timing; boots to the
+chooser/game → solved. Iterating is now cheap (the smoke test tells you which), so **this no longer needs an
+SWD debugger** — the earlier debugger recommendation applied to the mis-diagnosed early-boot theory.
+
+*History (mis-diagnosis trail, kept so it isn't repeated): the boot path was suspected first — tried the
+`pimoroni` board config (16 MB flash) → `pico2` (like frank) → frank's `set_flash_timings(133,66)` before
+`set_sys_clock_khz`; a full flash erase (uf2loader removed) still showed noise, so uf2loader was exonerated.
+All of that was chasing the wrong layer — the plain-RP2350 boot test above shows the boot path was fine all
+along.* NB the mapped-PSRAM design is sound; only the PSRAM-present QMI bring-up needs the frank-verbatim swap.
+
+**SDK note for a future attempt:** installed pico-sdk is **2.2.0**, which ships **no turnkey PSRAM** — hence the
+vendored QMI init. (2.3.0 exists but wasn't needed for PSRAM.)
 
 ## Key CMake decisions
 
