@@ -132,53 +132,32 @@ __no_inline_not_in_flash_func(psram_qmi_init_inner)(unsigned cs_pin)
 
     uint32_t intr = save_and_disable_interrupts();
 
-    /* Enter direct (bit-bang) mode on the QMI, PSRAM CS, slow clk divisor. */
-    qmi_hw->direct_csr = 30u << QMI_DIRECT_CSR_CLKDIV_LSB | QMI_DIRECT_CSR_EN_BITS;
+    /* Direct mode with HARDWARE-managed chip-select (AUTO_CS1N) — the device-tested
+       frank-snes sequence (~/Source/frank-snes drivers/psram_init.c), which is what
+       actually works on this exact board.  The previous manual-ASSERT_CS1N toggling
+       + a custom 0x9F ID-read left the QMI/PSRAM in a bad state once a real chip
+       responded (TFT noise on device); dropped entirely.  No runtime size probe —
+       the Pimoroni Plus 2 is known 8 MB and the boot smoke test is the real
+       presence/integrity check. */
+    qmi_hw->direct_csr = 10u << QMI_DIRECT_CSR_CLKDIV_LSB
+                         | QMI_DIRECT_CSR_EN_BITS
+                         | QMI_DIRECT_CSR_AUTO_CS1N_BITS;
     while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {}
 
-    /* Exit QPI if a previous init left the chip in it: issue 0xF5 (quad).  */
-    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    qmi_hw->direct_tx = QMI_DIRECT_TX_OE_BITS
+    /* Exit QPI (0xF5, quad) first, in case a prior firmware left the chip in QPI:
+       a BOOTSEL/watchdog reset does NOT power-cycle the PSRAM, and our dev workflow
+       reflashes repeatedly, so the chip can survive in QPI across a reset.  Harmless
+       if it is already in SPI.  NOPUSH = no read phase; OE + quad IWIDTH so the
+       command reaches a chip that IS in QPI.  (frank omits this — it assumes a cold
+       start — but we keep it for reflash robustness.)  Then enter QPI (0x35). */
+    qmi_hw->direct_tx = QMI_DIRECT_TX_NOPUSH_BITS
+                        | QMI_DIRECT_TX_OE_BITS
                         | (QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB)
                         | 0xf5u;
     while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {}
-    (void)qmi_hw->direct_rx;
-    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
 
-    /* Read the PSRAM ID (0x9F): 2 dummy bytes, then MFID, then KGD, then EID.
-       APS6404 answers KGD == 0x5D; EID top bits encode density. */
-    uint8_t kgd = 0, eid = 0;
-    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    for (int i = 0; i < 7; i++) {
-        qmi_hw->direct_tx = (i == 0) ? 0x9fu : 0xffu;
-        while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_TXEMPTY_BITS) == 0) {}
-        while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {}
-        uint8_t rx = (uint8_t)qmi_hw->direct_rx;
-        if (i == 5) kgd = rx;
-        else if (i == 6) eid = rx;
-    }
-    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-
-    size_t size = 0;
-    if (kgd == 0x5du) {
-        size = 1024u * 1024u;               /* 1 MiB base */
-        uint8_t density = (uint8_t)(eid >> 5);
-        if (eid == 0x26u || density == 2u) size *= 8u;   /* 8 MiB (Plus 2) */
-        else if (density == 0u)            size *= 2u;
-        else if (density == 1u)            size *= 4u;
-    }
-
-    if (size == 0) {                        /* no PSRAM — leave QMI direct off */
-        qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_EN_BITS;
-        restore_interrupts(intr);
-        return 0;
-    }
-
-    /* Enter QPI mode on the PSRAM (0x35). */
-    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
-    qmi_hw->direct_tx = 0x35u;
+    qmi_hw->direct_tx = QMI_DIRECT_TX_NOPUSH_BITS | 0x35u;
     while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) {}
-    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
 
     /* Program the CS1 formats/timing (all values precomputed above the direct-mode
        entry — only register writes here, no flash access), then drop out of direct
@@ -220,7 +199,7 @@ __no_inline_not_in_flash_func(psram_qmi_init_inner)(unsigned cs_pin)
     hw_set_bits(&xip_ctrl_hw->ctrl, XIP_CTRL_WRITABLE_M1_BITS);
 
     restore_interrupts(intr);
-    return size;
+    return 0x800000u;   /* Pimoroni Pico Plus 2 = 8 MiB (no runtime probe) */
 }
 
 size_t
