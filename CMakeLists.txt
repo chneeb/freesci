@@ -239,6 +239,35 @@ if(PLATFORM STREQUAL "pico")
         if(PICO_PSRAM_SCRIPTS)
             add_compile_definitions(PICO_PSRAM_SCRIPTS=1)
         endif()
+
+        # Give the mapped target a real STATIC visual buffer (the desktop
+        # visual[2] analogue) instead of baking static draws into the PSRAM
+        # background: kAddToPic picviews persist via an SRAM buffer, and the
+        # room's background stays pristine so the add_to_pic overlay base is
+        # never scribbled on. OFF falls back to the PIO behaviour (restore
+        # straight from the PSRAM background), which is the A/B for deciding
+        # whether a render regression belongs to this feature.
+        option(PICO_STATIC_VISUAL "Use a dedicated static visual buffer (mapped PSRAM only)" ON)
+        if(PICO_STATIC_VISUAL)
+            add_compile_definitions(PICO_STATIC_VISUAL=1)
+        endif()
+
+        # Desktop-style per-frame priority maps. The PicoCalc keeps ONE priority
+        # map, PSRAM-resident and aliased to static_priority_map, so the per-frame
+        # copyback is a self-copy no-op and nothing ever writes sprite priority
+        # back -- hence "last drawn wins" z-order, and the static-view bake that
+        # stands a stopUpd view's priority in the map PERMANENTLY (which is what
+        # over-occludes PQ2's officer and bleeds over its dialogs).
+        #
+        # With the engine moved to PSRAM there is SRAM for two real 320x200 maps
+        # (128KB), which is what the desktop model needs: static_priority_map is
+        # the clean plate, priority_map the working copy, restored from it every
+        # frame so a view's priority is TRANSIENT. Supersedes the static-view
+        # priority bake, so that routing is compiled out when this is on.
+        option(PICO_WORKING_PRIORITY "Desktop-style per-frame priority maps (mapped PSRAM only)" ON)
+        if(PICO_WORKING_PRIORITY)
+            add_compile_definitions(PICO_WORKING_PRIORITY=1)
+        endif()
     endif()
 
     # Static-view occlusion/persistence on the single Pico visual buffer. Two levels:

@@ -76,7 +76,8 @@ extern void pico_oom_report(const char *what, unsigned long size,
 extern void pico_free_visual(gfx_driver_t *drv);
 extern void pico_alloc_visual(gfx_driver_t *drv);
 extern byte *pico_get_visual(gfx_driver_t *drv);
-extern void pico_connect_engine_priority(gfx_pixmap_t *priority_map);
+extern void pico_connect_engine_priority(gfx_pixmap_t *priority_map,
+					 gfx_pixmap_t *static_priority_map);
 extern void pico_render_background(gfx_driver_t *drv);
 extern void pico_setup_sci0_palette(gfx_driver_t *drv);
 
@@ -376,8 +377,18 @@ _gfxop_draw_pixmap(gfx_driver_t *driver, gfx_pixmap_t *pxm, int priority, int co
 			_gfxop_draw_control(control_map, pxm, control, original_pos);
 
 #ifdef PRECISE_PRIORITY_MAP
+#if defined(HAVE_PICO) && defined(PICO_WORKING_PRIORITY)
+		/* Not on Pico: _gfxop_draw_priority reads the SOURCE cel's index_data
+		   to find its opaque pixels, but view cels are offloaded to PSRAM after
+		   decode, so index_data is NULL and it can only emit "without index
+		   data!" errors. The driver's blit does the writeback instead -- it is
+		   already reading the cel from PSRAM row by row, and writes priority
+		   through the same pri_buf it gates on. */
+		(void)original_pos;
+#else
 		if (priority >= 0 && priority_map->index_data)
 			_gfxop_draw_priority(priority_map, pxm, priority, original_pos);
+#endif
 #endif
 	}
 
@@ -708,7 +719,18 @@ _gfxop_init_common(gfx_state_t *state, gfx_options_t *options, void *misc_payloa
 	state->mouse_pointer = state->mouse_pointer_bg = NULL;
 	state->mouse_pointer_visible = 0;
 
-#ifdef HAVE_PICO
+#if defined(HAVE_PICO) && defined(PICO_WORKING_PRIORITY)
+	/* Mapped target: two REAL 320x200 maps, exactly as desktop. priority_map is
+	   the per-frame working copy, static_priority_map the clean plate it is
+	   restored from every frame (the PRECISE_PRIORITY_MAP copyback below). That
+	   is what makes a view's priority transient instead of permanently baked,
+	   and what gives true inter-sprite z-order -- both fall out of index_data
+	   simply being non-NULL, since every write site already guards on it.
+	   control_map stays NULL (collision reads the pic's own control map). */
+	init_aux_pixmap(&(state->priority_map));
+	init_aux_pixmap(&(state->static_priority_map));
+	state->control_map = NULL;
+#elif defined(HAVE_PICO)
 	/* Pico: allocate the pixmap struct but NOT index_data — defer that 64KB
 	   allocation to gfxop_new_pic pass 2.  index_data stays NULL until the
 	   first room is drawn; all write sites are already null-guarded.
@@ -804,7 +826,7 @@ gfxop_exit(gfx_state_t *state)
 		state->priority_map = NULL;
 	}
 
-#ifdef HAVE_PICO
+#if defined(HAVE_PICO) && !defined(PICO_WORKING_PRIORITY)
 	/* static_priority_map is aliased to priority_map on Pico — already freed above */
 	state->static_priority_map = NULL;
 #else
@@ -2490,6 +2512,53 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   the metadata across here.  static_priority_map is aliased to priority_map
 	   on Pico, so this covers both.  pico_blit_indexed and gfxop_scan_bitmask read
 	   the packed map back from PSRAM, unpacking nibbles. */
+#ifdef PICO_WORKING_PRIORITY
+	/* Unpack the freshly decoded priority map out of PSRAM into the SRAM clean
+	   plate, then seed the working copy from it. The pic decodes nibble-packed
+	   (2 px/byte) straight to PSRAM, and the shared copyback at _gfxop_set_pic is
+	   a no-op here because the pic's own index_data is NULL -- so this is where
+	   the room's priority actually reaches the maps. Read in small chunks: the
+	   main stack is only 8KB. */
+	{
+		gfx_pixmap_t *src = state->pic->priority_map;
+		gfx_pixmap_t *sp  = state->static_priority_map;
+		gfx_pixmap_t *wp  = state->priority_map;
+
+		if (src && sp && wp && sp->index_data && wp->index_data
+		    && src->psram_valid) {
+			int npix = src->index_xl * src->index_yl;
+			int cap  = sp->index_xl * sp->index_yl;
+			if (npix > cap)
+				npix = cap;
+
+			if (src->nibble_packed) {
+				unsigned char buf[256];
+				int packed = (npix + 1) >> 1;
+				int done = 0;
+				while (done < packed) {
+					int i, n = packed - done;
+					if (n > (int)sizeof(buf))
+						n = (int)sizeof(buf);
+					psram_load(src->psram_addr + (uint32_t)done,
+						   buf, (size_t)n);
+					for (i = 0; i < n; i++) {
+						int p = (done + i) << 1;
+						unsigned char b = buf[i];
+						if (p < npix)
+							sp->index_data[p] = b & 0x0f;
+						if (p + 1 < npix)
+							sp->index_data[p + 1] = b >> 4;
+					}
+					done += n;
+				}
+			} else {
+				psram_load(src->psram_addr, sp->index_data,
+					   (size_t)npix);
+			}
+			memcpy(wp->index_data, sp->index_data, (size_t)npix);
+		}
+	}
+#else
 	{
 		gfx_pixmap_t *src = state->pic->priority_map;
 		gfx_pixmap_t *dst = state->priority_map;
@@ -2502,7 +2571,8 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 			dst->nibble_packed  = src->nibble_packed;
 		}
 	}
-	pico_connect_engine_priority(state->priority_map);
+#endif
+	pico_connect_engine_priority(state->priority_map, state->static_priority_map);
 
 	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors.
 	   Must happen before pico_render_background calls flush_region. */

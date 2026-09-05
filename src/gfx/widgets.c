@@ -898,7 +898,16 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 	gfxw_dyn_view_t *view = (gfxw_dyn_view_t *) widget;
 	DRAW_ASSERT(widget, GFXW_DYN_VIEW);
 
-#if defined(HAVE_PICO) && (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE))
+/* PICO_WORKING_PRIORITY supersedes this whole routing: with real per-frame
+   priority maps a stopUpd view's priority is written by the normal draw and
+   cleared by the per-frame copyback, i.e. TRANSIENT like desktop. Keeping the
+   static route as well would re-bake it permanently -- the very thing that
+   over-occludes PQ2's officer -- and its fullscreen clip is what bleeds colour
+   over dialogs. So it is compiled out here. NB this also means the glovebox
+   items stay invisible (they were only visible BECAUSE of that fullscreen-clip
+   draw); that is a separate clipping problem, tracked apart from priority. */
+#if defined(HAVE_PICO) && !defined(PICO_WORKING_PRIORITY) \
+    && (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE))
 	/* A settled stopUpd view (NO_UPDATE) is conceptually part of the background.
 	   Desktop keeps it via a persistent back buffer; Pico has a single visual[0].
 	   Route the view through the static path (GFX_BUFFER_STATIC) so the driver

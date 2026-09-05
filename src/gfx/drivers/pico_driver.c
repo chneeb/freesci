@@ -40,23 +40,65 @@ extern void define_region_spi(int xstart, int ystart, int xend, int yend, int rw
 
 #define EVT_BUF_SIZE 8
 
+/* The mapped target's static visual buffer is separately switchable so it can be
+   A/B'd against the pre-static-buffer behaviour (-DPICO_STATIC_VISUAL=OFF), which
+   falls back to restoring straight from the PSRAM background exactly as the PIO
+   target does. Useful for deciding whether a render regression belongs to this
+   feature or predates it. */
+#if defined(PICO_PSRAM_MAPPED) && defined(PICO_STATIC_VISUAL)
+#  define PICO_USE_STATIC_VISUAL 1
+#endif
+
+/* Buffer set. The PicoCalc PIO target has ONE visual buffer serving back+front
+   (SRAM is the binding constraint there), and compensates with the static bake
+   into PSRAM -- see pico_bake_static_region.
+
+   The mapped-PSRAM target has ~300KB of SRAM headroom once engine allocations
+   move to PSRAM, so it can afford a real STATIC buffer and follow the desktop
+   model instead (sdl_driver.c: visual[2]=STATIC, visual[1]=BACK). There,
+   GFX_BUFFER_STATIC draws land in the static buffer and every BACK restore
+   copies FROM it, so kAddToPic picviews survive restores by construction rather
+   than by baking them into the background. */
+#ifdef PICO_USE_STATIC_VISUAL
+#  define PICO_NVISUAL     2
+#  define PICO_VIS_STATIC  1        /* analogue of SDL's visual[2] */
+#else
+#  define PICO_NVISUAL     1
+#endif
+
 struct _pico_state {
-    uint8_t        *visual[1];       /* [0]=back/front (drawing+display) */
+    uint8_t        *visual[PICO_NVISUAL]; /* [0]=back/front (drawing+display) */
     /* priority buffer removed — uses engine's priority_map via s_shared_priority */
     uint8_t         palette[256][3]; /* R,G,B for each colour index */
     gfx_pixmap_t   *static_bg;       /* current room's visual_map (PSRAM-backed) */
+#ifdef PICO_USE_STATIC_VISUAL
+    int             static_dirty;    /* static buffer may predate static_bg */
+#endif
 
     /* keyboard event ring buffer */
     sci_event_t     evbuf[EVT_BUF_SIZE];
     int             ev_head, ev_tail;
 };
 
-/* Shared engine priority_map set by pico_connect_engine_priority() after GFX init */
+/* Shared engine priority maps, set by pico_connect_engine_priority() after GFX
+   init. s_static_priority is the clean plate and is NULL unless the mapped
+   target's desktop-style per-frame maps are in use. */
 static gfx_pixmap_t *s_shared_priority = NULL;
+#ifdef PICO_WORKING_PRIORITY
+static gfx_pixmap_t *s_static_priority = NULL;
+#endif
 
-void pico_connect_engine_priority(gfx_pixmap_t *priority_map)
+void pico_connect_engine_priority(gfx_pixmap_t *priority_map,
+                                  gfx_pixmap_t *static_priority_map)
 {
     s_shared_priority = priority_map;
+#ifdef PICO_WORKING_PRIORITY
+    s_static_priority = static_priority_map;
+#else
+    /* PIO: static_priority_map is aliased to priority_map, so there is nothing
+       to select between -- keep the target byte-identical. */
+    (void)static_priority_map;
+#endif
 }
 
 /* Set by widgets.c around a NO_UPDATE dynview's static-routed draw in priority-only
@@ -72,6 +114,12 @@ void pico_free_visual(gfx_driver_t *drv)
         sci_free(ps->visual[0]);
         ps->visual[0] = NULL;
     }
+#ifdef PICO_USE_STATIC_VISUAL
+    if (ps && ps->visual[PICO_VIS_STATIC]) {
+        sci_free(ps->visual[PICO_VIS_STATIC]);
+        ps->visual[PICO_VIS_STATIC] = NULL;
+    }
+#endif
 }
 
 void pico_alloc_visual(gfx_driver_t *drv)
@@ -82,6 +130,17 @@ void pico_alloc_visual(gfx_driver_t *drv)
         if (ps->visual[0])
             memset(ps->visual[0], 0, PICO_XSIZE * PICO_YSIZE);
     }
+#ifdef PICO_USE_STATIC_VISUAL
+    /* The static buffer is best-effort: every use site falls back to the back
+       buffer if it is missing, which degrades to the PIO single-buffer
+       behaviour rather than failing. */
+    if (ps && !ps->visual[PICO_VIS_STATIC]) {
+        ps->visual[PICO_VIS_STATIC] =
+            (uint8_t *)sci_malloc_sram(PICO_XSIZE * PICO_YSIZE);
+        if (ps->visual[PICO_VIS_STATIC])
+            memset(ps->visual[PICO_VIS_STATIC], 0, PICO_XSIZE * PICO_YSIZE);
+    }
+#endif
 }
 
 /* Ensure visual[0] is allocated; returns 1 on success, 0 on OOM. */
@@ -289,6 +348,17 @@ static int pico_init_specific(struct _gfx_driver *drv,
         return GFX_FATAL;
     }
     memset(S->visual[0], 0, xsize * ysize);
+#ifdef PICO_USE_STATIC_VISUAL
+    /* Static buffer (desktop visual[2] analogue). Best-effort: every use site
+       falls back to the back buffer, so a failure degrades to the PIO
+       single-buffer behaviour instead of failing init. */
+    S->visual[PICO_VIS_STATIC] = (uint8_t *)sci_malloc_sram(xsize * ysize);
+    if (S->visual[PICO_VIS_STATIC])
+        memset(S->visual[PICO_VIS_STATIC], 0, xsize * ysize);
+    else
+        fprintf(stderr, "pico_driver: OOM allocating static visual buffer;"
+                        " falling back to single-buffer behaviour\n");
+#endif
 
     /* Default EGA palette */
     static const uint8_t ega16[16][3] = {
@@ -332,6 +402,12 @@ static void pico_exit(struct _gfx_driver *drv)
     if (!S) return;
 
     if (S->visual[0]) { sci_free(S->visual[0]); S->visual[0] = NULL; }
+#ifdef PICO_USE_STATIC_VISUAL
+    if (S->visual[PICO_VIS_STATIC]) {
+        sci_free(S->visual[PICO_VIS_STATIC]);
+        S->visual[PICO_VIS_STATIC] = NULL;
+    }
+#endif
     /* priority buffer is owned by the engine (s_shared_priority), not freed here */
     s_shared_priority = NULL;
     sci_free(drv->state);
@@ -688,6 +764,18 @@ void pico_render_background(gfx_driver_t *drv)
     rect_t full = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
     rect_t dst  = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
     pico_blit_indexed(ps, bg, -1, full, dst, ps->visual[0], PICO_XSIZE, NULL, 0, 0);
+#ifdef PICO_USE_STATIC_VISUAL
+    /* Seed the static buffer with the new room background. Picviews drawn after
+       this (kAddToPic) composite on top of it, and every later BACK restore
+       copies from here -- so the static buffer is the room's "clean plate".
+       Copying from visual[0] rather than re-blitting from PSRAM keeps the two
+       byte-identical and costs one memcpy. */
+    if (ps->visual[PICO_VIS_STATIC]) {
+        memcpy(ps->visual[PICO_VIS_STATIC], ps->visual[0],
+               PICO_XSIZE * PICO_YSIZE);
+        ps->static_dirty = 0;
+    }
+#endif
     /* Stage the new background in visual[0] but do NOT flush it to the LCD here.
        gfxop_new_pic runs this from inside kDrawPic, before kAnimate's open
        transition; an eager flush snapped the full new pic onto the screen, then
@@ -753,7 +841,36 @@ static void pico_bake_static_region(struct _pico_state *ps, rect_t dest)
     gfx_pixmap_t *bg = ps->static_bg;
     int bw, bh, x0, x1, w;
 
+    /* Same gate as the PIO bake, deliberately ahead of the mirror: when there is
+       no PSRAM-backed background (no pic set yet, or a window/closeup that never
+       issued a kDrawPic) the PIO path persists NOTHING. Mirroring unconditionally
+       would let the mapped target make things permanent that PIO never did --
+       a dismissed dialog drawn in that state would be baked into the clean plate
+       and then painted back by every subsequent BACK restore, so it could never
+       be erased. Keep the two targets' persistence decisions identical. */
     if (!bg || bg->index_data || !bg->psram_valid) return;  /* not PSRAM-backed */
+
+#ifdef PICO_USE_STATIC_VISUAL
+    /* Mirror the drawn region into the SRAM static buffer. Two wins over baking
+       into the PSRAM background: it is an SRAM memcpy rather than a PSRAM write,
+       and it leaves static_bg PRISTINE -- baking altered the room's clean plate,
+       which is what corrupted the add_to_pic overlay base (the SQ3 "Pirates of
+       Pestulon" title). */
+    if (ps->visual[PICO_VIS_STATIC] && ps->visual[0]) {
+        int row, y, xs = dest.x < 0 ? 0 : dest.x;
+        int xe = dest.x + dest.xl;
+        if (xe > PICO_XSIZE) xe = PICO_XSIZE;
+        if (xe > xs) {
+            for (row = 0; row < dest.yl; row++) {
+                y = dest.y + row;
+                if (y < 0 || y >= PICO_YSIZE) continue;
+                memcpy(ps->visual[PICO_VIS_STATIC] + y * PICO_XSIZE + xs,
+                       ps->visual[0] + y * PICO_XSIZE + xs, (size_t)(xe - xs));
+            }
+        }
+        return;
+    }
+#endif
     bw = bg->index_xl;
     bh = bg->index_yl;
 
@@ -775,7 +892,13 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
                              int priority,
                              rect_t src, rect_t dest, gfx_buffer_t buffer)
 {
-    int bufnr = 0;  /* single visual buffer serves back and static */
+    /* Every draw goes to the back buffer, including STATIC ones. Sending a
+       STATIC draw ONLY to the static buffer (the literal desktop model) makes it
+       invisible here: desktop follows it with update(BACK)+update(FRONT), but
+       the Pico engine path does not reliably issue those, so the pixels never
+       reach the panel. Persistence is handled by MIRRORING the drawn region into
+       the static buffer afterwards instead -- same semantics as the PIO bake. */
+    int bufnr = 0;
 
     if (!pico_ensure_visual(drv)) return GFX_ERROR;
 
@@ -820,12 +943,20 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
        direct indexed blit that translates index_data+colors on-the-fly. */
     uint8_t *destptr = S->visual[bufnr] + dest.y * PICO_XSIZE + dest.x;
     if (!pxm->data) {
-        uint8_t *pridata = (s_shared_priority && s_shared_priority->index_data)
-                           ? s_shared_priority->index_data : NULL;
+        /* Mirror the desktop map choice (_gfxop_draw_pixmap: static_buf ?
+           static_priority_map : priority_map). A STATIC draw (kAddToPic picview)
+           must write the CLEAN PLATE, or the per-frame copyback would erase its
+           priority and actors would stop being occluded by it. */
+        gfx_pixmap_t *pmap = s_shared_priority;
+#ifdef PICO_WORKING_PRIORITY
+        if (buffer == GFX_BUFFER_STATIC && s_static_priority)
+            pmap = s_static_priority;
+#endif
+        uint8_t *pridata = (pmap && pmap->index_data) ? pmap->index_data : NULL;
         uint8_t *priptr = pridata
-                          ? (pridata + dest.y * s_shared_priority->index_xl + dest.x)
+                          ? (pridata + dest.y * pmap->index_xl + dest.x)
                           : NULL;
-        int pri_stride = pridata ? s_shared_priority->index_xl : 0;
+        int pri_stride = pridata ? pmap->index_xl : 0;
         pico_blit_indexed(S, pxm, priority, src, dest, destptr, PICO_XSIZE,
                           priptr, pri_stride,
                           buffer == GFX_BUFFER_STATIC);
@@ -874,6 +1005,15 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
     return GFX_OK;
 }
 
+/* Save-unders larger than this go to the PSRAM bump arena rather than SRAM.
+   Raising it on the mapped target was tried (to dodge psram_reset clobbering a
+   save-under held across a room change) and REVERTED: it did not fix the PQ2
+   dialogs it was aimed at, and it is expensive -- the old_screen grab alone is
+   320x190 = 60800 bytes on every pic transition, which together with the static
+   visual buffer and the two priority maps drove the arena to 470628 of a 474728
+   heap span and OOM'd. Keep save-unders in PSRAM on both targets. */
+#define PICO_GRAB_SRAM_MAX  ((size_t)4096)
+
 static int pico_grab_pixmap(struct _gfx_driver *drv, rect_t src,
                              gfx_pixmap_t *pxm, gfx_map_mask_t map)
 {
@@ -895,7 +1035,7 @@ static int pico_grab_pixmap(struct _gfx_driver *drv, rect_t src,
                       GFX_PIXMAP_FLAG_EXTERNAL_PALETTE |
                       GFX_PIXMAP_FLAG_PALETTE_SET;
         size_t sz = (size_t)src.xl * src.yl;
-        if (sz > 4096) {
+        if (sz > PICO_GRAB_SRAM_MAX) {
             /* Large grab: save row-by-row into PSRAM to avoid SRAM pressure.
                PSRAM address is bump-allocated and reclaimed on psram_reset(). */
             uint32_t addr = psram_alloc(sz);
@@ -949,6 +1089,41 @@ static int pico_update(struct _gfx_driver *drv,
         sciprintf("[pupd] BACK restore src=(%d,%d %dx%d) dest=(%d,%d)\n",
                   src.x, src.y, src.xl, src.yl, dest.x, dest.y);
 #endif
+#ifdef PICO_USE_STATIC_VISUAL
+        /* Desktop model (sdl_update: data_source = STATIC for a BACK restore):
+           copy the dirty region straight out of the static buffer, which already
+           holds the background WITH its kAddToPic picviews composited in. Both
+           buffers are SRAM, so this is a plain per-row memcpy -- and it replaces
+           a per-row PSRAM read, so the restore gets cheaper, not dearer. */
+        if (S->visual[PICO_VIS_STATIC] && S->visual[0]) {
+            int row;
+            int w = src.xl, h = src.yl;
+            /* Self-correcting refresh: if the background changed without going
+               through pico_render_background, rebuild the whole clean plate from
+               static_bg before serving restores out of it. The PIO path cannot
+               go stale because it reads static_bg directly every time. */
+            if (S->static_dirty && S->static_bg
+                && (S->static_bg->index_data || S->static_bg->psram_valid)) {
+                rect_t f = gfx_rect(0, 0, S->static_bg->index_xl,
+                                    S->static_bg->index_yl);
+                rect_t d = gfx_rect(0, 0, S->static_bg->index_xl,
+                                    S->static_bg->index_yl);
+                pico_blit_indexed(S, S->static_bg, -1, f, d,
+                                  S->visual[PICO_VIS_STATIC], PICO_XSIZE,
+                                  NULL, 0, 0);
+                S->static_dirty = 0;
+            }
+            if (dest.x + w > PICO_XSIZE) w = PICO_XSIZE - dest.x;
+            if (dest.y + h > PICO_YSIZE) h = PICO_YSIZE - dest.y;
+            for (row = 0; row < h; row++)
+                memcpy(S->visual[0] + (dest.y + row) * PICO_XSIZE + dest.x,
+                       S->visual[PICO_VIS_STATIC]
+                           + (src.y + row) * PICO_XSIZE + src.x,
+                       (size_t)(w > 0 ? w : 0));
+            break;
+        }
+        /* else fall through to the PSRAM restore below (static buffer missing) */
+#endif
         /* Restore background from PSRAM into visual[0] for this dirty region. */
         if (S->static_bg && S->visual[0]) {
             uint8_t *destptr = S->visual[0] + dest.y * PICO_XSIZE + dest.x;
@@ -987,6 +1162,14 @@ static int pico_set_static_buffer(struct _gfx_driver *drv,
 {
     (void)priority;
     S->static_bg = pic;  /* save for BUFFER_BACK restoration */
+#ifdef PICO_USE_STATIC_VISUAL
+    /* The static buffer now predates the current background. It is refreshed
+       lazily at the next BACK restore rather than here, because the pic's PSRAM
+       content is not necessarily decoded yet at this point. Without this the
+       buffer could keep a PREVIOUS room and BACK restores would paint that old
+       room back over parts of the new one. */
+    S->static_dirty = 1;
+#endif
 #ifdef FSCI_PROBE_GFX
     /* [pstat] probe: every static_bg swap. If opening the glovebox emits a [pstat]
        line, the closeup is a full kDrawPic (static_bg refreshed -> bake target is
