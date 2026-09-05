@@ -3314,6 +3314,61 @@ stay in PSRAM on both targets.
 (1843 separate allocations on PQ2) fragments SRAM badly enough to fail the 64 KB `visual[0]` on a cross-game
 switch. Building it OFF caused that failure twice.
 
+#### PARKED / NEXT STEPS (as of 2026-09-05, end of the sound session)
+
+Ordered roughly by value. Nothing here is in progress.
+
+**1. KQ4: Rosella "swims in the lawn"** (opening sequence). UNDIAGNOSED. My control-map theory was
+DISPROVEN, so do not restart from it: static control collision already works (the scan reads the pic's own
+nibble-packed PSRAM map), and a *missing* map would make her walk, not swim -- something actively reports
+water. Two cheap captures first: the `Resmgr: Detected SCI...` line (KQ4 shipped in several forms; a
+non-plain-SCI0 detection would explain divergent semantics), and `[oc]` control-mask scans from an
+`FSCI_PROBE_GFX` build to see whether the map really says "water" over the lawn.
+
+**2. Right-size the audio buffers (~24KB reclaimable, both targets).** `PICO_PWM_BUF_FRAMES` (rate/11) and
+the 8192 ring were sized to survive RARE polls, before the poll fix existed. With polls now at 60Hz a batch
+only needs rate/60 frames (~367 at 22kHz, ~184 at 11kHz). Keep the ring generous enough to ride a ~250ms
+room-decode stall, but the mixer compbuf (2 * buf_size * 4) can shrink a lot. This is the cheapest large
+saving available and it is what would decide item 3.
+
+**3. PIO sound at 11kHz.** Analysed, NOT device-tested. The quality blocker is inherited for free (the poll
+fix is shared code), so the only question is memory. With the oversized buffers it is ~27KB against a ~26KB
+margin; with item 2's right-sized buffers it is closer to ~17KB, which is plausible. But the documented PIO
+failure was `calloc 16384 failed` at `sm_allocate_stack` -- a CONTIGUITY failure at ~15KB resident -- so it
+may trip regardless. Worth one flash, not worth engineering effort. `build-pico-sound11k` recipe:
+`-DPICO_PWM_AUDIO=ON -DPICO_SND_RATE=11025`.
+
+**4. Dropped notes: implement voice stealing** (`opl2.c` `adlibemu_start_note`). Upstream FreeSCI simply
+discards a note when all ADLIB_VOICES (12) are busy -- literally `XXX implement overflow code`. Affects
+desktop equally. This is what "some things are cut off" in the music actually is.
+
+**5. `old_screen` transition garbage** (documented + diagnosed under "OPEN -- pic-open transition shows a
+shrinking garbage rectangle"): the 320x190 grab lives in the PSRAM BUMP arena, which `psram_reset()` wipes
+on the next room. The recorded fix is a dedicated fixed PSRAM slot outside the bump arena (the
+`PICO_PARSE_SCRATCH_ADDR` pattern). NB do NOT "fix" it by moving save-unders to SRAM -- that was tried this
+session and reverted: the `old_screen` grab alone is 60,800 bytes on every pic transition and it OOM'd.
+
+**6. Colonel's Bequest dialog boxes** (transparent fill, sticky ornate corners). Recorded as open, never
+investigated. Now worth a fresh look: this target has the desktop buffer set and per-frame priority maps,
+which is exactly the machinery whose absence caused the analogous PQ2 problems.
+
+**7. Runtime control writes (actor-to-actor blocking).** `state->control_map` is NULL, so
+`draw_line_to_control_map` is a silent no-op. A real SRAM control map was BUILT AND REVERTED this session
+because it buys nothing on its own: the other consumer, `_gfxop_draw_control`, reads the SOURCE cel's
+`index_data`, which is in PSRAM (NULL), exactly as `_gfxop_draw_priority` does. The real fix is extending
+`pico_blit_indexed` with a control buffer and writeback, mirroring the priority path -- the blit is the only
+code that can read a PSRAM cel. Only worth doing if a game demonstrably needs it.
+
+**8. SCI1/VGA.** Currently rejected with a legible halt (SCI0-only). The PSRAM headroom makes it far more
+plausible than when that limit was set, but it still needs VGA palette handling, view1/view11 cel decode,
+and the offload wiring across the whole `version >= SCI_VERSION_01_VGA` branch.
+
+**9. Branch/maintenance question.** PIO and mapped are both supported, which means two render models and two
+memory models to keep working. Every shared-file change needs the PIO `.bss == 17,280` check. If the
+Pimoroni board ever becomes the standard (it drops into the PicoCalc socket), the offload layer,
+store/load, nibble packing and the static-view bakes could all be deleted -- that is where the real
+simplification is.
+
 #### Open on this target
 
 - **KQ4: Rosella "swims in the lawn"** in the opening. Suspected **control map**: `state->control_map` is NULL
