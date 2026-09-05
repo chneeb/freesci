@@ -206,7 +206,69 @@ The chooser scans that directory, presents a scrollable list via the ILI9488 dis
 and navigates with the I2C keyboard (UP/DOWN/ENTER/ESC). Behaviour is identical to tiny_agi's
 `show_dir_chooser()` — only the root path changed from `0:/agi` to `0:/freesci`.
 
-### Sound on Pico (TODO)
+### Sound on Pico
+
+> ## ✅ RESOLVED on the MAPPED-PSRAM target (2026-09-05) — music plays at correct speed
+>
+> **The root cause was never memory and never the synth.** `pico_sfx_poll()` had exactly ONE call site,
+> `pico_get_event()`, so audio production was gated on **how often the game asked for input** — which during
+> an animation sequence is barely ever (measured **0.3–7 polls/sec**, and **50 seconds with zero** at startup).
+> The mixer emits at most `buf_size` frames per call, so a starved poll rate starves the ring, and the PWM IRQ
+> then holds `last_sample` — which **stretches AND chops** the audio at once. One cause, both recorded
+> symptoms ("way too slow" + the "broken tractor" buzz).
+>
+> Fixed by also polling from the per-frame **front flush** (where `poll_keyboard` already lives for exactly
+> this reason) and from inside **`usec_sleep`**, sliced. Device-measured: `produced` 6,144–14,336 → **~22,000**,
+> `underrun` 7,000–19,700 → **0**.
+>
+> **This RETIRES the 2026-07-10 conclusion below** that "the bad audio is the PWM/mixer/OPL output path
+> itself, which is untested/untuned" and that a future attempt must "start from tuning the PWM/mixer path".
+> The path was fine — it was starved. Measured, all within budget: PWM IRQ **~1% CPU** (RAM-resident, fully
+> inlined), OPL synth **33–47% CPU**, hardware consuming at exactly 22 kHz.
+>
+> **METHOD NOTE, because it cost several device cycles:** four successive hypotheses (buffer size, CPU-bound
+> synth, XIP cache thrashing, IRQ overhead) were each reasoned from the code and each disproved by the first
+> measurement. What localised it in one run was an `[snd]` probe printing **production vs consumption rates**
+> (`FSCI_PROBE_SND`, default OFF). The tell was that every `produced` value was an exact multiple of
+> `buf_size` — full batches, too few calls. **For a timing bug, measure the two rates before reasoning about
+> the code.**
+>
+> **Still open even with sound working:**
+> - **Dropped notes** — `ADLIB: All voices full`. Upstream FreeSCI has **no voice stealing** (literally
+>   `XXX implement overflow code`, `opl2.c`), so a passage wanting >12 simultaneous voices loses one. Not
+>   Pico-specific. Its `printf` is now rate-limited: it sits in the note-start path and goes over USB, so
+>   unthrottled it could stall the very loop feeding the ring.
+> - **SN76496 is NOT a cheaper drop-in** — it produces SILENCE on SQ3 (the resource almost certainly carries
+>   no Tandy/PCjr track). Selectable via `PICO_SOFTSEQ` if ever revisited.
+> - **The PicoCalc PIO target is NOT fixed by this** — see below.
+>
+> #### Would sound work on the PicoCalc PIO target? (analysed 2026-09-05, NOT device-tested)
+>
+> **The quality blocker is gone for free.** The poll fix is in shared code (`pico_driver.c` front flush +
+> `usec_sleep`), so PIO inherits it. The 2026-07-10 "broken tractor" on PIO was almost certainly THIS bug,
+> not an untuned DSP path — so if PIO sound can run at all, it should now run at the right speed.
+>
+> **The memory blocker is untouched.** The recorded PIO failure was `calloc 16384 failed` at
+> `sm_allocate_stack` — the 16 KB VM value stack failing to find a **contiguous** block. That is the SRAM
+> ceiling/fragmentation problem which ONLY the mapped target escaped.
+>
+> Measured static cost of a `-DPICO_PWM_AUDIO=ON -DPICO_SND_RATE=11025` PIO build:
+> `.bss` 17,280 → 25,000, heap span **475,088 → 467,080 (−8 KB)**. Runtime resident on top is ~19 KB
+> (OPL chip ~7 KB, compbuf 2×1002×4, feed + writebuf), so **~27 KB effective** against the documented
+> **~26 KB clean-build margin**. It consumes essentially the whole margin, and the failure mode is
+> contiguity, not total bytes.
+>
+> **Verdict: worth exactly one experiment, do not expect robustness.** 11025 halves the synth cost
+> (33–47% → ~20% CPU) and every derived buffer, and `PICO_SND_RATE` makes it a build flag rather than a
+> source edit. But do not expect it to survive long play or restore chains — the record's "sound + long
+> restore chains + comfortable margin is out of reach" verdict still stands for PIO. Sound is a
+> mapped-PSRAM feature.
+>
+> NB the buffer sizes were raised (`buf_size` 512→2048, ring 2048→8192 at 22 kHz) to survive rare polls
+> BEFORE the poll fix existed. With polls now at 60 Hz a batch only needs ~367 frames, so if PIO memory is
+> ever the deciding factor these can come back down — that is the cheapest ~24 KB available.
+
+*Historical (the pre-2026-09-05 state — memory analysis still valid for the PIO target):*
 Sound is currently disabled, in two layers:
 - **FreeSCI engine sound:** `--no-sound` (`-q`) in `pico_main.c`'s argv → `SFX_STATE_FLAG_NOSOUND`.
 - **PicoCalc PWM synth:** gated behind CMake `option(PICO_PWM_AUDIO)` (**default OFF**). When OFF,

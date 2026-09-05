@@ -7,7 +7,7 @@
 
 uint slice_num;
 
-static const float sample_rate_hz = 22050.0f;
+static const float sample_rate_hz = (float)PICO_SND_RATE;
 
 /* Lock-free SPSC ring. head = next write (producer, main loop),
 ** tail = next read (consumer, PWM IRQ). One slot is left empty to

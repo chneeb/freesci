@@ -37,7 +37,7 @@
 
 #include "../../platform/pico/audio/pwm_synth.h"
 
-#define PICO_PWM_RATE 22050
+#define PICO_PWM_RATE PICO_SND_RATE
 /* The mixer produces AT MOST buf_size frames per call (mix_compute_buf_len caps
 ** demand at it), and it is polled from the main loop -- so sustained output rate
 ** is buf_size * actual_frame_rate. At 512 frames that is only 23ms of audio per
@@ -52,7 +52,7 @@
 ** frames and produce nothing. Costs ~20KB (compbuf 2*2048*4, feed buf, writebuf,
 ** and the ring below) -- affordable now that the engine lives in PSRAM.
 ** NB going DOWN was tried before and rejected for the same starvation reason. */
-#define PICO_PWM_BUF_FRAMES 2048
+#define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 11)
 
 /* Diagnostic: compare PRODUCTION (pushed) against CONSUMPTION (IRQs). Both
    should sit at ~22050/s. Whichever one is low is the actual fault, which four

@@ -340,8 +340,11 @@ if(PLATFORM STREQUAL "pico")
     # square) and "pcspeaker" are far cheaper and are already linked; SCI0 sound
     # resources carry tracks for all of them.
     set(PICO_SOFTSEQ "" CACHE STRING "Softseq name on Pico: empty (opl2), SN76496, pcspeaker")
+    # Audio sample rate. 11025 halves both the OPL synth cost (33-47% CPU at
+    # 22050) and every derived buffer, which is what a memory-tight target needs.
+    set(PICO_SND_RATE "22050" CACHE STRING "Pico audio sample rate (22050 or 11025)")
     if(PICO_PWM_AUDIO)
-        add_compile_definitions(PICO_PWM_AUDIO=1)
+        add_compile_definitions(PICO_PWM_AUDIO=1 PICO_SND_RATE=${PICO_SND_RATE})
         if(NOT PICO_SOFTSEQ STREQUAL "")
             add_compile_definitions(PICO_SOFTSEQ_NAME="${PICO_SOFTSEQ}")
         endif()

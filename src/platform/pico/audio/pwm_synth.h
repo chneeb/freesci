@@ -11,10 +11,17 @@
 ** PWM IRQ, which pops one sample per tick).
 */
 
-#define PWM_SYNTH_RING_SIZE 8192 /* power of two; ~372ms at 22050Hz. Sized to ride
-				    through main-loop stalls (a room decode is ~250ms
-				    and drained the old 186ms ring, which showed up as
-				    underrun>0 on exactly those seconds). 8KB .bss. */
+#ifndef PICO_SND_RATE
+#  define PICO_SND_RATE 22050
+#endif
+
+/* Ring holds ~370ms so a main-loop stall (a room decode is ~250ms) cannot drain
+   it. Must be a power of two (RING_MASK) and must exceed one production batch. */
+#if PICO_SND_RATE >= 22050
+#  define PWM_SYNTH_RING_SIZE 8192
+#else
+#  define PWM_SYNTH_RING_SIZE 4096
+#endif
 
 extern void pwm_synth_init(int pwm_pin_base);
 

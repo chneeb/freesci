@@ -28,7 +28,7 @@
 #if defined(_DREAMCAST) || defined(PICO_PWM_AUDIO)
 /* PicoCalc PWM is an 8-bit mono 22kHz sink (see Pico sound roadmap): one OPL
    chip, mono output. Halves the OPL chip-state SRAM floor (~7KB vs ~14KB). */
-#define SAMPLE_RATE 22050
+#define SAMPLE_RATE PICO_SND_RATE
 #define CHANNELS SFX_PCM_MONO
 #define STEREO 0
 #else
