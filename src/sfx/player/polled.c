@@ -107,7 +107,19 @@ ppf_poll(sfx_pcm_feed_t *self, byte *dest, int size)
 
 		time_counter -= do_play * TIME_INC;
 
+#if defined(HAVE_PICO) && defined(PICO_PWM_AUDIO)
+		{
+			extern unsigned long long pico_perf_us(void);
+			extern unsigned long long pico_seq_poll_us;
+			extern unsigned long pico_seq_poll_frames;
+			unsigned long long _t0 = pico_perf_us();
+			seq->poll(seq, dest + written * self->frame_size, do_play);
+			pico_seq_poll_us += pico_perf_us() - _t0;
+			pico_seq_poll_frames += do_play;
+		}
+#else
 		seq->poll(seq, dest + written * self->frame_size, do_play);
+#endif
 		written += do_play;
 	}
 
@@ -180,7 +192,20 @@ pp_init(resource_mgr_t *resmgr, int expected_latency)
 	fd = sci_open("bank.001", O_RDONLY);
 
 	if (fd == SCI_INVALID_FD)
+#if defined(HAVE_PICO) && defined(PICO_SOFTSEQ_NAME)
+		/* OPL2 emulation is by far the most expensive sequencer: 9-voice FM
+		   with 152KB of flash tables indexed randomly per sample, which on the
+		   mapped-PSRAM board competes with PSRAM data for the same 16KB XIP
+		   cache. SCI0 resources also carry Tandy/PCjr and PC-speaker tracks,
+		   whose sequencers are square-wave cheap -- selectable here so the
+		   trade can be measured. Falls back to the default if the name is
+		   unknown. */
+		seq = sfx_find_softseq(PICO_SOFTSEQ_NAME);
+		if (!seq)
+			seq = sfx_find_softseq(NULL);
+#else
 		seq = sfx_find_softseq(NULL);
+#endif
 	else {
 		close(fd);
 		seq = sfx_find_softseq("amiga");

@@ -11,9 +11,10 @@
 ** PWM IRQ, which pops one sample per tick).
 */
 
-#define PWM_SYNTH_RING_SIZE 2048 /* power of two; ~92ms at 22050Hz (halved from
-				     4096 to reclaim 2KB static SRAM ceiling on
-				     the heap-tight Pico; 92ms still covers poll jitter) */
+#define PWM_SYNTH_RING_SIZE 8192 /* power of two; ~372ms at 22050Hz. Sized to ride
+				    through main-loop stalls (a room decode is ~250ms
+				    and drained the old 186ms ring, which showed up as
+				    underrun>0 on exactly those seconds). 8KB .bss. */
 
 extern void pwm_synth_init(int pwm_pin_base);
 

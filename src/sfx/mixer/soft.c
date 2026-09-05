@@ -45,6 +45,7 @@
 #define MAX_DELTA_OBSERVATIONS 1000000 /* Number of times the mixer is called before we assume we truly understand timing */
 
 static int diagnosed_too_slow = 0;
+static int starve_count = 0;
 
 static volatile int mixer_lock = 0;
 
@@ -446,8 +447,39 @@ mix_compute_buf_len(sfx_pcm_mixer_t *self, int *skip_frames)
 		P->lsec, P->played_this_second, played_frames);
 	*/
 
-	if (played_frames > self->dev->buf_size)
+	if (played_frames > self->dev->buf_size) {
+		/* DIAGNOSTIC ONLY -- deliberately does not change what follows.
+		   The starvation warning further down compares free_frames against
+		   buf_size, but free_frames is derived from played_frames AFTER this
+		   cap, so that test can never be true and the warning is dead code.
+		   Report the uncapped demand here instead: exceeding buf_size means
+		   the device is being asked for more than one batch can supply, i.e.
+		   the output will starve. (Left as a pure warning rather than
+		   restoring the skip_frames path, which would change mixer behaviour
+		   on every platform.) */
+#if !defined(HAVE_PICO) || defined(PICO_PWM_AUDIO)
+		/* Sound-disabled Pico builds skip this so they stay byte-identical:
+		   the only writer of diagnosed_too_slow used to sit in the dead branch
+		   below, so the compiler elided the variable entirely, and making it
+		   live costs 4 bytes of .bss for a warning those builds can never
+		   emit (sfx_init early-returns under NOSOUND). */
+		/* Report periodically, not once: the first occurrence is usually a
+		   startup transient (a room decode), and what actually matters is the
+		   SUSTAINED demand during playback -- demand/rate is the real frame
+		   time. Rate-limited because sciprintf goes over USB and is itself
+		   slow enough to distort what we are measuring. */
+		if (!diagnosed_too_slow || ++starve_count >= 256) {
+			starve_count = 0;
+			sciprintf("[sfx-mixer] Output starving: demand %d > buf_size %d"
+				  " (~%d ms frame at %dHz)\n",
+				  played_frames, self->dev->buf_size,
+				  (played_frames * 1000) / self->dev->conf.rate,
+				  self->dev->conf.rate);
+		}
+		diagnosed_too_slow = 1;
+#endif
 		played_frames = self->dev->buf_size;
+	}
 
 	/*
 	fprintf(stderr, "Between %d:? offset=%d and %d:%d offset=%d: Played %d at %d\n", P->lsec, P->played_this_second,

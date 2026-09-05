@@ -18,7 +18,7 @@ void sci_get_current_time(GTimeVal *val)
     val->tv_usec = usec;
 }
 
-#ifdef FSCI_PROBE_PERF
+#if defined(FSCI_PROBE_PERF) || defined(PICO_PWM_AUDIO)
 /* Free-running microsecond counter for perf A/B measurements (e.g. pic-decode
    timing to compare flash-cache-on vs XIP-cache-as-RAM builds). */
 unsigned long long pico_perf_us(void)

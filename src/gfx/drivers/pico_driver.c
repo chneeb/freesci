@@ -1147,6 +1147,18 @@ static int pico_update(struct _gfx_driver *drv,
            call kGetEvent/kWait (e.g. the SQ3 intro), which otherwise run
            unpaced. Throttled inside poll_keyboard to one read per frame. */
         poll_keyboard(drv);
+#ifdef PICO_PWM_AUDIO
+        /* Feed the sound pipeline here too. Driving it ONLY from
+           pico_get_event tied audio production to how often the game asks for
+           input, which is sporadic -- measured at 0.3-7 polls/sec during the
+           SQ3 intro, and 50 seconds with none at all at startup. The mixer
+           produces at most buf_size per call, so a starved poll rate starves
+           the ring and the PWM IRQ holds last_sample, stretching and chopping
+           the audio. This is the same reasoning that already put poll_keyboard
+           on the front flush. pico_sfx_poll self-limits to 60Hz, so the extra
+           calls are near-free no-ops. */
+        pico_sfx_poll();
+#endif
         break;
 
     default:
@@ -1234,7 +1246,24 @@ static int pico_usec_sleep(struct _gfx_driver *drv, long usecs)
     /* Pure sleep: keyboard polling/pacing now lives in the per-frame front
        flush (pico_update) and pico_get_event, so gfxop_usleep() times
        accurately instead of being floored at ~16ms by an embedded i2c read. */
+#ifdef PICO_PWM_AUDIO
+    {
+        /* ...but sound cannot pause while the game waits. An animation delay
+           spent entirely inside sleep_us() produces no samples at all, so the
+           ring drains and the audio stalls. Break the sleep into slices and
+           feed the pipeline between them; pico_sfx_poll's own 60Hz gate means
+           most slices do nothing. */
+        long remaining = usecs > 10000 ? 10000 : usecs;
+        while (remaining > 0) {
+            long slice = remaining > 2000 ? 2000 : remaining;
+            sleep_us((uint64_t)slice);
+            remaining -= slice;
+            pico_sfx_poll();
+        }
+    }
+#else
     sleep_us((uint64_t)(usecs > 10000 ? 10000 : usecs));
+#endif
     return GFX_OK;
 }
 

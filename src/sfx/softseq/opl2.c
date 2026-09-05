@@ -365,7 +365,14 @@ int adlibemu_start_note(int chn, int note, int velocity)
   }
 
   if (free_voices <= 0) {
-    printf("ADLIB: All voices full\n");  /* XXX implement overflow code */
+    /* Upstream limitation: FreeSCI has no voice stealing, so a passage wanting
+       more than ADLIB_VOICES simultaneous notes simply loses one. Rate-limited
+       because this sits in the note-start path and printf goes over USB on Pico
+       -- unthrottled it can stall the main loop that feeds the audio ring, i.e.
+       the diagnostic would cause dropouts of its own. */
+    static unsigned voices_full_count = 0;
+    if (!(voices_full_count++ & 0xff))
+      printf("ADLIB: All voices full (%u notes dropped)\n", voices_full_count);
     return -1;
   }
    

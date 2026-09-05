@@ -38,11 +38,34 @@
 #include "../../platform/pico/audio/pwm_synth.h"
 
 #define PICO_PWM_RATE 22050
-#define PICO_PWM_BUF_FRAMES 512 /* mixer compbuf = 2 * this * 4 bytes; halved
-				    from 1024 to reclaim ~6KB of heap headroom on
-				    the SRAM-tight Pico (sound build). At 60Hz poll
-				    this still produces 23ms of audio/poll vs the
-				    16.6ms poll interval, so the ring never starves. */
+/* The mixer produces AT MOST buf_size frames per call (mix_compute_buf_len caps
+** demand at it), and it is polled from the main loop -- so sustained output rate
+** is buf_size * actual_frame_rate. At 512 frames that is only 23ms of audio per
+** poll, so any frame slower than ~43Hz starves the ring: the PWM IRQ then holds
+** last_sample, which stretches AND chops the audio (heard on device as "way too
+** slow" plus a broken-tractor buzz). Because the polled player is a PCM feed,
+** the song tempo follows the sample clock and drags with it.
+**
+** 2048 frames = 93ms per poll, so production keeps up even at a ~11Hz frame
+** rate. Raising this cannot be replaced by polling more often: the mixer sizes
+** each batch from elapsed WALL-CLOCK time, so back-to-back calls compute ~0
+** frames and produce nothing. Costs ~20KB (compbuf 2*2048*4, feed buf, writebuf,
+** and the ring below) -- affordable now that the engine lives in PSRAM.
+** NB going DOWN was tried before and rejected for the same starvation reason. */
+#define PICO_PWM_BUF_FRAMES 2048
+
+/* Diagnostic: compare PRODUCTION (pushed) against CONSUMPTION (IRQs). Both
+   should sit at ~22050/s. Whichever one is low is the actual fault, which four
+   rounds of reading the code failed to settle. */
+extern volatile uint32_t pwm_irq_count;
+extern volatile uint32_t pwm_underrun_count;
+static uint32_t snd_pushed = 0, snd_dropped = 0;
+/* Microseconds spent inside the softseq generating samples, and how many it
+   produced. If this approaches 1,000,000 per report the synth is the wall. */
+unsigned long long pico_seq_poll_us = 0;
+unsigned long pico_seq_poll_frames = 0;
+static unsigned long long snd_last_report_us = 0;
+static long snd_report_secs = 0;
 
 static int pico_pwm_active = 0;
 static int pico_sfx_blocked = 0;
@@ -69,8 +92,11 @@ pcmout_pico_output(sfx_pcm_device_t *self, byte *buf, int count,
 			s = 0;
 		else if (s > 255)
 			s = 255;
-		if (!pwm_synth_push_sample((uint8_t) s))
+		if (!pwm_synth_push_sample((uint8_t) s)) {
+			snd_dropped += (count - i);
 			break; /* ring full: drop the rest, IRQ will catch up */
+		}
+		snd_pushed++;
 	}
 	return SFX_OK;
 }
@@ -214,6 +240,39 @@ pico_sfx_poll(void)
 	}
 
 	pico_sfx_timer_callback(pico_sfx_timer_data);
+
+	/* Once per second: the two rates that decide everything. */
+#ifdef FSCI_PROBE_SND
+	if (secs != snd_report_secs) {
+		snd_report_secs = secs;
+		{
+			extern unsigned long long pico_perf_us(void);
+			unsigned long long now_us = pico_perf_us();
+			unsigned long long span = now_us - snd_last_report_us;
+			if (!span) span = 1;
+			snd_last_report_us = now_us;
+			/* NB rates are per REPORT INTERVAL, which is only ~1s in
+			   steady state -- span_ms makes a long interval obvious
+			   instead of it looking like an impossible sample rate. */
+			sciprintf("[snd] span=%lums produced=%u consumed=%u underrun=%u"
+				  " ring=%d | seq=%lums for %lu frames\n",
+				  (unsigned long)(span / 1000),
+				  (unsigned)snd_pushed, (unsigned)pwm_irq_count,
+				  (unsigned)pwm_underrun_count,
+				  pwm_synth_ring_pending(),
+				  (unsigned long)(pico_seq_poll_us / 1000),
+				  pico_seq_poll_frames);
+		}
+		snd_pushed = 0;
+		snd_dropped = 0;
+		pwm_irq_count = 0;
+		pwm_underrun_count = 0;
+		pico_seq_poll_us = 0;
+		pico_seq_poll_frames = 0;
+	}
+#else
+	(void)snd_report_secs;
+#endif
 }
 
 #endif /* PICO_PWM_AUDIO */

@@ -43,8 +43,18 @@ void pwm_synth_silence_all_channels(void) {
     last_sample = 127;
 }
 
+/* Diagnostic counters (see pwm_synth_get_stats). irq_count is the REAL output
+   sample rate -- if it is not ~22050/s the hardware side is at fault; underruns
+   count IRQs that found the ring empty and had to hold last_sample, which is
+   what stretches and chops the audio. */
+volatile uint32_t pwm_irq_count = 0;
+volatile uint32_t pwm_underrun_count = 0;
+
 void __not_in_flash_func(pih)() {
     uint32_t tail = ring_tail;
+    pwm_irq_count++;
+    if (tail == ring_head)
+        pwm_underrun_count++;
     if (tail != ring_head) {
         last_sample = pcm_ring[tail];
         ring_tail = (tail + 1) & RING_MASK;

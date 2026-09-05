@@ -327,9 +327,24 @@ if(PLATFORM STREQUAL "pico")
     # (full SRAM + flash recovery) and skips pwm_synth_init(). Flip ON to bring sound
     # back — it re-compiles the synth and re-arms init in one flag. See CLAUDE.md
     # "Sound on Pico (TODO)".
+    # [snd] per-second production/consumption/underrun report. Diagnostic only;
+    # it was what finally localised the starved sound poll.
+    option(FSCI_PROBE_SND "Log PCM production vs consumption rates" OFF)
+    if(FSCI_PROBE_SND)
+        add_compile_definitions(FSCI_PROBE_SND=1)
+    endif()
+
     option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" OFF)
+    # Which softsequencer drives the PCM feed. Empty = FreeSCI's default (opl2,
+    # i.e. Adlib FM emulation -- the most expensive one). "SN76496" (Tandy 3-voice
+    # square) and "pcspeaker" are far cheaper and are already linked; SCI0 sound
+    # resources carry tracks for all of them.
+    set(PICO_SOFTSEQ "" CACHE STRING "Softseq name on Pico: empty (opl2), SN76496, pcspeaker")
     if(PICO_PWM_AUDIO)
         add_compile_definitions(PICO_PWM_AUDIO=1)
+        if(NOT PICO_SOFTSEQ STREQUAL "")
+            add_compile_definitions(PICO_SOFTSEQ_NAME="${PICO_SOFTSEQ}")
+        endif()
         # OPL2 lookup tables come from flash .rodata (fmopl_tables.c) instead of
         # SRAM malloc — zero-SRAM HQ tables. Gates fmopl.c's table provider and
         # adds the generated table file to scisoftseq (see src/sfx/softseq).
