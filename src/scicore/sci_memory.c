@@ -65,6 +65,94 @@ static int g_pico_in_reclaim = 0;
 size_t g_sci_live_bytes = 0;
 #endif
 
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
+/* --- Engine allocations default to PSRAM on the mapped target --------------
+   The Pimoroni Pico Plus 2 maps 8 MB of PSRAM into the address space, so unlike
+   the PicoCalc's store/load PIO PSRAM it can hold hot read-write data directly.
+   script_t.buf proved that (fetched every VM instruction, no perceptible
+   slowdown), so the sci_* family now allocates from the PSRAM heap by DEFAULT
+   and the few per-pixel/panel-facing buffers opt back into SRAM explicitly via
+   sci_malloc_sram(). The point is not the PSRAM itself but the SRAM it frees:
+   enough to give the Pico driver a desktop-style buffer set.
+
+   Two invariants make this safe to flip wholesale:
+     1. FREE AND REALLOC ROUTE BY POINTER (psram_heap_owns), never by call site,
+        so blocks from either heap are always released with the right allocator
+        regardless of which path allocated them.
+     2. Before psram_heap_init() runs, s_base/s_end are NULL, so psram_hmalloc
+        returns NULL and psram_heap_owns returns 0 -- early-boot allocations
+        transparently fall back to SRAM and free correctly.
+
+   NB malloc_usable_size() must NEVER be called on a PSRAM pointer: it walks
+   picolibc chunk headers and faults on a non-SRAM address. Every accounting
+   site below is therefore inside an "SRAM only" branch. */
+extern void *psram_hmalloc(size_t n);
+extern void *psram_hrealloc(void *p, size_t n);
+extern void  psram_hfree(void *p);
+extern int   psram_heap_owns(const void *p);
+#endif
+
+#ifdef HAVE_PICO
+/* The original SRAM allocation path: raw malloc + one reclaim-and-retry on
+   failure + the legible OOM halt + live-byte/census accounting. Factored out so
+   both the default path and sci_malloc_sram() share it verbatim. */
+static void *
+pico_sram_alloc(size_t size, int zero, const char *file, int line,
+		const char *funct)
+{
+	void *res = zero ? calloc(1, size) : malloc(size);
+
+	if (res == NULL && !g_pico_in_reclaim) {
+		g_pico_in_reclaim = 1;
+		pico_reclaim_heap();
+		g_pico_in_reclaim = 0;
+		res = zero ? calloc(1, size) : malloc(size);
+	}
+	if (res == NULL)
+		pico_oom_report(zero ? "calloc" : "malloc",
+				(unsigned long)size, file, line, funct);
+	else {
+		g_sci_live_bytes += malloc_usable_size(res);
+		census_site_register(res, file, line);
+	}
+	return res;
+}
+
+/* SRAM realloc counterpart. Only ever called with an SRAM (or NULL) ptr --
+   malloc_usable_size below would fault on a PSRAM address. */
+static void *
+pico_sram_realloc(void *ptr, size_t size, const char *file, int line,
+		  const char *funct)
+{
+	size_t old_usable = ptr ? malloc_usable_size(ptr) : 0;
+	void *res = realloc(ptr, size);
+
+	/* On NULL, realloc leaves the original ptr valid (not freed), so a
+	   reclaim+retry is safe. */
+	if (res == NULL && !g_pico_in_reclaim) {
+		g_pico_in_reclaim = 1;
+		pico_reclaim_heap();
+		g_pico_in_reclaim = 0;
+		res = realloc(ptr, size);
+	}
+	if (res == NULL)
+		pico_oom_report("realloc", (unsigned long)size, file, line, funct);
+	else {
+		g_sci_live_bytes += malloc_usable_size(res) - old_usable;
+		census_site_register(res, file, line);
+	}
+	return res;
+}
+#endif
+
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
+void *
+sci_malloc_sram(size_t size)
+{
+	return pico_sram_alloc(size, 0, __FILE__, __LINE__, "sci_malloc_sram");
+}
+#endif
+
 #if defined(HAVE_PICO) && defined(FSCI_PROBE_ARENA)
 #include <unistd.h>   /* sbrk(0): cheap O(1) program-break read, no heap walk */
 /* [arenagrow] probe: the heap arena only grows when an allocation forces a
@@ -125,15 +213,15 @@ _SCI_MALLOC(size_t size, const char *file, int line, const char *funct)
 	INFO_MEMORY("_SCI_MALLOC()", size, file, line, funct);
 #endif
 #ifdef HAVE_PICO
-	res = malloc(size);
-	if (res == NULL && !g_pico_in_reclaim) {
-		g_pico_in_reclaim = 1;
-		pico_reclaim_heap();
-		g_pico_in_reclaim = 0;
-		res = malloc(size);
-	}
-	if (res == NULL) pico_oom_report("malloc", (unsigned long)size, file, line, funct);
-	else { g_sci_live_bytes += malloc_usable_size(res); census_site_register(res, file, line); }
+#	ifdef PICO_PSRAM_MAPPED
+	/* PSRAM first; NULL means the heap is not up yet (early boot) or is full,
+	   in which case fall through to the unchanged SRAM path. */
+	res = psram_hmalloc(size);
+	if (res == NULL)
+		res = pico_sram_alloc(size, 0, file, line, funct);
+#	else
+	res = pico_sram_alloc(size, 0, file, line, funct);
+#	endif
 #else
 	ALLOC_MEM((res = malloc(size)), size, file, line, funct)
 #endif
@@ -155,15 +243,16 @@ _SCI_CALLOC(size_t num, size_t size, const char *file, int line, const char *fun
 	INFO_MEMORY("_SCI_CALLOC()", size, file, line, funct);
 #endif
 #ifdef HAVE_PICO
-	res = calloc(num, size);
-	if (res == NULL && !g_pico_in_reclaim) {
-		g_pico_in_reclaim = 1;
-		pico_reclaim_heap();
-		g_pico_in_reclaim = 0;
-		res = calloc(num, size);
-	}
-	if (res == NULL) pico_oom_report("calloc", (unsigned long)(num * size), file, line, funct);
-	else { g_sci_live_bytes += malloc_usable_size(res); census_site_register(res, file, line); }
+#	ifdef PICO_PSRAM_MAPPED
+	/* psram_hmalloc does not zero, so calloc semantics are restored here. */
+	res = psram_hmalloc(num * size);
+	if (res != NULL)
+		memset(res, 0, num * size);
+	else
+		res = pico_sram_alloc(num * size, 1, file, line, funct);
+#	else
+	res = pico_sram_alloc(num * size, 1, file, line, funct);
+#	endif
 #else
 	ALLOC_MEM((res = calloc(num, size)), num * size, file, line, funct)
 #endif
@@ -180,20 +269,23 @@ _SCI_REALLOC(void *ptr, size_t size, const char *file, int line, const char *fun
 	INFO_MEMORY("_SCI_REALLOC()", size, file, line, funct);
 #endif
 #ifdef HAVE_PICO
-	{
-		size_t old_usable = ptr ? malloc_usable_size(ptr) : 0;
-		res = realloc(ptr, size);
-		/* On NULL, realloc leaves the original ptr valid (not freed), so a
-		   reclaim+retry is safe. */
-		if (res == NULL && !g_pico_in_reclaim) {
-			g_pico_in_reclaim = 1;
-			pico_reclaim_heap();
-			g_pico_in_reclaim = 0;
-			res = realloc(ptr, size);
-		}
-		if (res == NULL) pico_oom_report("realloc", (unsigned long)size, file, line, funct);
-		else { g_sci_live_bytes += malloc_usable_size(res) - old_usable; census_site_register(res, file, line); }
+#	ifdef PICO_PSRAM_MAPPED
+	/* Route by ownership, never by call site. */
+	if (ptr != NULL && psram_heap_owns(ptr)) {
+		res = psram_hrealloc(ptr, size);
+		if (res == NULL)
+			pico_oom_report("realloc(psram)", (unsigned long)size,
+					file, line, funct);
+	} else if (ptr == NULL) {
+		res = psram_hmalloc(size);          /* fresh alloc: same policy as malloc */
+		if (res == NULL)
+			res = pico_sram_alloc(size, 0, file, line, funct);
+	} else {
+		res = pico_sram_realloc(ptr, size, file, line, funct);
 	}
+#	else
+	res = pico_sram_realloc(ptr, size, file, line, funct);
+#	endif
 #else
 	ALLOC_MEM((res = realloc(ptr, size)), size, file, line, funct)
 #endif
@@ -215,6 +307,15 @@ _SCI_FREE(void *ptr, const char *file, int line, const char *funct)
 		fprintf(stderr, " attempt to free NULL pointer\n");
 		BREAKPOINT();
 	}
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
+	/* MUST come first: malloc_usable_size() walks picolibc chunk headers and
+	   faults on a non-SRAM address, so a PSRAM block has to be recognised and
+	   released before any accounting touches the pointer. */
+	if (psram_heap_owns(ptr)) {
+		psram_hfree(ptr);
+		return;
+	}
+#endif
 #ifdef HAVE_PICO
 	g_sci_live_bytes -= malloc_usable_size(ptr);
 #endif

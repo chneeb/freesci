@@ -396,6 +396,26 @@ void pico_arena_probe(size_t size, const char *file, int line, const char *funct
 #	define PICO_ARENA_PROBE_RAW(sz) ((void)0)
 #endif
 
+/* --- Mapped-PSRAM target: explicit SRAM allocation -------------------------
+   On PICO_PSRAM_MAPPED the whole sci_malloc family DEFAULTS to the 6 MB PSRAM
+   heap (see sci_memory.c). That is right for engine/VM data -- scattered,
+   cacheable, latency-tolerant, and proven fine by the script_t.buf move -- but
+   wrong for buffers that are touched per pixel or streamed to the panel, where
+   the 16 KB XIP cache cannot hide the QSPI link.
+
+   Those call sci_malloc_sram() instead, which always allocates from the SRAM
+   (picolibc) heap. There is deliberately NO matching free: sci_free/sci_realloc
+   are ownership-aware (psram_heap_owns) and route by pointer, so a block from
+   either heap is always released correctly no matter which path allocated it.
+
+   Off the mapped target (desktop, and the PicoCalc PIO PSRAM build) this is a
+   plain alias for sci_malloc, so those builds are completely unchanged. */
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
+void *sci_malloc_sram(size_t size);
+#else
+#	define sci_malloc_sram(size) sci_malloc(size)
+#endif
+
 #ifdef _WIN32
 extern void
 debug_win32_memory(int dbg_setting);

@@ -40,6 +40,36 @@ extern void *__real_calloc(size_t count, size_t size);
 extern void *__real_realloc(void *mem, size_t size);
 extern void  __real_free(void *mem);
 
+#ifdef PICO_PSRAM_MAPPED
+/* --- Raw free()/realloc() must be ownership-aware on the mapped target -------
+   sci_malloc defaults to the PSRAM heap there, but a fair amount of engine and
+   gfx code releases sci_malloc'd blocks through RAW free()/realloc() (long
+   accepted, because both APIs used to land on the same picolibc heap -- e.g.
+   sm_free_script's free(object->variables), game_exit's free(s->game_version)).
+
+   Since the linker's --wrap routes EVERY raw call through these wrappers, this
+   is the single chokepoint that keeps that safe: route by ownership before
+   newlib ever sees the pointer. Without it a PSRAM pointer reaches _free_r,
+   which reads a "chunk header" out of PSRAM payload bytes and then faults
+   dereferencing the resulting wild fd/bk -- precisely the observed HardFault
+   (PC/LR in _free_r, precise bus fault, garbage BFAR).
+
+   Fixing it here rather than at each call site is deliberate: it covers every
+   present and future raw free of engine memory, including paths we have not
+   enumerated. psram_heap_owns(NULL) is false, so NULL frees fall through to
+   __real_free() unchanged. */
+extern void  psram_hfree(void *p);
+extern void *psram_hrealloc(void *p, size_t n);
+extern int   psram_heap_owns(const void *p);
+#	define PSRAM_FREE_IF_OWNED(p) \
+		do { if (psram_heap_owns(p)) { psram_hfree(p); return; } } while (0)
+#	define PSRAM_REALLOC_IF_OWNED(p, n) \
+		do { if ((p) && psram_heap_owns(p)) return psram_hrealloc((p), (n)); } while (0)
+#else
+#	define PSRAM_FREE_IF_OWNED(p)       ((void)0)
+#	define PSRAM_REALLOC_IF_OWNED(p, n) ((void)0)
+#endif
+
 #ifdef FSCI_PROBE_MEM_CENSUS
 
 /* Bucket b (b>=1) covers [1<<(b+2), 1<<(b+3)); bucket 0 is < 8 bytes.
@@ -279,7 +309,9 @@ __wrap_calloc(size_t count, size_t size)
 void *
 __wrap_realloc(void *mem, size_t size)
 {
-	size_t oldb = mem ? malloc_usable_size(mem) : 0;
+	size_t oldb;
+	PSRAM_REALLOC_IF_OWNED(mem, size);
+	oldb = mem ? malloc_usable_size(mem) : 0;
 	void *rc;
 	if (mem)
 		census_site_deregister(mem);  /* old block gone; sci layer re-registers new */
@@ -299,6 +331,7 @@ __wrap_realloc(void *mem, size_t size)
 void
 __wrap_free(void *mem)
 {
+	PSRAM_FREE_IF_OWNED(mem);
 	if (mem && census_depth == 0)
 		census_sub_size(malloc_usable_size(mem));
 	if (mem)
@@ -341,7 +374,9 @@ __wrap_calloc(size_t count, size_t size)
 void *
 __wrap_realloc(void *mem, size_t size)
 {
-	void *rc = __real_realloc(mem, size);
+	void *rc;
+	PSRAM_REALLOC_IF_OWNED(mem, size);
+	rc = __real_realloc(mem, size);
 	if (!rc)
 		printf("realloc %u failed to allocate memory\n", (unsigned) size);
 	return rc;
@@ -350,6 +385,7 @@ __wrap_realloc(void *mem, size_t size)
 void
 __wrap_free(void *mem)
 {
+	PSRAM_FREE_IF_OWNED(mem);
 	__real_free(mem);
 }
 

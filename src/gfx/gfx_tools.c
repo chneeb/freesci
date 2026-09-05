@@ -304,7 +304,7 @@ gfx_pixmap_alloc_index_data(gfx_pixmap_t *pixmap)
 	if (!size)
 		size = 1;
 
-	pixmap->index_data = (byte*)sci_malloc(size);
+	pixmap->index_data = (byte*)sci_malloc_sram(size);
 
 	memset(pixmap->index_data, 0, size);
 
@@ -348,7 +348,7 @@ gfx_pixmap_alloc_data(gfx_pixmap_t *pixmap, gfx_mode_t *mode)
 	if (!size)
 		size = 1;
 
-	pixmap->data = (byte*)sci_malloc(pixmap->data_size = size);
+	pixmap->data = (byte*)sci_malloc_sram(pixmap->data_size = size);
 	return pixmap;
 }
 

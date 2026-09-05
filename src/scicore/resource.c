@@ -253,7 +253,7 @@ _scir_load_from_patch_file(int fh, resource_t *res, char *filename)
 {
 	int really_read;
 
-	res->data = (unsigned char*)sci_malloc(res->size);
+	res->data = (unsigned char*)sci_malloc_sram(res->size);
 	really_read = read(fh, res->data, res->size);
 
 	if (really_read < res->size) {

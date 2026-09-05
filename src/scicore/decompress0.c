@@ -351,7 +351,7 @@ int decompress0(resource_t *result, int resh, int sci_version)
 		return SCI_ERROR_EMPTY_OBJECT;
 	}
 
-	buffer = (guint8*)sci_malloc(compressedLength);
+	buffer = (guint8*)sci_malloc_sram(compressedLength);
 	result->data = DECOMPRESS_ALLOC_DATA(result->type, result->size);
 
 #ifdef HAVE_PICO

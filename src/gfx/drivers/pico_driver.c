@@ -78,7 +78,7 @@ void pico_alloc_visual(gfx_driver_t *drv)
 {
     struct _pico_state *ps = (struct _pico_state *)drv->state;
     if (ps && !ps->visual[0]) {
-        ps->visual[0] = (uint8_t *)sci_malloc(PICO_XSIZE * PICO_YSIZE);
+        ps->visual[0] = (uint8_t *)sci_malloc_sram(PICO_XSIZE * PICO_YSIZE);
         if (ps->visual[0])
             memset(ps->visual[0], 0, PICO_XSIZE * PICO_YSIZE);
     }
@@ -131,7 +131,7 @@ void pico_return_visual(gfx_driver_t *drv)
     struct _pico_state *ps = (struct _pico_state *)drv->state;
     if (!ps || ps->visual[0])
         return;  /* nothing was borrowed, or already restored */
-    ps->visual[0] = (uint8_t *)sci_malloc(PICO_XSIZE * PICO_YSIZE);
+    ps->visual[0] = (uint8_t *)sci_malloc_sram(PICO_XSIZE * PICO_YSIZE);
     psram_load(PICO_PARSE_SCRATCH_ADDR, ps->visual[0], PICO_XSIZE * PICO_YSIZE);
 }
 
@@ -275,7 +275,7 @@ static int pico_init_specific(struct _gfx_driver *drv,
     ysize = PICO_YSIZE;
 
     if (!drv->state) {
-        drv->state = sci_malloc(sizeof(struct _pico_state));
+        drv->state = sci_malloc_sram(sizeof(struct _pico_state));
         if (!drv->state) return GFX_FATAL;
         memset(drv->state, 0, sizeof(struct _pico_state));
     }
@@ -283,7 +283,7 @@ static int pico_init_specific(struct _gfx_driver *drv,
     /* Allocate one 320×200 palette-indexed visual buffer (back/front combined).
        Priority buffer is not allocated here — after GFX init, pico_connect_engine_priority()
        wires the engine's state->priority_map directly, saving 64KB of heap. */
-    S->visual[0] = (uint8_t *)sci_malloc(xsize * ysize);
+    S->visual[0] = (uint8_t *)sci_malloc_sram(xsize * ysize);
     if (!S->visual[0]) {
         fprintf(stderr, "pico_driver: OOM allocating visual[0]\n");
         return GFX_FATAL;
@@ -909,7 +909,7 @@ static int pico_grab_pixmap(struct _gfx_driver *drv, rect_t src,
         } else {
             /* Small grab: SRAM */
             if (!pxm->data) {
-                pxm->data = (uint8_t *)sci_malloc(sz);
+                pxm->data = (uint8_t *)sci_malloc_sram(sz);
                 if (!pxm->data) return GFX_FATAL;
                 pico_grab_sram_live++;
                 pico_grab_sram_bytes += sz;
