@@ -51,8 +51,24 @@ pico_decompress_alloc(int type, unsigned int size)
 	   a contiguous block.  Use raw malloc so OOM returns NULL (the caller fails
 	   the song load and the game keeps running silently) instead of sci_malloc's
 	   fatal pico_oom_report halt.  Every other resource type still halts legibly. */
-	if (type == sci_sound)
+	if (type == sci_sound) {
+#ifdef PICO_PSRAM_MAPPED
+		/* On the mapped target put it in PSRAM instead. Raw malloc is SRAM,
+		   and the flip to a PSRAM default did NOT move raw allocations -- so
+		   a large song (PQ2's sound.001 decompresses to 59,153 bytes) was left
+		   competing with the visual and priority buffers in SRAM and failed,
+		   producing an empty song and dropping the VM into the debugger.
+		   PSRAM suits it: the iterator reads the song strictly sequentially,
+		   a few bytes per 60Hz tick, so the reads are cached and trivial.
+		   Falls back to raw malloc if the PSRAM heap is not up yet, and still
+		   returns NULL on genuine exhaustion so the graceful skip is kept. */
+		extern void *psram_hmalloc(size_t n);
+		unsigned char *psram_buf = (unsigned char *) psram_hmalloc(size);
+		if (psram_buf)
+			return psram_buf;
+#endif
 		return (unsigned char *) malloc(size);
+	}
 	return (unsigned char *) sci_malloc(size);
 }
 
