@@ -53,6 +53,20 @@ extern int   psram_heap_owns(const void *p);
 #  define HEAP_TBL_FREE(p)       sci_free(p)
 #endif
 
+/* Phase 2: script_t.buf (the per-script VM bytecode + object-var + locals working
+   memory) → PSRAM heap. Separately gated by PICO_PSRAM_SCRIPTS so it can be A/B'd
+   against SRAM-resident scripts. The FREE is ownership-aware so a buf that came
+   from sci_malloc/raw malloc (any not-yet-routed path) is still freed correctly.
+   NB the psram_h* externs above are declared inside the same PICO_PSRAM_MAPPED
+   block, so PICO_PSRAM_SCRIPTS is only ever set together with PICO_PSRAM_MAPPED. */
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED) && defined(PICO_PSRAM_SCRIPTS)
+#  define HEAP_SCRIPT_MALLOC(n)  psram_hmalloc(n)
+#  define HEAP_SCRIPT_FREE(p)    do { if (psram_heap_owns(p)) psram_hfree(p); else sci_free(p); } while (0)
+#else
+#  define HEAP_SCRIPT_MALLOC(n)  sci_malloc(n)
+#  define HEAP_SCRIPT_FREE(p)    sci_free(p)
+#endif
+
 #define HEAPENTRY_INVALID -1
 
 #define ENTRY_IS_VALID(t, i) ((i) >= 0 && (i) < (t)->max_entry && (t)->table[(i)].next_free == (i))

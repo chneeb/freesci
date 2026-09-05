@@ -2526,6 +2526,17 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		struct mallinfo _mi = mallinfo();
 		sciprintf("[mem] room ready nr=%d: free=%d arena=%d used=%d\n",
 			  nr, _mi.fordblks, _mi.arena, _mi.uordblks);
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
+		/* Mapped-PSRAM build: the clone/node/list/hunk tables live in PSRAM, so
+		   this climbs during play while SRAM 'used' above stays lower. */
+		{
+			extern size_t psram_heap_used(void);
+			extern size_t psram_heap_free_largest(void);
+			sciprintf("[psheap] room %d: used=%u maxfree=%u\n", nr,
+				  (unsigned)psram_heap_used(),
+				  (unsigned)psram_heap_free_largest());
+		}
+#endif
 	}
 #endif /* FSCI_PROBE_MEM */
 #endif

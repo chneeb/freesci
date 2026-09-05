@@ -239,7 +239,7 @@ int sm_initialise_script(mem_obj_t *mem, struct _state *s, int script_nr)
 	script_t *scr;
 
 	sm_set_script_size(mem, s, script_nr);
-	mem->data.script.buf = (byte*) sci_malloc (mem->data.script.buf_size);
+	mem->data.script.buf = (byte*) HEAP_SCRIPT_MALLOC (mem->data.script.buf_size);
 	
 	dbg_print( "mem->data.script.buf ", mem->data.script.buf );
 	if (!mem->data.script.buf) {
@@ -467,7 +467,7 @@ sm_free_script ( mem_obj_t* mem )
 {
 	if( !mem ) return;
 	if( mem->data.script.buf ) {
-		sci_free( mem->data.script.buf );
+		HEAP_SCRIPT_FREE( mem->data.script.buf );
 		mem->data.script.buf = NULL;
 		mem->data.script.buf_size = 0;
 	}

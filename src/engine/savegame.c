@@ -4500,7 +4500,7 @@ void load_script(state_t *s, seg_id_t seg)
 	resource_t *script, *heap;
 	script_t *scr = &(s->seg_manager.heap[seg]->data.script);
 
-	scr->buf = (byte *) malloc(scr->buf_size);
+	scr->buf = (byte *) HEAP_SCRIPT_MALLOC(scr->buf_size);
 	PICO_ARENA_PROBE_RAW(scr->buf_size);
 
 	script = scir_find_resource(s->resmgr, sci_script, scr->nr, 0);
@@ -4822,7 +4822,7 @@ gamestate_restore(state_t *s, char *dirname)
 			if (!_m)
 				continue;
 			if (_m->type == MEM_OBJ_SCRIPT && _m->data.script.buf) {
-				sci_free(_m->data.script.buf);
+				HEAP_SCRIPT_FREE(_m->data.script.buf);
 				_m->data.script.buf = NULL;
 				_m->data.script.buf_size = 0;
 			} else if (_m->type == MEM_OBJ_STACK && _m->data.stack.entries) {

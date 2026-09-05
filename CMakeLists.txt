@@ -226,6 +226,19 @@ if(PLATFORM STREQUAL "pico")
     # backend. Default OFF = unchanged PicoCalc PIO PSRAM.
     if(PICO_PSRAM_MAPPED)
         add_compile_definitions(PICO_PSRAM_MAPPED=1)
+
+        # Phase 2: route script_t.buf (the ~35-44KB/room VM bytecode+objvar+locals
+        # working memory — the biggest single SRAM consumer, and the previously
+        # "impossible" hot RW data) to the 6MB PSRAM heap. This is the make-or-break
+        # perf test: the buf is read every VM instruction, so it exercises XIP
+        # cache contention (flash code vs PSRAM data share the 16KB cache). Kept as
+        # its own option so it can be A/B'd against SRAM-resident scripts
+        # (-DPICO_PSRAM_SCRIPTS=OFF) to measure the slowdown, if any. Only meaningful
+        # with PICO_PSRAM_MAPPED.
+        option(PICO_PSRAM_SCRIPTS "Route script_t.buf to the PSRAM heap (mapped PSRAM only)" ON)
+        if(PICO_PSRAM_SCRIPTS)
+            add_compile_definitions(PICO_PSRAM_SCRIPTS=1)
+        endif()
     endif()
 
     # Static-view occlusion/persistence on the single Pico visual buffer. Two levels:
@@ -267,10 +280,13 @@ if(PLATFORM STREQUAL "pico")
     endif()
 
     # Roadmap #1 Stage 2: pack the ~1489 per-word parser blocks into one
-    # allocation (drops resident vocab ~53KB → ~33KB). OFF during bring-up so
-    # Stage 1 (unpacked, GNF rebuilt per command) can be measured first; flip ON
-    # to A/B the packed layout. See CLAUDE.md "Pico roadmap #1".
-    option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" OFF)
+    # allocation (drops resident vocab ~53KB → ~33KB AND, more importantly, turns
+    # ~1489-1843 scattered small allocs into one blob — a big fragmentation win;
+    # an unpacked vocab shredded the free list badly enough to fail the 64KB
+    # visual[0] alloc on a cross-game switch). Now DEFAULT ON — it is the shipping
+    # config; the Stage-1 unpacked measurement is long done. -DPICO_PACK_VOCAB=OFF
+    # to A/B. See CLAUDE.md "Pico roadmap #1".
+    option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)
     endif()
