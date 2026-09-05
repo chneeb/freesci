@@ -2,7 +2,23 @@
 
 FreeSCI is a Sierra SCI game interpreter (circa 2007), ported to SDL2 with a CMake build system. The original codebase used SDL1 and Autotools.
 
-## Branch / merge status (2026-06-23)
+## Branch / merge status
+
+> ### ⚠️ THERE ARE TWO PICO TARGETS — check which one you are reasoning about
+> - **PicoCalc / PIO PSRAM** (`pico-wip-render-debug`, the default build): SRAM is the binding constraint.
+>   Everything in this file about the ~475 KB ceiling, the arena ratchet, fragmentation, permanent decode
+>   scratches and graceful-degradation OOM paths applies **here**.
+> - **Pimoroni Pico Plus 2 / memory-MAPPED PSRAM** (`pico-pimoroni-mapped-psram`, `-DPICO_PSRAM_MAPPED=ON`):
+>   engine allocations default to an 8 MB PSRAM heap, SRAM sits ~163 KB with `chunks=1`, and the ceiling and
+>   fragmentation problems **do not apply**. It also has a DIFFERENT memory rule (raw `free()` is
+>   ownership-aware; `malloc_usable_size` must never see a PSRAM pointer) and the desktop render model
+>   (per-frame priority maps). **See "Pimoroni Pico Plus 2" near the end of this file BEFORE applying any
+>   memory or render conclusion from the sections in between.**
+>
+> Both targets are supported. The PIO build is byte-identical (`.bss` 17,280) — every mapped change is behind
+> `PICO_PSRAM_MAPPED`, and that is a standing requirement, not a nicety.
+
+### PicoCalc / PIO branch status (2026-06-23)
 
 All Pico work lives on **`pico-wip-render-debug`**, currently **54 commits ahead of `master`, 0 behind** → a
 clean **fast-forward** merge (no conflicts possible). Local `master` is itself 2 commits ahead of
@@ -60,6 +76,30 @@ cmake --build build-pico -j$(nproc)
 ```
 
 Requires: `pico-sdk`, PicoCalc hardware library (`i2ckbd` + `lcdspi`), FatFS SD SPI driver.
+
+### Pico build — Pimoroni Pico Plus 2 (memory-mapped PSRAM)
+
+The second target (see "Pimoroni Pico Plus 2" near the end of this file). Same PicoCalc hardware; only the
+MCU board differs, and it drops into the same socket.
+
+```bash
+cmake -B build-pimoroni \
+  -DPLATFORM=pico \
+  -DPICO_SDK_PATH=~/Source/pico-sdk \
+  -DPICO_PSRAM_MAPPED=ON
+cmake --build build-pimoroni -j$(nproc)
+# Flash build-pimoroni/src/freesci.uf2 to the Pimoroni board in the PicoCalc
+```
+
+`PICO_BOARD` stays `pico2` (set automatically) even though the board is RP2350B — see the Pimoroni section.
+Everything else defaults correctly; the mapped-only options (`PICO_PSRAM_SCRIPTS`, `PICO_STATIC_VISUAL`,
+`PICO_WORKING_PRIORITY`) are all ON and each is an A/B switch.
+
+**After ANY shared-file change, rebuild the PIO target and check its `.bss` is still 17,280** — that is the
+guarantee that the PicoCalc build is untouched:
+```bash
+cmake --build build-pico -j$(nproc) && arm-none-eabi-size build-pico/src/freesci.elf
+```
 
 ## Diagnostic probe toggles
 
@@ -3096,55 +3136,129 @@ left to keep out of SRAM is view-cel and control-map data, which alone is unlike
 path's software floats (no RP2040 FPU) would also need attention. Treat RP2040 as aspirational, not a
 near-term target, until a way to shrink the SCI0 decode peak and the resident VM working set is found.
 
-### Pimoroni Pico Plus 2 (memory-mapped PSRAM) — PARKED on branch `pico-pimoroni-mapped-psram`
+### Pimoroni Pico Plus 2 (memory-mapped PSRAM) — WORKING, branch `pico-pimoroni-mapped-psram`
 
-The single lever that would actually **dissolve the SRAM ceiling** (and reopen sound + long restore chains +
-maybe SCI1) is real, addressable PSRAM. The PicoCalc's onboard PSRAM is **PIO-SPI, not memory-mapped** —
-store/load only, so hot VM memory (`script_t.buf`) can never leave SRAM. The **Pimoroni Pico Plus 2** (RP2350B,
-8 MB PSRAM on the QMI second chip-select) maps PSRAM into the address space (cached XIP window at `0x11000000`),
-so it *can* hold the VM working set. It drops into the PicoCalc socket (community-confirmed).
+**Status (2026-09-05): the mapped-PSRAM target runs, and it dissolves the SRAM ceiling.** SQ3, PQ2 and
+Colonel's Bequest boot and play; SQ3↔PQ2 game switching works; in-game restore works. This is an
+**additional** target — the PicoCalc PIO-PSRAM build remains supported and is byte-identical (`.bss`
+17,280) because every change below is behind `PICO_PSRAM_MAPPED`.
 
-A **second build target** for it lives on branch **`pico-pimoroni-mapped-psram`** (pushed to `fork`; forked off
-this branch's `d14e4b37`). It is **behind CMake `option(PICO_PSRAM_MAPPED)` (default OFF)** so the PicoCalc and
-desktop builds are untouched — nothing here on `pico-wip-render-debug` is affected. What it contains (all three
-targets build clean): `src/platform/pico/psram_mapped.c` (the same offset-based `psram_alloc/reset/store/load`
-API, but store/load are **memcpy against `0x11000000`**; plus the QMI bring-up `psram_qmi_init`), `psram_qmi.h`,
-and CMake wiring. Timing + direct-mode ordering were adopted from the **device-tested `~/Source/frank-snes`**
-(`drivers/psram_init.c`) on the identical board; built as `PICO_BOARD=pico2` driving **GPIO 47** for the PSRAM
-CS at runtime (works on RP2350B silicon regardless of the pico2 A-config, exactly as frank-snes relies on).
+The board is a **Pimoroni Pico Plus 2** (RP2350B, 8 MB PSRAM on the QMI second chip-select, mapped at
+`0x11000000`) which drops into the PicoCalc socket. Unlike the PicoCalc's PIO-SPI PSRAM (store/load only),
+this PSRAM is **addressable**, so it can hold hot read-write data directly.
 
-**STATUS: does not fully run yet, but RE-SCOPED to a narrow, debugger-FREE bug (2026-09-03).** The device
-symptom is TFT noise + no serial on the Pimoroni — BUT a decisive test reframed it: **the same uf2 booted
-cleanly on a plain RP2350 (a Pico 2, no PSRAM) all the way to the "PSRAM not detected" LCD message.** That
-proves the ENTIRE early-boot path is correct — clock change, `set_flash_timings`, `stdio_init_all`, LCD init,
-SD init, AND `psram_qmi_init`'s no-PSRAM path all work. **The earlier "crashes in early boot / needs a
-debugger" conclusion is RETRACTED.**
+**Bring-up fix (the old "TFT garbage" blocker):** the custom `psram_qmi_init` (manual `ASSERT_CS1N` toggling
+plus a `0x9F` ID read) left the QMI/PSRAM in a bad state. Replaced with the device-tested **frank-snes**
+sequence verbatim (`~/Source/frank-snes` `drivers/psram_init.c`): `AUTO_CS1N`, `NOPUSH`, **no ID read**,
+hardcoded 8 MB, with the boot smoke test as the presence check. No SWD debugger was needed.
 
-**The crash is triggered specifically by the PRESENCE of real PSRAM** — the code path in `psram_qmi_init` that
-only runs once a chip actually answers the ID read: enter QPI (0x35) → write `m[1]` timing/formats → enable M1
-writes → return → the smoke-test `memcpy` to `0x11000000`. On the plain RP2350 that whole path is skipped
-(no chip → `size=0` → early return → clean "not detected"); on the Pimoroni it runs and faults there.
+#### Memory model — the default is INVERTED on this target
 
-**PRIME SUSPECT + first fix to try (no debugger needed — the smoke test is the signal):** my `psram_qmi_init`
-differs from the device-tested `frank-snes` (`~/Source/frank-snes drivers/psram_init.c`) in exactly the risky
-part — **frank uses `AUTO_CS1N` (hardware-managed chip-select) and NO ID read (it hardcodes 8 MB)**, whereas
-mine uses **manual `ASSERT_CS1N` toggling plus a custom `0x9F` ID read** to detect size. The manual CS
-handling / extra ID transaction most likely leaves the QMI or PSRAM chip in a bad state before the real
-config. **FIX: replace `psram_qmi_init` with frank's exact sequence verbatim** (AUTO_CS1N, `NOPUSH`, no ID
-read, return a hardcoded 8 MB), and let the boot smoke test be the presence/integrity check. Then flash and
-read the LCD/serial: "PSRAM not detected" → detection/CS issue; "PSRAM test FAILED" → timing; boots to the
-chooser/game → solved. Iterating is now cheap (the smoke test tells you which), so **this no longer needs an
-SWD debugger** — the earlier debugger recommendation applied to the mis-diagnosed early-boot theory.
+`sci_malloc`/`calloc`/`realloc` allocate from a **6 MB PSRAM heap** by default; the few buffers that must
+stay fast opt back into SRAM via **`sci_malloc_sram()`**. This replaced routing one subsystem at a time.
 
-*History (mis-diagnosis trail, kept so it isn't repeated): the boot path was suspected first — tried the
-`pimoroni` board config (16 MB flash) → `pico2` (like frank) → frank's `set_flash_timings(133,66)` before
-`set_sys_clock_khz`; a full flash erase (uf2loader removed) still showed noise, so uf2loader was exonerated.
-All of that was chasing the wrong layer — the plain-RP2350 boot test above shows the boot path was fine all
-along.* NB the mapped-PSRAM design is sound; only the PSRAM-present QMI bring-up needs the frank-verbatim swap.
+| region | contents |
+|---|---|
+| PSRAM `[0, 2MB)` | the per-room offload **bump arena** (`psram_alloc`/`psram_reset`) — unchanged |
+| PSRAM `[2MB, 8MB)` | the persistent **heap** (`psram_heap.c`): scripts, object vars, vocab, resource cache, clone/node/list/hunk tables |
+| SRAM | graphics only: `visual[0]`, the static visual buffer, both priority maps, pixmap `index_data`/`data`, `drv->state` |
 
-**SDK note for a future attempt:** installed pico-sdk is **2.2.0**, which ships **no turnkey PSRAM** — hence the
-vendored QMI init. (2.3.0 exists but wasn't needed for PSRAM.)
+**Two invariants make the wholesale flip safe:**
+1. **Free and realloc route by OWNERSHIP** (`psram_heap_owns`), never by call site.
+2. **Pre-init falls back**: before `psram_heap_init`, `psram_hmalloc` returns NULL and `psram_heap_owns`
+   returns 0, so early-boot allocations use SRAM and still free correctly.
 
+**THE CRITICAL GOTCHA — raw `free()` must be ownership-aware too.** Plenty of engine/gfx code frees
+`sci_malloc`'d blocks through **raw `free()`/`realloc()`** (long accepted, because both APIs used to land on
+the same heap: `sm_free_script`'s `free(object->variables)`, `game_exit`'s `free(s->game_version)`, the gfx
+layer). Once the heaps diverged this HardFaulted in newlib `_free_r` — it read a "chunk header" out of PSRAM
+payload bytes and faulted on the resulting wild `fd`/`bk`. Fixed at the **single chokepoint**: the linker's
+`--wrap` routes every raw call through `pico_mem_census.c`, so `__wrap_free`/`__wrap_realloc` check ownership
+there (both the census-on and census-off variants). Fix it there, never at call sites — that covers paths
+nobody has enumerated.
+
+**`malloc_usable_size()` must NEVER see a PSRAM pointer** — it walks picolibc chunk headers and faults on a
+non-SRAM address (this is what killed the old Codex `load_script` rank-1 suggestion). Every site is now either
+behind an ownership early-return or provably operating on a raw-`malloc` result.
+
+**Kept in SRAM deliberately, for two distinct reasons:**
+- *Touched per pixel* (the 16 KB XIP cache cannot hide the QSPI link): `visual[0]`, the static visual buffer,
+  both priority maps, pixmap `index_data`/`data`, and **`drv->state`** — `ps->palette[]` is read PER PIXEL in
+  the flush loop.
+- *DMA targets*: the SD SPI driver uses DMA and `_read()` passes the caller's buffer straight to `f_read`, so
+  the compressed-input buffers (`decompress0/01/1/11`) and the patch-file `res->data` would be DMA'd into
+  PSRAM. RP2350's XIP cache is probably coherent across bus masters, but these are transient buffers so SRAM
+  is near-free insurance. The DECOMPRESSED output is CPU-written and stays in PSRAM.
+
+**`psram_heap.c` — first-fit + lazy coalescing + a NEXT-FIT ROVER.** The rover is not an optimisation, it is
+required: a plain restart at `s_base` costs O(blocks) per malloc and **every step reads a block header out of
+PSRAM over QSPI**, so the GNF parser (thousands of ~250 B `_vinsert` allocations per command) degraded to
+O(n²) and produced a clearly noticeable typing lag. Measured on that pattern: **309.4 ms → 0.4 ms**.
+*Invariant:* the rover must always point at a valid block START — coalescing can absorb the block it points
+at, so every absorb site re-points it (`COALESCE_ABSORB`). Correctness covered by `tests/psram_heap_test.c`.
+
+#### Measured result — the ceiling, and the fragmentation, are gone
+
+SQ3 room 2, `FSCI_PROBE_MEM` build, engine-in-SRAM vs engine-in-PSRAM:
+
+| metric | before | after |
+|---|---|---|
+| SRAM `used` | 323,812 | **148,660** (−175 KB) |
+| SRAM `arena` | 351,844 | **163,428** (−188 KB) |
+| `[psheap] used` | 51,648 | 256,960 |
+| free `chunks` | 16 | **2** |
+
+**The chunk count is the significant number.** The SRAM heap is essentially **unfragmented**, because almost
+nothing churns in SRAM any more. On this target the whole fragmentation/arena-ratchet story that dominates the
+rest of this file **does not apply** — do not carry those conclusions over. (They remain fully valid for PIO.)
+
+#### The desktop render model, restored (device-confirmed)
+
+The freed SRAM was spent on the two buffers the Pico path never had:
+
+- **`PICO_WORKING_PRIORITY`** (+128 KB) — two real 320×200 maps. Un-aliasing `static_priority_map` from
+  `priority_map` is the core: that alias is why the `PRECISE_PRIORITY_MAP` copyback was a self-copy no-op and
+  a view's priority was baked PERMANENTLY. Now the clean plate is restored into the working copy every frame,
+  so priority is TRANSIENT like desktop. Note `_gfxop_draw_priority` is **suppressed on Pico** — it reads the
+  SOURCE cel's `index_data`, which is in PSRAM (NULL), so it can only emit "without index data!"; the driver's
+  blit does the writeback instead. The driver takes BOTH maps so a STATIC draw writes the clean plate.
+- **`PICO_STATIC_VISUAL`** (+64 KB) — the desktop `visual[2]` analogue; BACK restores copy from it (an SRAM
+  memcpy replacing a per-row PSRAM read) and the PSRAM background stays PRISTINE.
+
+**This closed BOTH PQ2 limitations recorded 2026-07-19** (dialog bleed, officer over-occluded by the Detective
+Div door) **plus the glovebox items, with SQ3 and the Pestulon overlay unaffected**, and gives real
+inter-sprite z-order for the first time. The record predicted exactly this and parked it as *"blocked on SRAM
+headroom (port is at the ceiling)"* — that blocker does not exist here.
+
+**CORRECTION to the 2026-07-19 notes:** the theory that the glovebox items were visible only because of the
+static path's **fullscreen clip** is **WRONG**. They are `kAddToPic` picviews drawn via `_gfxwop_pic_view_draw`,
+which was never routed through the (now compiled-out) dynview path; they were lost in a
+`PICO_STATIC_VIEW_PRIORITY=OFF` build for a **priority** reason, and real per-frame priority fixes them properly.
+
+**RULED OUT along the way:** raising the save-under SRAM threshold (to dodge `psram_reset` clobbering a
+save-under). It did not fix the dialogs, and the `old_screen` grab alone is 320×190 = 60,800 B on every pic
+transition — with the two new buffers it drove the arena to 470,628 of a 474,724 span and OOM'd. Save-unders
+stay in PSRAM on both targets.
+
+#### Options (all mapped-only, all default ON, each an A/B)
+
+| option | effect |
+|---|---|
+| `PICO_PSRAM_SCRIPTS` | `script_t.buf` → PSRAM heap |
+| `PICO_STATIC_VISUAL` | dedicated static visual buffer |
+| `PICO_WORKING_PRIORITY` | desktop-style per-frame priority maps (supersedes `PICO_STATIC_VIEW_PRIORITY`) |
+
+`PICO_PACK_VOCAB` now defaults **ON** for all Pico builds — it is the shipping config, and an unpacked vocab
+(1843 separate allocations on PQ2) fragments SRAM badly enough to fail the 64 KB `visual[0]` on a cross-game
+switch. Building it OFF caused that failure twice.
+
+#### Open on this target
+
+- **KQ4: Rosella "swims in the lawn"** in the opening. Suspected **control map**: `state->control_map` is NULL
+  on Pico, so collision falls back to the pic's nibble-packed PSRAM map, and KQ4's opening picks swim-vs-walk
+  from control colours. The fix is likely the same pattern as priority — give `control_map` a real 64 KB SRAM
+  buffer and unpack the pic's control map into it (~119 KB free, so it fits). NEXT UP.
+- SDK is pico-sdk **2.2.0** (no turnkey PSRAM — hence the vendored QMI init).
 ## Key CMake decisions
 
 - `HAVE_CONFIG_H=1` must be set as a **compiler flag** (not just inside `config.h`) because `scitypes.h` guards its include with `#ifdef HAVE_CONFIG_H` before config.h is ever included — a chicken-and-egg problem.
