@@ -1,2 +1,8 @@
 build/
 build-*/
+
+# Device serial captures pulled off the Pico while debugging.
+*.log
+
+# Assessment/report files written during investigations.
+PICO_*.md
