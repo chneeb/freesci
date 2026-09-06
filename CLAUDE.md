@@ -3352,7 +3352,41 @@ the PSRAM heap.
 
 Ordered roughly by value. Nothing here is in progress.
 
-**1. KQ4: Rosella "swims in the lawn"** (start room = **25**, per the sciwiki KQ4 room maps). UNDIAGNOSED,
+**1. KQ4: Rosella "swims in the lawn" — ROOT CAUSE FOUND (2026-09-06), fix not yet built.**
+
+**The Pico control-map decode floods pic 25.** Reproduced entirely offline with `tests/picodiff` (decodes a
+pic's control map through BOTH the desktop byte path and the Pico nibble-packed path and diffs them):
+
+| game | pic | control diffs |
+|---|---|---|
+| **KQ4** | **25** | **53,549 / 64,000** |
+| KQ4 | 1, 3, 30 | 0 |
+| SQ3 | 2, 3 | 0 |
+| PQ2 | 25, 1, 2 | 0 |
+
+The Pico map is flooded with **control 3** from y≈12 down; desktop has control 3 only in small lower regions.
+Scripts then read the wrong terrain under the ego, and `smallBase::doit` (script 000, the GLOBAL swim/walk
+check — room 25's own script never calls `onControl`) picks swimming.
+
+**Mechanism — an architectural consequence of Pico's TWO-PASS pic decode.** A control fill is performed by
+`AUXBUF_FILL`, whose boundary test is `aux_map[i] & clipmask` (`sci_picfill_aux.c:58,71,180`), and `clipmask`
+comes from `original_drawenable`. `sci_resmgr.c` decodes control in a SEPARATE second pass with
+`visual_map->index_data = NULL` and `priority_map->index_data = NULL`, so the guard at `sci_picfill.c:296-299`
+strips VISUAL and PRIORITY out of `original_drawenable`. The control fill is therefore bounded ONLY by
+control-marked pixels, whereas desktop (single combined pass) also bounds it by the VISUAL boundaries.
+KQ4 pic 25 has a fill that relies on visual boundaries, so it escapes.
+
+That is exactly why it is data-dependent, why it hits BOTH Pico targets (the two-pass decode is shared), and
+why almost every other pic decodes identically (their control fills are bounded by explicit control lines).
+
+**Fix direction (not built):** the control pass needs the same aux boundaries the combined pass produces.
+On the MAPPED target the honest fix is to stop splitting — decode all three maps in ONE pass like desktop,
+which is now affordable and would delete the two-pass special case entirely. For PIO (SRAM-bound, which is
+WHY the pass was split) it needs the visual boundaries marked into the aux map without keeping a 64KB visual
+buffer live. Verify any fix by re-running `tests/picodiff` until KQ4 pic 25 reports 0 diffs.
+
+*(historical framing below; superseded by the above)*
+**KQ4 (old notes)** (start room = **25**, per the sciwiki KQ4 room maps). UNDIAGNOSED,
 but substantially narrowed by offline analysis on 2026-09-06. **It happens on BOTH Pico targets** (mapped and
 PIO), which matters because those now have different memory AND render paths -- so the cause is in code common
 to both, i.e. shared engine or the shared `HAVE_PICO` control path.

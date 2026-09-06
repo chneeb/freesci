@@ -1,0 +1,20 @@
+Decodes a pic's CONTROL map twice -- once through the desktop byte-per-pixel path
+and once through the Pico nibble-packed path -- and diffs them. Compiles a SECOND
+copy of sci_pic_0.c with -DHAVE_PICO, renaming its exported symbols (picoprefix.h)
+so both decoders link together; psram_stub.c backs the PSRAM API with plain RAM.
+
+This is what localised the KQ4 "Rosella swims on the lawn" bug entirely offline.
+
+  cd tests/picodiff
+  cp ../../src/gfx/resource/sci_pic_0.c pico_pic.c
+  gcc -c -fgnu89-inline -w -DHAVE_CONFIG_H=1 -DX_DISPLAY_MISSING=1 -DHAVE_PICO=1 \
+      -DPICO_DECODE_CONTROL_MAP=1 -include picoprefix.h \
+      -I. -I../../src/gfx/resource -I../../src/include -I../../build \
+      -I/usr/include/SDL2 -D_REENTRANT -o pico_pic.o pico_pic.c
+  LIBS=$(find ../../build -name '*.a' | tr '\n' ' ')
+  gcc -fgnu89-inline -w -DHAVE_CONFIG_H=1 -DX_DISPLAY_MISSING=1 \
+      -I../../src/include -I../../build -I/usr/include/SDL2 -D_REENTRANT \
+      -o picodiff diff_main.c pico_pic.o psram_stub.c \
+      -Wl,--start-group $LIBS -Wl,--end-group -lSDL2 -lm -lz -lpthread -ldl
+  ./picodiff /path/to/game 25 1 3        # pic numbers
+  DUMPMAP=1 ./picodiff /path/to/game 25  # ASCII maps when they differ
