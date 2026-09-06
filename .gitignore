@@ -1,8 +1,9 @@
 build/
 build-*/
 
-# Device serial captures pulled off the Pico while debugging.
-*.log
-
-# Assessment/report files written during investigations.
-PICO_*.md
+# Device serial captures pulled off the Pico while debugging. Deliberately
+# NARROW patterns rather than *.log or PICO_*.md: this repo commits assessment
+# docs (PICO_SQ3_SRAM_CEILING_ASSESSMENT.md, PICO_SRAM_PSRAM_REVIEW.md), so a
+# wildcard over that category would silently hide files that belong in git.
+pico*.log
+asan.log
