@@ -3403,6 +3403,37 @@ buffer live. Verify any fix by re-running `tests/picodiff` until KQ4 pic 25 repo
 - Headless desktop runs **cannot** reach room 25: KQ4 starts in **room 701 = `copyProtect`**, which needs a
   manual lookup, so desktop verification needs a human at a display.
 
+**1b. PIO dialog bleed — mechanism identified (2026-09-06), fix not built.**
+
+PQ2's dialog boxes are overpainted by scene content on the **PicoCalc PIO target only**. Pimoroni is clean
+because `PICO_WORKING_PRIORITY` compiles the static-view routing out; PIO cannot afford the priority maps, so
+it still relies on that routing.
+
+**RULED OUT — port-clipping the static draw.** Device-tested (`PICO_STATIC_VIEW_CLIPPED`, since reverted):
+replacing `gfxop_draw_cel_static`'s forced FULLSCREEN clip with the port clip (mirroring
+`_gfxwop_pic_view_draw`) **did NOT fix the bleed**. So `view->parent->zone` still covers the dialog area, and
+**no clip change can fix this** -- do not re-attempt it.
+
+**MECHANISM (grounded in code, not yet device-confirmed): the static path skips DIRTY-RECT tracking.**
+`operations.c:2210`:
+```c
+if (!static_buf)
+        _gfxop_add_dirty(state, gfx_rect(old_x, old_y, ...));
+```
+On desktop that is correct -- a `GFX_BUFFER_STATIC` draw lands in `visual[2]`, which is never displayed, so
+there is nothing to dirty. But `pico_draw_pixmap` **ignores the buffer parameter** and writes everything into
+`visual[0]`, the DISPLAYED buffer. So a static-routed draw paints into the visible frame while registering no
+dirty rect, and the normal BACK-restore/FRONT-flush cycle never repairs that region -- the dialog stays
+overpainted. It is an inconsistency between the engine's assumption (static == off-screen) and the Pico
+driver's reality (static == the visible buffer).
+
+This accounts for every observation: clipping does not help (pixels are still written), `nopri` fixes it (no
+static draw at all), desktop is fine (static is genuinely off-screen), Pimoroni is fine (routing compiled out).
+
+**Fix to try if resumed:** have the static-routed draw register a dirty rect on Pico, so the region is
+restored/redrawn normally. Watch for the documented trade -- the same fullscreen-clip static draw is what
+makes PQ2's glovebox items visible, so verify items + SQ3 door/motivator occlusion alongside dialogs.
+
 **2. Right-size the audio buffers (~24KB reclaimable, both targets).** `PICO_PWM_BUF_FRAMES` (rate/11) and
 the 8192 ring were sized to survive RARE polls, before the poll fix existed. With polls now at 60Hz a batch
 only needs rate/60 frames (~367 at 22kHz, ~184 at 11kHz). Keep the ring generous enough to ride a ~250ms
