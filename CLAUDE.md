@@ -3352,12 +3352,34 @@ the PSRAM heap.
 
 Ordered roughly by value. Nothing here is in progress.
 
-**1. KQ4: Rosella "swims in the lawn"** (opening sequence). UNDIAGNOSED. My control-map theory was
-DISPROVEN, so do not restart from it: static control collision already works (the scan reads the pic's own
-nibble-packed PSRAM map), and a *missing* map would make her walk, not swim -- something actively reports
-water. Two cheap captures first: the `Resmgr: Detected SCI...` line (KQ4 shipped in several forms; a
-non-plain-SCI0 detection would explain divergent semantics), and `[oc]` control-mask scans from an
-`FSCI_PROBE_GFX` build to see whether the map really says "water" over the lawn.
+**1. KQ4: Rosella "swims in the lawn"** (start room = **25**, per the sciwiki KQ4 room maps). UNDIAGNOSED,
+but substantially narrowed by offline analysis on 2026-09-06. **It happens on BOTH Pico targets** (mapped and
+PIO), which matters because those now have different memory AND render paths -- so the cause is in code common
+to both, i.e. shared engine or the shared `HAVE_PICO` control path.
+
+RULED OUT (do not re-chase):
+- **SCI version fork.** KQ4 is SCI0 **0.000.502**, between PQ2 (0.000.490) and SQ3 (0.000.685) -- both work.
+- **The kernel-table mismatch** ("114 believed vs 113 reported", fn 70 unmapped). Tempting, but **PQ2 emits
+  the identical warning and plays fine** -- it is a known quirk of older SCI0 versions.
+- **Room-local script logic.** `025.script` never calls `onControl` at all; the swim/walk decision is
+  GLOBAL -- `smallBase::doit` (script 000) samples `OnControl` in the actor's `loop` direction, via
+  `Act::onControl` (998).
+- **Control-map DATA.** `tests/ctldump.c` decodes pic 25 cleanly on desktop with well-formed terrain:
+  `c0:37572 c1:11016 c3:5324 c9:4611 c11:3763 c14:1170 c15:544`, in coherent regions.
+- **My earlier "a blank map would make her WALK" reasoning was BACKWARDS.** Control 0 is the dominant
+  colour and terrain lives in the non-zero regions, so a scan returning 0 plausibly reads as "not on land"
+  -> swim. A blank/failed control read IS a viable explanation.
+
+DECISIVE NEXT TEST (cheap, and it forks the whole investigation): **run KQ4 on the DESKTOP build with a real
+display** and see whether she swims there too.
+```bash
+./build/src/freesci --gamedir ~/Downloads/quest/kq4 --graphics sdl
+```
+Headless runs CANNOT reach room 25: the game starts in **room 701 = `copyProtect`**, which needs a word from
+the manual (`manual.pdf`/`kq_ref_Card.pdf` ship in the GOG folder), so it needs a human at a display.
+- **Swims on desktop too** => shared FreeSCI bug, nothing to do with the port, and fully debuggable offline.
+- **Desktop correct** => Pico-specific; then capture `[oc]` lines from an `FSCI_PROBE_GFX` build to see what
+  bitmask the script actually gets under her (0 vs a real control bit).
 
 **2. Right-size the audio buffers (~24KB reclaimable, both targets).** `PICO_PWM_BUF_FRAMES` (rate/11) and
 the 8192 ring were sized to survive RARE polls, before the poll fix existed. With polls now at 60Hz a batch
