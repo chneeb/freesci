@@ -117,6 +117,10 @@ kept as cheap standing insurance — it was the canary for the now-CLOSED "aspb"
 | `FSCI_PROBE_MEM` (OFF) | `FSCI_PROBE_MEM` | `[mem] BREAKDOWN`/`PXM`/`room enter`/`room ready` lines; desktop `desktop_mem_probe` (env `FREESCI_MEMPROBE=1`) | `kgraphics.c`, `operations.c` |
 | `FSCI_PROBE_MEM_CENSUS` (OFF) | `FSCI_PROBE_MEM_CENSUS` | `[mem] CENSUS`/`SITES` + the `--wrap` malloc histogram & call-site tagger (~27.6KB `.bss`). **Implies `FSCI_PROBE_MEM`** (the dump prints inside the breakdown). | `kgraphics.c`, `pico_mem_census.c` |
 | `FSCI_PROBE_PARSER` (OFF) | `FSCI_PROBE_PARSER` | `[gnf]` per-command GNF-rebuild transient byte size | `kstring.c` |
+| `FSCI_PROBE_ARENA` (OFF) | `FSCI_PROBE_ARENA` | `[arenagrow]` — names the allocation that forces an sbrk grow (`sci_*` sites plus the raw decode/restore sites via `PICO_ARENA_PROBE_RAW`) | `sci_memory.c`, `sci_resmgr.c`, `operations.c`, `savegame.c` |
+| `FSCI_PROBE_PERF` (OFF) | `FSCI_PROBE_PERF` | `[perf]` per-room pic-decode time. Built for the XIP-RAM comparison; kept as a reusable decode timer | `operations.c`, `pico_time.c` |
+| `FSCI_PROBE_SND` (OFF) | `FSCI_PROBE_SND` | `[snd] span/polls/produced/consumed/underrun/ring \| seq` — audio production vs consumption per interval. **This is what localised the starved sound poll**; for a timing bug, measure the two rates before reasoning about the code | `pico_pwm.c`, `pwm_synth.c`, `polled.c` |
+| `FSCI_PROBE_FPS` (OFF) | `FSCI_PROBE_FPS` | `[fps]` frames + worst frame gap per second. Works WITHOUT sound, so a target's frame rate (== the sound poll rate, which sets the minimum `PICO_SND_BUF_FRAMES`) can be measured before deciding whether audio fits | `pico_driver.c` |
 
 Notes:
 - **Census file is always compiled**: `pico_mem_census.c` owns the `__wrap_*` symbols (top-level CMake
@@ -3309,6 +3313,15 @@ stay in PSRAM on both targets.
 | `PICO_PSRAM_SCRIPTS` | `script_t.buf` → PSRAM heap |
 | `PICO_STATIC_VISUAL` | dedicated static visual buffer |
 | `PICO_WORKING_PRIORITY` | desktop-style per-frame priority maps (supersedes `PICO_STATIC_VIEW_PRIORITY`) |
+
+Audio knobs (any Pico target, only meaningful with `PICO_PWM_AUDIO`):
+
+| option | effect |
+|---|---|
+| `PICO_PWM_AUDIO` | **defaults ON for mapped, OFF for PIO** — where it actually works |
+| `PICO_SND_RATE` (22050) | sample rate. Use **11025 on PIO**: memory differs by only ~4KB, but 22050 costs the synth ~35-47% CPU vs ~20%, lowering the frame rate AND hence the poll rate while simultaneously requiring double it |
+| `PICO_SND_BUF_FRAMES` (rate/11) | frames the mixer may emit per call. Must exceed `rate / poll_rate` or the ring starves; every 512 frames costs ~4KB of compbuf, so it is the main audio memory knob |
+| `PICO_SOFTSEQ` ("") | softseq name: empty = opl2 (Adlib FM). `SN76496` produces SILENCE on SQ3 (no Tandy/PCjr track in the resource) — not a drop-in |
 
 `PICO_PACK_VOCAB` now defaults **ON** for all Pico builds — it is the shipping config, and an unpacked vocab
 (1843 separate allocations on PQ2) fragments SRAM badly enough to fail the 64 KB `visual[0]` on a cross-game
