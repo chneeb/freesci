@@ -410,6 +410,12 @@ void pico_arena_probe(size_t size, const char *file, int line, const char *funct
 
    Off the mapped target (desktop, and the PicoCalc PIO PSRAM build) this is a
    plain alias for sci_malloc, so those builds are completely unchanged. */
+#ifdef HAVE_PICO
+/* sci_malloc's effort (reclaim + retry) without its fatal halt: returns NULL so
+   the caller can degrade. Used for song data, whose loss is survivable. */
+void *pico_sram_alloc_soft(size_t size);
+#endif
+
 #if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
 void *sci_malloc_sram(size_t size);
 #else

@@ -52,7 +52,11 @@
 ** frames and produce nothing. Costs ~20KB (compbuf 2*2048*4, feed buf, writebuf,
 ** and the ring below) -- affordable now that the engine lives in PSRAM.
 ** NB going DOWN was tried before and rejected for the same starvation reason. */
-#define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 11)
+#ifdef PICO_SND_BUF_FRAMES
+#  define PICO_PWM_BUF_FRAMES PICO_SND_BUF_FRAMES
+#else
+#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 11)
+#endif
 
 /* Diagnostic: compare PRODUCTION (pushed) against CONSUMPTION (IRQs). Both
    should sit at ~22050/s. Whichever one is low is the actual fault, which four
@@ -60,6 +64,11 @@
 extern volatile uint32_t pwm_irq_count;
 extern volatile uint32_t pwm_underrun_count;
 static uint32_t snd_pushed = 0, snd_dropped = 0;
+/* Poll rate decides the minimum safe buf_size (the mixer emits at most
+   buf_size per call, so buf_size >= rate / poll_rate). Steady-state totals
+   alone cannot distinguish "few capped calls" from "many small ones", and that
+   distinction is exactly what sizing the buffers depends on. */
+static uint32_t snd_polls = 0;
 /* Microseconds spent inside the softseq generating samples, and how many it
    produced. If this approaches 1,000,000 per report the synth is the wall. */
 unsigned long long pico_seq_poll_us = 0;
@@ -239,6 +248,7 @@ pico_sfx_poll(void)
 		}
 	}
 
+	snd_polls++;
 	pico_sfx_timer_callback(pico_sfx_timer_data);
 
 	/* Once per second: the two rates that decide everything. */
@@ -254,9 +264,9 @@ pico_sfx_poll(void)
 			/* NB rates are per REPORT INTERVAL, which is only ~1s in
 			   steady state -- span_ms makes a long interval obvious
 			   instead of it looking like an impossible sample rate. */
-			sciprintf("[snd] span=%lums produced=%u consumed=%u underrun=%u"
-				  " ring=%d | seq=%lums for %lu frames\n",
-				  (unsigned long)(span / 1000),
+			sciprintf("[snd] span=%lums polls=%u produced=%u consumed=%u"
+				  " underrun=%u ring=%d | seq=%lums for %lu frames\n",
+				  (unsigned long)(span / 1000), (unsigned)snd_polls,
 				  (unsigned)snd_pushed, (unsigned)pwm_irq_count,
 				  (unsigned)pwm_underrun_count,
 				  pwm_synth_ring_pending(),
@@ -265,6 +275,7 @@ pico_sfx_poll(void)
 		}
 		snd_pushed = 0;
 		snd_dropped = 0;
+		snd_polls = 0;
 		pwm_irq_count = 0;
 		pwm_underrun_count = 0;
 		pico_seq_poll_us = 0;

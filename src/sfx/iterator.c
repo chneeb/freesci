@@ -1983,6 +1983,17 @@ songit_new(unsigned char *data, unsigned int size, int type, songit_id_t id)
 	it->death_listeners_nr = 0;
 
 	it->data = (unsigned char*)sci_refcount_memdup(data, size);
+	if (!it->data) {
+		/* Out of memory for the song copy. Unwind and report no iterator --
+		   a NULL return is already an expected outcome here (see the invalid
+		   type and null data paths above), so callers handle it. Safe to free
+		   it directly: init() has not run yet, so there is nothing else to
+		   clean up. */
+		fprintf(stderr, SIPFX "Out of memory for song data (%u bytes);"
+			" skipping song\n", size);
+		sci_free(it);
+		return NULL;
+	}
 	it->size = size;
 
 	it->init((song_iterator_t *) it);

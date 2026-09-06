@@ -3314,6 +3314,40 @@ stay in PSRAM on both targets.
 (1843 separate allocations on PQ2) fragments SRAM badly enough to fail the 64 KB `visual[0]` on a cross-game
 switch. Building it OFF caused that failure twice.
 
+#### Sound on the PIO target — WORKS FOR SQ3, marginal beyond it (2026-09-06)
+
+Device-tested, and it exceeded both the record's prediction and my own analysis. `PICO_PWM_AUDIO` now
+defaults **ON for mapped, OFF for PIO** — PIO must be opted into explicitly:
+
+```bash
+cmake -B build-pico-snd -DPLATFORM=pico -DPICO_SDK_PATH=~/Source/pico-sdk -DPICO_BOARD=pico2 \
+      -DPICO_PWM_AUDIO=ON -DPICO_SND_RATE=11025 -DPICO_SND_BUF_FRAMES=512
+```
+
+- ✅ **SQ3 plays with music** — intro and game. The poll fix is shared code, so PIO inherited the whole
+  quality fix for free; the 2026-07-10 "broken tractor" on PIO was almost certainly that same starved poll.
+- ❌ **PQ2 does not fit.** OOM at `sci_refcount_alloc` (the song-data memdup, 9,019 B) with
+  **`free=104 bytes` and `arena` at its exact maximum** — TRUE EXHAUSTION, not the contiguity failure that
+  was predicted. PQ2 is simply the heavier game (1843 vocab words vs 1489, ~59 KB songs vs ~19 KB).
+- ⚠️ **OPEN: after a failed game, no further game starts** ("Please wait" then exit) until a power cycle.
+  Not diagnosed. The obvious leaks were checked and are clean (`opl2_exit` does `OPLDestroy`, `mix_exit`
+  frees the compbufs, `main.c:1481` calls `game_exit`→`sfx_exit`), so it is NOT a simple "sound never
+  frees". Decisive next data: the chooser's `[mem] post-trim` line after the failed game (high arena =>
+  teardown did not complete) plus any `malloc N failed` during the next load. **Worth fixing even if PIO
+  sound is abandoned — the same failure would be just as bad on the mapped target.**
+
+**Use 11025, not 22050, on PIO.** Memory differs by only ~4KB (the ring), but CPU compounds: 22050 costs
+the synth ~35-47% vs ~20%, which lowers the frame rate, which lowers the poll rate -- while simultaneously
+REQUIRING double the poll rate for the same buf_size (>=43Hz vs >=22Hz).
+
+**Song loads now degrade instead of halting** (both targets). `sci_refcount_alloc` has exactly ONE caller,
+`songit_new`'s memdup, so it is song-only and safe to make non-fatal: on PIO it uses
+`pico_sram_alloc_soft()` and returns NULL, `songit_new` unwinds, and the game plays on silently rather than
+dying because a piece of MUSIC did not fit. **`pico_sram_alloc_soft` keeps sci_malloc's reclaim-and-retry**
+-- an earlier attempt used raw `malloc` and broke the intro, because allocations that only succeed AFTER a
+reclaim are exactly the near-the-ceiling ones this targets. Not applied on mapped, where `sci_malloc` means
+the PSRAM heap.
+
 #### PARKED / NEXT STEPS (as of 2026-09-05, end of the sound session)
 
 Ordered roughly by value. Nothing here is in progress.

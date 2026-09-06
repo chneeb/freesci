@@ -145,6 +145,30 @@ pico_sram_realloc(void *ptr, size_t size, const char *file, int line,
 }
 #endif
 
+#ifdef HAVE_PICO
+/* Same effort as sci_malloc -- including the reclaim-and-retry that flushes the
+   resource LRU -- but RETURNS NULL instead of taking pico_oom_report's fatal
+   halt. For allocations whose failure is survivable (song data), where halting
+   the game because a piece of music did not fit is the wrong trade. Skipping the
+   retry is NOT an acceptable shortcut: allocations that only succeed after a
+   reclaim are exactly the ones near the ceiling, i.e. precisely these. */
+void *
+pico_sram_alloc_soft(size_t size)
+{
+	void *res = malloc(size);
+
+	if (res == NULL && !g_pico_in_reclaim) {
+		g_pico_in_reclaim = 1;
+		pico_reclaim_heap();
+		g_pico_in_reclaim = 0;
+		res = malloc(size);
+	}
+	if (res)
+		g_sci_live_bytes += malloc_usable_size(res);
+	return res;
+}
+#endif
+
 #if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
 void *
 sci_malloc_sram(size_t size)
@@ -468,7 +492,22 @@ debug_win32_memory(int dbg_setting)
 extern void *
 sci_refcount_alloc(size_t length)
 {
+#if defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)
+	/* PIO target only. This has exactly ONE caller -- songit_new's memdup of
+	   song data (iterator.c) -- so it is song-only, and a song is optional.
+	   sci_malloc would take pico_oom_report's fatal halt, killing the GAME
+	   because a piece of MUSIC did not fit; raw malloc lets it return NULL so
+	   the song is skipped and play continues silently. Same reasoning as the
+	   graceful sound-resource skip in decompress0.c.
+	   NOT applied on the mapped target: there sci_malloc means the 6MB PSRAM
+	   heap, which is where song data belongs and where it does not fail. */
+	guint32 *data = (guint32*)pico_sram_alloc_soft(REFCOUNT_OVERHEAD + length);
+
+	if (!data)
+		return NULL;
+#else
 	guint32 *data = (guint32*)sci_malloc(REFCOUNT_OVERHEAD + length);
+#endif
 #ifdef TRACE_REFCOUNT
 fprintf(stderr, "[] REF: Real-alloc at %p\n", data);
 #endif
@@ -527,6 +566,9 @@ extern void *
 sci_refcount_memdup(void *data, size_t len)
 {
 	void *dest = sci_refcount_alloc(len);
+
+	if (!dest)
+		return NULL;   /* caller decides; song loads are optional */
 	memcpy(dest, data, len);
 	return dest;
 }

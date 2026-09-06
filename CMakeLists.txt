@@ -329,12 +329,27 @@ if(PLATFORM STREQUAL "pico")
     # "Sound on Pico (TODO)".
     # [snd] per-second production/consumption/underrun report. Diagnostic only;
     # it was what finally localised the starved sound poll.
+    # Frame rate == the sound poll rate, and works WITHOUT sound -- so a target
+    # can be measured before deciding whether audio fits on it.
+    option(FSCI_PROBE_FPS "Log per-frame rate (sets the minimum audio buf_size)" OFF)
+    if(FSCI_PROBE_FPS)
+        add_compile_definitions(FSCI_PROBE_FPS=1)
+    endif()
+
     option(FSCI_PROBE_SND "Log PCM production vs consumption rates" OFF)
     if(FSCI_PROBE_SND)
         add_compile_definitions(FSCI_PROBE_SND=1)
     endif()
 
-    option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" OFF)
+    # Sound defaults ON for the mapped-PSRAM target (where it works: engine in
+    # PSRAM leaves ~110KB of SRAM, and music plays correctly) and OFF for the
+    # PicoCalc PIO target (where it is marginal -- see CLAUDE.md "Sound on the
+    # PIO target"). Explicitly overridable either way.
+    if(PICO_PSRAM_MAPPED)
+        option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" ON)
+    else()
+        option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" OFF)
+    endif()
     # Which softsequencer drives the PCM feed. Empty = FreeSCI's default (opl2,
     # i.e. Adlib FM emulation -- the most expensive one). "SN76496" (Tandy 3-voice
     # square) and "pcspeaker" are far cheaper and are already linked; SCI0 sound
@@ -343,8 +358,16 @@ if(PLATFORM STREQUAL "pico")
     # Audio sample rate. 11025 halves both the OPL synth cost (33-47% CPU at
     # 22050) and every derived buffer, which is what a memory-tight target needs.
     set(PICO_SND_RATE "22050" CACHE STRING "Pico audio sample rate (22050 or 11025)")
+    # Frames the mixer may emit per call. Default rate/11 (~91ms). The mixer is
+    # capped at this per call, so it must exceed rate/poll_rate or the ring
+    # starves; every 512 frames costs ~4KB of compbuf, so it is the main audio
+    # memory knob on a tight target.
+    set(PICO_SND_BUF_FRAMES "" CACHE STRING "Mixer frames per call (default: rate/11)")
     if(PICO_PWM_AUDIO)
         add_compile_definitions(PICO_PWM_AUDIO=1 PICO_SND_RATE=${PICO_SND_RATE})
+        if(NOT PICO_SND_BUF_FRAMES STREQUAL "")
+            add_compile_definitions(PICO_SND_BUF_FRAMES=${PICO_SND_BUF_FRAMES})
+        endif()
         if(NOT PICO_SOFTSEQ STREQUAL "")
             add_compile_definitions(PICO_SOFTSEQ_NAME="${PICO_SOFTSEQ}")
         endif()

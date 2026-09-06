@@ -1143,6 +1143,39 @@ static int pico_update(struct _gfx_driver *drv,
                   dest.x, dest.y, src.xl, src.yl);
 #endif
         flush_region(S, dest.x, dest.y, src.xl, src.yl);
+#ifdef FSCI_PROBE_FPS
+        /* Frame rate == the sound poll rate (pico_sfx_poll is driven from here),
+           and the poll rate sets the MINIMUM safe PICO_PWM_BUF_FRAMES, since the
+           mixer emits at most buf_size per call: buf_size >= rate / poll_rate.
+           Deliberately usable WITHOUT sound, so a target can be measured before
+           deciding whether audio fits there -- the two Pico targets have quite
+           different frame rates (PIO reads priority back over PIO-SPI per row;
+           the mapped build reads SRAM), so each must be sized from its own
+           number. Report the MINIMUM over the interval: the worst frame is what
+           starves the ring, not the average. */
+        {
+            static unsigned fps_frames = 0, fps_min = 0xffffffffu;
+            static uint64_t fps_last_us = 0, fps_prev_us = 0;
+            uint64_t now_us = time_us_64();
+            if (fps_prev_us) {
+                unsigned dt = (unsigned)(now_us - fps_prev_us);
+                if (dt < fps_min) fps_min = dt;
+            }
+            fps_prev_us = now_us;
+            fps_frames++;
+            if (now_us - fps_last_us >= 1000000u) {
+                sciprintf("[fps] frames=%u in %lums (worst gap %ums ->"
+                          " min buf_size = rate/%u)\n",
+                          fps_frames,
+                          (unsigned long)((now_us - fps_last_us) / 1000),
+                          fps_min == 0xffffffffu ? 0 : fps_min / 1000,
+                          fps_frames ? fps_frames : 1);
+                fps_frames = 0;
+                fps_min = 0xffffffffu;
+                fps_last_us = now_us;
+            }
+        }
+#endif
         /* Per-frame keyboard poll + pace. Covers animation loops that never
            call kGetEvent/kWait (e.g. the SQ3 intro), which otherwise run
            unpaced. Throttled inside poll_keyboard to one read per frame. */
