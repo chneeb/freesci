@@ -120,6 +120,14 @@ kept as cheap standing insurance — it was the canary for the now-CLOSED "aspb"
 | `FSCI_PROBE_ARENA` (OFF) | `FSCI_PROBE_ARENA` | `[arenagrow]` — names the allocation that forces an sbrk grow (`sci_*` sites plus the raw decode/restore sites via `PICO_ARENA_PROBE_RAW`) | `sci_memory.c`, `sci_resmgr.c`, `operations.c`, `savegame.c` |
 | `FSCI_PROBE_PERF` (OFF) | `FSCI_PROBE_PERF` | `[perf]` per-room pic-decode time. Built for the XIP-RAM comparison; kept as a reusable decode timer | `operations.c`, `pico_time.c` |
 | `FSCI_PROBE_SND` (OFF) | `FSCI_PROBE_SND` | `[snd] span/polls/produced/consumed/underrun/ring \| seq` — audio production vs consumption per interval. **This is what localised the starved sound poll**; for a timing bug, measure the two rates before reasoning about the code | `pico_pwm.c`, `pwm_synth.c`, `polled.c` |
+**Always-on Pico timing (NOT probes -- one line each, negligible cost, no flag needed):**
+
+| line | where | what it tells you |
+|---|---|---|
+| `[clk] sys_clk = N Hz (requested M MHz)` | `pico_main.c`, at the LAUNCH point (after the chooser, so it is reachable with uf2loader attached) | the **achieved** clock, and flags a silent `set_sys_clock_khz` fallback explicitly. **Trust this, not CMakeCache** -- see the build-system trap under "Overclocking". |
+| `[clk] SD SPI = N kHz` | same | which SD rate was compiled in |
+| `[perf] resource load: N ms (M resources)` | `main.c`, after the resmgr comes up | the startup SD scan + resource-map parse. **This is the part of loading the CORE CLOCK CANNOT speed up** (it is SD-clock bound), so it is the number to watch when changing `PICO_SD_SPI_KHZ`. Pairs with `[perf] pic N decode` (`FSCI_PROBE_PERF`), which is the CPU/PSRAM-bound half. |
+
 | `FSCI_PROBE_FPS` (OFF) | `FSCI_PROBE_FPS` | `[fps]` frames + worst frame gap per second. Works WITHOUT sound, so a target's frame rate (== the sound poll rate, which sets the minimum `PICO_SND_BUF_FRAMES`) can be measured before deciding whether audio fits | `pico_driver.c` |
 
 Notes:
@@ -3405,6 +3413,25 @@ reports the ACHIEVED clock and flags a fallback explicitly. **Trust that line, n
 `0x65` fine; the problem is that only `flush_region` was converted, while `pico_clear_screen_black` and
 ~66 write sites in `lcdspi.c` (chooser, text, the OOM/HardFault dumps) still push 3 bytes/pixel. Device
 result: sheared display. Completing it across all writers is worth ~2x display bandwidth.
+
+#### Log noise and the PIO `.bss` baseline (2026-09-10)
+
+Default builds are quiet. Two causes were fixed:
+- **Leftover probe flags in the build dir** -- `build-pico` had `FSCI_PROBE_GFX` (which emits
+  `[pblit]`/`[pbuf]`/`[pupd]` PER CEL) and `FSCI_PROBE_PARSER` on from earlier debugging. Most of the
+  volume was this, not the code. Check `grep '^FSCI_PROBE.*ON' <builddir>/CMakeCache.txt` before
+  concluding anything about output volume.
+- **Genuinely ungated upstream prints**, now behind the matching existing probe flag: the clone-table
+  `Free list:` / `Entries w/zero vars:` dumps in `savegame.c` (the worst -- one `sciprintf` PER ENTRY,
+  twice, on EVERY restore) -> `FSCI_PROBE_MEM`; `Activating port ...` on every window dispose
+  (`kgraphics.c`) -> `FSCI_PROBE_GFX`; the `[play]`/`Morphing`/`SI_MORPH` sound prints -> `FSCI_PROBE_SND`.
+
+Also a small speed win: `printf` formatting costs CPU whether or not the bytes reach a terminal, and with
+non-blocking USB stdout they are DROPPED rather than waited on -- so that work was pure loss.
+
+**PIO `.bss` baseline is now 17,284** (was quoted as 17,280 for most of this session -- that figure was a
+`FSCI_PROBE_GFX=ON` build). Probes off took it to 17,276; the always-on timing above adds 8. Use 17,284 as
+the "PicoCalc build unchanged" check after shared-file edits.
 
 #### PARKED / NEXT STEPS (as of 2026-09-05, end of the sound session)
 

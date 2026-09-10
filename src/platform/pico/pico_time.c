@@ -18,7 +18,9 @@ void sci_get_current_time(GTimeVal *val)
     val->tv_usec = usec;
 }
 
-#if defined(FSCI_PROBE_PERF) || defined(PICO_PWM_AUDIO)
+/* Always available on Pico: used by the [perf] decode timer, the sound probe,
+   and the startup resource-load timing in main.c. */
+#ifdef HAVE_PICO
 /* Free-running microsecond counter for perf A/B measurements (e.g. pic-decode
    timing to compare flash-cache-on vs XIP-cache-as-RAM builds). */
 unsigned long long pico_perf_us(void)

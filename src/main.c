@@ -1001,6 +1001,11 @@ detect_versions(sci_version_t *version, int *res_version, cl_options_t *options,
 }
 
 #ifdef HAVE_PICO
+#ifdef HAVE_PICO
+static unsigned long long _fsci_res_t0;
+extern unsigned long long pico_perf_us(void);
+#endif
+
 int freesci_main(int argc, char **argv)
 #else
 int
@@ -1119,6 +1124,9 @@ main(int argc, char** argv)
 	getcwd(resource_dir, PATH_MAX); /* Store resource directory */
 
 	sciprintf("Loading resources...\n");
+#ifdef HAVE_PICO
+	_fsci_res_t0 = pico_perf_us();
+#endif
 
 #ifdef HAVE_PICO
 	/* The resmgr keeps decompressed resources in an LRU cache up to this byte
@@ -1131,6 +1139,16 @@ main(int argc, char** argv)
 	resmgr = scir_new_resource_manager(resource_dir, res_version, 1, 256*1024);
 #endif
 	
+#ifdef HAVE_PICO
+	if (resmgr) {
+		/* Startup resource scan: SD reads + resource-map parsing. This is the
+		   part of loading the CORE CLOCK cannot speed up -- it is SD-clock
+		   bound -- so it is the number to watch when changing PICO_SD_SPI_KHZ. */
+		sciprintf("[perf] resource load: %lu ms (%d resources)\n",
+			  (unsigned long)((pico_perf_us() - _fsci_res_t0) / 1000),
+			  resmgr->resources_nr);
+	}
+#endif
 	if (!resmgr) {
 		printf("No resources found in '%s'.\nAborting...\n",
 		       resource_dir);
