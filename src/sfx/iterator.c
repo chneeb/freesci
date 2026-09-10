@@ -1873,10 +1873,15 @@ songit_next(song_iterator_t **it, unsigned char *buf, int *result, int mask)
 	do {
 		retval = (*it)->next(*it, buf, result);
 		if (retval == SI_MORPH) {
+#ifdef FSCI_PROBE_SND
 			fprintf(stderr, "  Morphing %p (stored at %p)\n", *it, it);
+#endif
 			if (!SIMSG_SEND((*it), SIMSG_ACK_MORPH)) {
 				BREAKPOINT();
-			} else fprintf(stderr, "SI_MORPH successful\n");
+			}
+#ifdef FSCI_PROBE_SND
+			else fprintf(stderr, "SI_MORPH successful\n");
+#endif
 		}
 
 		if (retval == SI_FINISHED)

@@ -3037,7 +3037,10 @@ kDisposeWindow(state_t *s, int funct_nr, int argc, reg_t *argv)
 	       (s->visual->port_refs[id]->flags & GFXW_FLAG_NO_IMPLICIT_SWITCH))
 		id--;
 
+#ifdef FSCI_PROBE_GFX
+	/* Fires on EVERY window dispose -- i.e. every dialog dismissal. */
 	sciprintf("Activating port %d after disposing window %d\n", id, goner_nr);
+#endif
 	s->port = s->visual->port_refs[id];
 
 	if (!s->port)

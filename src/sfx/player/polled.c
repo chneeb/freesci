@@ -285,7 +285,9 @@ pp_stop(void)
 	song_iterator_t *it = play_it;
 
 	play_it = NULL;
-fprintf(stderr, "[play] Now stopping it %p\n", (void *)it);
+#ifdef FSCI_PROBE_SND
+	fprintf(stderr, "[play] Now stopping it %p\n", (void *)it);
+#endif
 	if (it)
 		songit_free(it);
 

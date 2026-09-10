@@ -4652,6 +4652,10 @@ reconstruct_clones(state_t *s, seg_manager_t *self)
 				int j;
 				clone_entry_t *seeker = mobj->data.clones.table;
 				
+#ifdef FSCI_PROBE_MEM
+				/* Clone-table structure dump. UNGATED upstream, and
+				   expensive: one sciprintf per entry, twice, on EVERY
+				   restore (~400 formatted USB writes in practice). */
 				sciprintf("Free list: ");
 				for (j = mobj->data.clones.first_free;
 				     j != HEAPENTRY_INVALID;
@@ -4668,6 +4672,7 @@ reconstruct_clones(state_t *s, seg_manager_t *self)
 						sciprintf("%d ", j);
 				}
 				sciprintf("\n");
+#endif /* FSCI_PROBE_MEM */
 
 				for (j = 0; j < mobj->data.clones.max_entry; j++)
 				{
