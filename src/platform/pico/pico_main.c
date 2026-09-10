@@ -157,16 +157,52 @@ void __attribute__((naked)) isr_hardfault(void)
 
 int main(void)
 {
-#ifdef PICO_PSRAM_MAPPED
-    /* Pimoroni Pico Plus 2: reprogram the 16 MB flash's QMI timing for 133 MHz
-       BEFORE raising the clock, or XIP reads corrupt and it crashes here (before
-       any serial) with TFT noise. Not needed on the Pico 2 (PicoCalc) flash. */
-    psram_set_flash_timings(133, 66);
+    /* Core clock. SCI loading is dominated by decompression, resource decode and
+       the interpreter loop -- all CPU-bound -- so this scales load times almost
+       directly. Default stays the RP2350 power-on 133 MHz; PICO_SYS_CLOCK_MHZ
+       raises it.
+
+       ORDER MATTERS and all of it must precede stdio_init_all(), because USB has
+       to enumerate at the FINAL clock.
+
+       THE TRAP: psram_set_flash_timings() is parameterised BY the system clock.
+       Raising clk_sys without recomputing the flash divisor for the new clock
+       overclocks the flash and corrupts XIP reads -- the exact failure the
+       Pimoroni bring-up hit (TFT noise, no serial, dead before any output). So
+       the target is passed to BOTH calls, never hard-coded.
+
+       PSRAM needs no equivalent here: psram_qmi_init derives its own divisor
+       from clock_get_hz(clk_sys) (psram_mapped.c), so it re-caps itself at the
+       new clock. That matters more on this target than it looks -- the engine's
+       hot VM data lives in PSRAM, so a timing error would corrupt running
+       scripts and objects, not merely graphics.
+       NB the PicoCalc PIO target does NOT have that property: it passes a
+       HARD-CODED clkdiv of 1.0 to psram_spi_init_clkdiv() below, i.e. the PIO
+       SPI runs at full clk_sys. Raising the clock there without scaling that
+       divisor overclocks the PSRAM chip. Fix that before overclocking PIO. */
+#ifndef PICO_SYS_CLOCK_MHZ
+#  define PICO_SYS_CLOCK_MHZ 133
 #endif
-    set_sys_clock_khz(133000, true);
+#ifndef PICO_SD_SPI_KHZ
+#  define PICO_SD_SPI_KHZ 12500   /* mirrors hw_config.c's default */
+#endif
+#ifdef PICO_PSRAM_MAPPED
+    psram_set_flash_timings(PICO_SYS_CLOCK_MHZ, 66);
+#endif
+    if (!set_sys_clock_khz(PICO_SYS_CLOCK_MHZ * 1000, false)) {
+        /* Refused (bad PLL divisors, or it needs a voltage bump we do not wire
+           up): fall back rather than run on at whatever clk_sys happens to be.
+           Deliberately do NOT recompute the flash timings for 133 -- leaving
+           them as computed for the higher target only makes flash SLOWER than
+           it needs to be here, never faster than its cap, which is the safe
+           direction. (Adopted from frank-quest's fallback.) */
+        set_sys_clock_khz(133000, true);
+    }
     stdio_init_all();
     /* Give the USB host time to enumerate the CDC device before we print */
     sleep_ms(2000);
+    printf("[clk] sys_clk = %u Hz (requested %d MHz)\n",
+           (unsigned)clock_get_hz(clk_sys), PICO_SYS_CLOCK_MHZ);
     MEMPRINT("after stdio_init");
 
     /* Initialise display and keyboard unconditionally */
@@ -203,7 +239,33 @@ int main(void)
     }
 #else
     /* PSRAM on PIO1 (CS=20, SCK=21, MOSI=2, MISO=3) */
-    g_psram = psram_spi_init_clkdiv(pio1, -1, 1.0f, true);
+    {
+        /* The PIO state machine runs at clk_sys/clkdiv, so a hard-coded 1.0
+           makes the PSRAM SPI rate scale with the core clock. At 133 MHz that is
+           the proven rate; overclocking with 1.0 pushes the PSRAM past it and the
+           boot smoke test below fails ("PSRAM test failed!") -- observed on the
+           PicoCalc at 252 MHz.
+
+           NB the driver header's "clkdiv >1.0 needed above 280 MHz" is RP2040
+           guidance and does NOT transfer to the RP2350 + this PCB/PSRAM.
+
+           So derive the divisor to hold the SPI at its 133 MHz-equivalent rate.
+           Consequence worth knowing: PSRAM does NOT get faster with the
+           overclock -- only CPU-bound work does. */
+        /* Round UP to an INTEGER divisor. The PIO fractional divider works by
+           stretching individual cycles, so a fractional value (252/133 = 1.895)
+           makes the SPI clock jittery -- fine for throughput, bad for a
+           bit-banged protocol with tight setup/hold, and a plausible reason the
+           smoke test still failed at the correct average rate. Rounding up also
+           guarantees we land at or BELOW the proven 133 MHz-equivalent rate
+           (252/2 = 126 MHz), never above it. */
+        int psram_div_i = (PICO_SYS_CLOCK_MHZ + 132) / 133;   /* ceil(mhz/133) */
+        float psram_clkdiv;
+        if (psram_div_i < 1)
+            psram_div_i = 1;
+        psram_clkdiv = (float)psram_div_i;
+        g_psram = psram_spi_init_clkdiv(pio1, -1, psram_clkdiv, true);
+    }
 #endif
     MEMPRINT("after psram_init");
 
@@ -289,6 +351,16 @@ int main(void)
         {
             MEMPRINT("pre-launch");
         }
+        /* Report the achieved clock HERE, not just at boot: with uf2loader in
+           the picture the serial cable cannot be attached early enough to see
+           anything printed before the chooser. clock_get_hz is the ACHIEVED
+           value, so this also reveals a silent fallback when
+           set_sys_clock_khz() refused the requested frequency. */
+        printf("[clk] sys_clk = %u Hz (requested %d MHz)%s\n",
+               (unsigned)clock_get_hz(clk_sys), PICO_SYS_CLOCK_MHZ,
+               (clock_get_hz(clk_sys) / 1000000u) == (unsigned)PICO_SYS_CLOCK_MHZ
+                 ? "" : "  <-- FELL BACK, requested clock not achieved");
+        printf("[clk] SD SPI = %d kHz\n", PICO_SD_SPI_KHZ);
         printf("Launching freesci_main\n");
         freesci_main(argc, argv);
         printf("freesci_main returned\n");

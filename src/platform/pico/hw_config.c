@@ -11,7 +11,17 @@ static spi_t spis[] = {
         .miso_gpio = 16,
         .mosi_gpio = 19,
         .sck_gpio  = 18,
-        .baud_rate = 12500 * 1000,
+        /* SD SPI clock. SD read time is part of resource loading and is NOT
+           helped by the core clock, so this is the one loading component an
+           overclock does not touch. frank-quest runs the same class of card at
+           30 MHz with no DMA; we have DMA, so 30 should be comfortable. The
+           stack negotiates -- init runs at 400 kHz and only then switches to
+           this rate -- so a card that cannot sustain it fails visibly at mount
+           rather than corrupting data. */
+#ifndef PICO_SD_SPI_KHZ
+#  define PICO_SD_SPI_KHZ 12500
+#endif
+        .baud_rate = PICO_SD_SPI_KHZ * 1000,
         .DMA_IRQ_num = DMA_IRQ_0,
     }
 };

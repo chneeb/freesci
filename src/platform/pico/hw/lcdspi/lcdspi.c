@@ -590,7 +590,15 @@ void pico_lcd_init() {
     spi_write_data(0x48); // MX, BGR
 
     spi_write_command(0x3A); // Pixel Interface Format
+#ifdef PICO_LCD_16BIT
+    /* 0x65 = 18-bit RGB interface, 16-bit MCU/SPI interface -- the half that
+       matters. Halves bytes-on-the-wire per pixel. The ILI9488 datasheet's
+       "SPI is 18-bit only" does not hold for this ST7365P-class panel; proven
+       on this exact hardware by ~/Source/shapones and frank-quest. */
+    spi_write_data(0x65); // 16 bit colour over SPI
+#else
     spi_write_data(0x66); // 18 bit colour for SPI
+#endif
 
     spi_write_command(0xB0); // Interface Mode Control
     spi_write_data(0x00);

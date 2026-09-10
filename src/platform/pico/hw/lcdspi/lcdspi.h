@@ -4,7 +4,9 @@
 #include <hardware/spi.h>
 
 //#define LCD_SPI_SPEED   6000000
+#ifndef LCD_SPI_SPEED
 #define LCD_SPI_SPEED   25000000
+#endif
 //#define LCD_SPI_SPEED 50000000
 
 #define Pico_LCD_SCK 10 //

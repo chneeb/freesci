@@ -70,6 +70,12 @@ struct _pico_state {
     uint8_t        *visual[PICO_NVISUAL]; /* [0]=back/front (drawing+display) */
     /* priority buffer removed — uses engine's priority_map via s_shared_priority */
     uint8_t         palette[256][3]; /* R,G,B for each colour index */
+#ifdef PICO_LCD_16BIT
+    /* Same palette pre-packed as RGB565, rebuilt whenever palette[] changes.
+       Two wins per pixel in flush_region: one 16-bit load instead of three
+       byte loads, and two bytes on the wire instead of three. */
+    uint16_t        pal565[256];
+#endif
     gfx_pixmap_t   *static_bg;       /* current room's visual_map (PSRAM-backed) */
 #ifdef PICO_USE_STATIC_VISUAL
     int             static_dirty;    /* static buffer may predate static_bg */
@@ -287,6 +293,22 @@ static void poll_keyboard(struct _gfx_driver *drv)
 /* Display flush                                                        */
 /* ------------------------------------------------------------------ */
 
+#ifdef PICO_LCD_16BIT
+static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+    return (uint16_t)(((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3));
+}
+
+/* Rebuild the packed palette. Cheap (256 entries) and only on palette changes,
+   never per frame. */
+static void pico_rebuild_pal565(struct _pico_state *ps)
+{
+    for (int i = 0; i < 256; i++)
+        ps->pal565[i] = rgb565(ps->palette[i][0], ps->palette[i][1],
+                               ps->palette[i][2]);
+}
+#endif
+
 static void flush_region(struct _pico_state *ps,
                           int x, int y, int w, int h)
 {
@@ -296,6 +318,15 @@ static void flush_region(struct _pico_state *ps,
 
     for (int row = 0; row < h; row++) {
         const uint8_t *src = ps->visual[0] + (y + row) * PICO_XSIZE + x;
+#ifdef PICO_LCD_16BIT
+        /* RGB565, big-endian on the wire (panel is set to 0x3A=0x65). */
+        for (int col = 0; col < w; col++) {
+            uint16_t p = ps->pal565[src[col]];
+            line_buf[col * 2    ] = (uint8_t)(p >> 8);
+            line_buf[col * 2 + 1] = (uint8_t)(p & 0xff);
+        }
+        hw_send_spi(line_buf, w * 2);
+#else
         for (int col = 0; col < w; col++) {
             uint8_t idx = src[col];
             line_buf[col * 3    ] = ps->palette[idx][0];
@@ -303,6 +334,7 @@ static void flush_region(struct _pico_state *ps,
             line_buf[col * 3 + 2] = ps->palette[idx][2];
         }
         hw_send_spi(line_buf, w * 3);
+#endif
     }
     spi_finish(spi1);
     lcd_spi_raise_cs();
@@ -369,6 +401,9 @@ static int pico_init_specific(struct _gfx_driver *drv,
     };
     for (i = 0; i < 16; i++)
         memcpy(S->palette[i], ega16[i], 3);
+#ifdef PICO_LCD_16BIT
+    pico_rebuild_pal565(S);
+#endif
 
     drv->mode = gfx_new_mode(1, 1, 1,
                               0, 0, 0, 0,  /* masks/shifts (palette mode) */
@@ -424,6 +459,10 @@ void pico_setup_sci0_palette(gfx_driver_t *drv)
         ps->palette[i][0] = gfx_sci0_pic_colors[i].r;
         ps->palette[i][1] = gfx_sci0_pic_colors[i].g;
         ps->palette[i][2] = gfx_sci0_pic_colors[i].b;
+#ifdef PICO_LCD_16BIT
+    /* keep the packed palette in sync */
+    pico_rebuild_pal565(ps);
+#endif
     }
 }
 
@@ -1245,6 +1284,10 @@ static int pico_set_palette(struct _gfx_driver *drv,
     S->palette[index][0] = red;
     S->palette[index][1] = green;
     S->palette[index][2] = blue;
+#ifdef PICO_LCD_16BIT
+    /* keep the packed palette in sync */
+    pico_rebuild_pal565(S);
+#endif
     return GFX_OK;
 }
 

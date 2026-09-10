@@ -341,12 +341,63 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(FSCI_PROBE_SND=1)
     endif()
 
+    # ---- Target-INDEPENDENT knobs. These must sit at pico-block level, NOT
+    # inside if(PICO_PSRAM_MAPPED): they apply to both targets, and nesting them
+    # there silently gave the PIO build the fallback values baked into the C
+    # sources (133 MHz / 12500 kHz) while CMakeCache reported what was asked for.
+    # The runtime "[clk] ... requested N MHz" line exists to catch exactly that.
+    set(PICO_LCD_SPI_KHZ "25000" CACHE STRING "LCD SPI clock in kHz (25000 default)")
+    add_compile_definitions(LCD_SPI_SPEED=${PICO_LCD_SPI_KHZ}*1000)
+
+    # SD SPI clock in kHz. Resource loading includes SD reads, which the core
+    # clock does NOT speed up -- an independent lever. frank-quest runs 30000 on
+    # the same class of card without DMA (we have DMA). Init negotiates at 400 kHz
+    # first, so a card that cannot sustain it fails at mount, not silently.
+    set(PICO_SD_SPI_KHZ "30000" CACHE STRING "SD SPI clock in kHz (30000; 12500 was the old default)")
+    add_compile_definitions(PICO_SD_SPI_KHZ=${PICO_SD_SPI_KHZ})
+
+    # Core clock. 252 is device-confirmed on the MAPPED target (memory-mapped QMI
+    # PSRAM re-derives its own divisor from clk_sys, so it re-caps itself safely).
+    # PIO stays at 133: its bit-banged PIO-SPI PSRAM fails the boot smoke test at
+    # 252 even with the divisor scaled to hold the SPI at its proven rate, and
+    # again with an integer divisor to remove fractional-clock jitter. See
+    # CLAUDE.md "Overclocking". Overridable either way.
+    if(PICO_PSRAM_MAPPED)
+        set(PICO_SYS_CLOCK_MHZ "252" CACHE STRING "Core clock in MHz")
+    else()
+        set(PICO_SYS_CLOCK_MHZ "133" CACHE STRING "Core clock in MHz (PIO: 252 fails, see CLAUDE.md)")
+    endif()
+    add_compile_definitions(PICO_SYS_CLOCK_MHZ=${PICO_SYS_CLOCK_MHZ})
+
     # Sound defaults ON for the mapped-PSRAM target (where it works: engine in
     # PSRAM leaves ~110KB of SRAM, and music plays correctly) and OFF for the
     # PicoCalc PIO target (where it is marginal -- see CLAUDE.md "Sound on the
     # PIO target"). Explicitly overridable either way.
     if(PICO_PSRAM_MAPPED)
-        option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" ON)
+        # Core clock in MHz. 133 is the RP2350 power-on default. Raising it scales
+    # resource loading almost directly (decompression + decode + interpreter are
+    # CPU-bound); it does NOT affect display bandwidth. 252 needs no voltage
+    # change; >=378 needs vreg_set_voltage, which is not wired up here.
+    # WARNING: on the PIO target the PSRAM clkdiv is hard-coded to 1.0 (runs at
+    # full clk_sys), so raising this there overclocks the PSRAM chip -- scale
+    # that divisor first. The mapped target re-derives PSRAM timing from clk_sys.
+    # Display speedups, independent of the core clock (which does nothing for
+    # display bandwidth): 16-bit RGB565 over SPI instead of 18-bit/3-byte, plus
+    # 50 MHz SPI instead of 25. Together ~3x fewer bytes-per-second on the panel.
+    # Failure mode is obvious and recoverable (garbled/blank display, reflash).
+    # 16-bit RGB565 pixel format instead of 18-bit/3-byte. INCOMPLETE and OFF:
+    # switching the panel changes the byte count for EVERY writer, and only
+    # pico_driver.c's flush_region was converted -- pico_clear_screen_black still
+    # sends XSIZE*3, and lcdspi.c has ~66 of its own writes (chooser menu, text,
+    # the OOM/HardFault dumps). Device result: sheared/distorted display. The
+    # panel itself is fine with 0x65 (proven by shapones and frank-quest); the
+    # conversion just has to cover all writers before this is usable.
+    option(PICO_LCD_16BIT "16-bit pixel format (INCOMPLETE -- distorts, see comment)" OFF)
+    if(PICO_LCD_16BIT)
+        add_compile_definitions(PICO_LCD_16BIT=1)
+    endif()
+
+    option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" ON)
     else()
         option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" OFF)
     endif()

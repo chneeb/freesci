@@ -3361,6 +3361,51 @@ dying because a piece of MUSIC did not fit. **`pico_sram_alloc_soft` keeps sci_m
 reclaim are exactly the near-the-ceiling ones this targets. Not applied on mapped, where `sci_malloc` means
 the PSRAM heap.
 
+#### Overclocking and SD speed (device-tested 2026-09-10)
+
+Prompted by `PICO_PERFORMANCE_VS_FRANK_QUEST.md` (frank-quest runs the same hardware noticeably faster).
+Resource loading is SD read + decompression + decode: the first is SD-clock-bound, the rest CPU-bound.
+**Display bandwidth is a SEPARATE factor and does nothing for load times.**
+
+| knob | mapped (Pimoroni) | PIO (PicoCalc) |
+|---|---|---|
+| `PICO_SYS_CLOCK_MHZ` | **252** (default) — device-confirmed | **133** — 252 FAILS, see below |
+| `PICO_SD_SPI_KHZ` | **30000** (default) | **30000** (default) |
+
+- **SD 12500 -> 30000 kHz.** frank-quest runs 30 MHz on the same class of card with NO DMA; we have DMA.
+  Safe by construction: init negotiates at 400 kHz and only then switches, so a card that cannot sustain
+  it fails visibly at mount rather than corrupting data. This is the ONLY loading lever the core clock
+  does not touch.
+- **252 MHz on mapped: works.** Memory-mapped QMI PSRAM re-derives its divisor from `clock_get_hz(clk_sys)`
+  (`psram_mapped.c`), so it re-caps itself at any clock. `psram_set_flash_timings()` must be passed the NEW
+  target -- it is parameterised by the system clock, and getting that wrong corrupts XIP (dead before
+  serial, TFT noise). Note PSRAM does NOT get faster, so expect sub-linear gains on this target: scripts,
+  objects and the resource cache all live there.
+- **252 MHz on PIO: RULED OUT (do not retry as-is).** The bit-banged PIO-SPI PSRAM fails the boot smoke
+  test (`[psram] FAIL: pattern mismatch`). Tried and failed: (a) scaling the clkdiv to hold the SPI at its
+  133 MHz-equivalent rate (252/133 = 1.895), and (b) an INTEGER divisor of 2 (126 MHz) to remove PIO
+  fractional-divider jitter. The driver header's "clkdiv >1.0 needed above 280 MHz" is **RP2040** guidance
+  and does NOT transfer to RP2350 + this PCB/PSRAM -- do not quote it as licence to overclock.
+  Still unaddressed if anyone retries: `psram_set_flash_timings()` is `#ifdef PICO_PSRAM_MAPPED`, so PIO's
+  flash timing is never adjusted at all, and that may itself be the (or a) cause.
+  Payoff is capped anyway: PSRAM would stay pinned at its proven rate, and PIO's render path is heavily
+  PSRAM-bound (per-row priority readback, ~96KB offload per room), so a CPU-only gain is diluted.
+  **The clkdiv is now derived from the clock regardless** (`pico_main.c`), computing to exactly 1 at 133,
+  so the default build is unchanged.
+
+**BUILD-SYSTEM TRAP that cost a device cycle.** These knobs were first added INSIDE the
+`if(PICO_PSRAM_MAPPED)` branch that selects the sound default, so on PIO they never executed and the C-side
+`#ifndef` fallbacks silently supplied 133/12500 -- while `CMakeCache.txt` reported 252/30000. A build that
+failed with "PICO_SD_SPI_KHZ undeclared" was the real warning, and adding the `#ifndef` fallback turned that
+loud error into a silent wrong value. The `[clk] sys_clk = ... (requested N MHz)` line printed at the
+launch point (after the chooser, so it is reachable with uf2loader attached) exists to catch this: it
+reports the ACHIEVED clock and flags a fallback explicitly. **Trust that line, not CMakeCache.**
+
+**16-bit display (`PICO_LCD_16BIT`) is OFF and INCOMPLETE** -- see its CMake comment. The panel accepts
+`0x65` fine; the problem is that only `flush_region` was converted, while `pico_clear_screen_black` and
+~66 write sites in `lcdspi.c` (chooser, text, the OOM/HardFault dumps) still push 3 bytes/pixel. Device
+result: sheared display. Completing it across all writers is worth ~2x display bandwidth.
+
 #### PARKED / NEXT STEPS (as of 2026-09-05, end of the sound session)
 
 Ordered roughly by value. Nothing here is in progress.
