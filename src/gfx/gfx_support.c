@@ -118,13 +118,60 @@ gfx_draw_box_buffer(byte *buffer, int linewidth, rect_t zone, int color)
 }
 
 
+static void
+gfx_draw_box_buffer_packed(byte *buffer, int linewidth, rect_t zone, int color)
+{
+  /* Nibble-packed (2 px/byte) twin of gfx_draw_box_buffer. Safe to write by
+     hand ONLY because a rectangle has no pixel-SELECTION ambiguity -- it covers
+     exactly the same pixels by definition. Traversals (lines, ellipses, fills)
+     must NOT be duplicated this way: the Pico ctl_draw_line was once
+     hand-written as "a correct line" and picked different pixels from the
+     desktop midpoint DDA on ~32% of segments, opening a one-pixel gap that a
+     flood fill leaked through (see CLAUDE.md). Parameterise the store, never
+     re-implement the walk. */
+  int i, x;
+  byte v = (byte)(color & 0x0f);
+  byte pair = (byte)(v | (v << 4));
+
+  if (zone.xl <= 0 || zone.yl <= 0)
+    return;
+
+  for (i = 0; i < zone.yl; i++) {
+    int row = (zone.y + i) * linewidth;
+    x = zone.x;
+
+    /* leading odd pixel: high nibble of a shared byte */
+    if (x & 1) {
+      byte *b = buffer + ((row + x) >> 1);
+      *b = (*b & 0x0f) | (v << 4);
+      x++;
+    }
+    /* whole bytes */
+    if (zone.x + zone.xl - x >= 2) {
+      int nbytes = (zone.x + zone.xl - x) >> 1;
+      memset(buffer + ((row + x) >> 1), pair, nbytes);
+      x += nbytes << 1;
+    }
+    /* trailing odd pixel: low nibble */
+    if (x < zone.x + zone.xl) {
+      byte *b = buffer + ((row + x) >> 1);
+      *b = (*b & 0xf0) | v;
+    }
+  }
+}
+
 void
 gfx_draw_box_pixmap_i(gfx_pixmap_t *pxm, rect_t box, int color)
 {
   if (!pxm->index_data) return;
   gfx_clip_box_basic(&box, pxm->index_xl - 1, pxm->index_yl - 1);
 
-  gfx_draw_box_buffer(pxm->index_data, pxm->index_xl, box, color);
+  /* Branch in the WRAPPER, on the pixmap, so desktop pixmaps (nibble_packed
+     always 0) take the byte path untouched and there is one clipping rule. */
+  if (pxm->nibble_packed)
+    gfx_draw_box_buffer_packed(pxm->index_data, pxm->index_xl, box, color);
+  else
+    gfx_draw_box_buffer(pxm->index_data, pxm->index_xl, box, color);
 }
 
 

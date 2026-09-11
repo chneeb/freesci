@@ -347,11 +347,21 @@ void
 gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
 {
 	if (pic->visual_map->index_data) {
-		memset(pic->visual_map->index_data, 0x00,
-		       320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact);
-		memset(pic->visual_map->index_data
-		       + 320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact,
-		       0xff, pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size));
+		int bar = 320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact;
+		int rest = pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size);
+#ifdef HAVE_PICO
+		if (pic->visual_map->nibble_packed) {
+			/* 2 px/byte. The FILL VALUES are unchanged by packing and that is
+			   not luck: under D16 the 0xff below the titlebar is reduced to
+			   index 0x0f (white), and two 0x0f nibbles are again 0xff; 0x00
+			   likewise. Only the byte counts halve. xfact==yfact==1 on the
+			   packed (Pico) path, so the halving is exact. */
+			bar >>= 1;
+			rest >>= 1;
+		}
+#endif
+		memset(pic->visual_map->index_data, 0x00, bar);
+		memset(pic->visual_map->index_data + bar, 0xff, rest);
 	}
 	if (pic->priority_map->index_data) {
 #ifdef HAVE_PICO

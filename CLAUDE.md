@@ -3502,14 +3502,41 @@ would slow the hot flush loop). So this is a PIO-only lever.
   not counted -- do not read this as all-SCI0 coverage.) This is the assumption the entire packing plan rests
   on, and packing a buffer that can exceed 15 corrupts the display silently, so it was worth proving.
 
-**PHASE 2 SCOPE, surveyed (not started).** The visual writers that must learn nibble packing, from
-`sci_pic_0.c` alone: `gfx_draw_box_pixmap_i` (2 sites), `gfx_draw_line_pixmap_i`, `_gfxr_auxplot_brush`
-(2 sites), `_gfxr_fill_ellipse`, the flood-fill core, the `memset` clears, the dither pass itself, and the
-artifact-removal copy -- plus `sci_view_0.c`'s cel RLE, plus ~10 driver sites. **Several go through SHARED
-helpers the desktop also uses** (`gfx_draw_box_pixmap_i`, `gfx_draw_line_pixmap_i`), so they cannot simply be
-rewritten in place. That is materially more surface than the control/priority packing (`ctl_set`/`ctl_fill`)
-that serves as the pattern, and it is why the next artifact should be a `tests/picodiff`-style packed-vs-
-unpacked differ BEFORE any writer is touched.
+**PHASE 2 STARTED (2026-09-11). Shape decision + first two writers + the measurement.**
+
+**THE SHAPE DECISION: branch on `pxm->nibble_packed` in the WRAPPER, and never hand-write a second
+traversal.** `gfx_draw_box_pixmap_i` / `gfx_draw_line_pixmap_i` are thin wrappers over `_buffer` functions,
+so the branch goes in the wrapper: desktop pixmaps have `nibble_packed == 0` and take the byte path
+untouched, and there is ONE clipping rule. For the actual writing, parameterise the STORE, never
+re-implement the walk -- `gfx_support.c` already does this for the crossblits (`#include "gfx_crossblit.c"`
+twice with different `FUNCTION_NAME`/`BYTESPP`). **This is not stylistic.** The Pico `ctl_draw_line` was once
+hand-written as "a correct line" and picked different pixels from the desktop midpoint DDA on ~32% of
+segments, opening a one-pixel gap a flood fill leaked through. Duplicating a traversal duplicates its
+pixel-SELECTION, which is exactly where the last bug of this kind came from. A rectangle is the one safe
+exception -- it has no selection ambiguity -- which is why `gfx_draw_box_buffer_packed` is hand-written and
+lines/ellipses/fills must not be.
+
+**Converted so far: the `gfxr_clear_pic0` visual clear, and `gfx_draw_box_pixmap_i`.** The clear's FILL
+VALUES are unchanged by packing and that is not luck: under D16 the `0xff` below the titlebar reduces to
+index `0x0f`, and two `0x0f` nibbles are again `0xff`. Only the byte counts halve.
+
+**THE DIFF COUNT IS NOT A PROGRESS BAR -- do not read it as one.** With packing forced on (`PACK=1`) and
+nothing converted, SQ3 pic 2 showed 44,752/64,000 differing. After converting the clear it went **UP** to
+45,132, and that is correct behaviour: the clear now fills the whole packed buffer with white (15) where
+before it filled half the buffer and left the rest 0, so more pixels now disagree with the un-converted
+drawing writers. The metric is "**must reach 0**", never "must decrease monotonically".
+
+**The regression guard that DOES have to hold every time: with packing OFF, all three games must stay at 0
+differing** (sq3 115 / pq2 78 / kq4 150 pics). That is what proves a conversion did not disturb the byte
+path that desktop and today's PIO firmware actually use. It held for these two writers.
+
+Cost so far: PIO `.text` +256 B for the packed box fill (it lives in shared `gfx_support.c`, ungated, and is
+dead code until something sets `nibble_packed` on a visual map); `.bss` unchanged at 17,608.
+
+**REMAINING WRITERS:** `gfx_draw_line_pixmap_i` (parameterise `gfx_draw_line_buffer`'s store, do NOT copy the
+DDA), `_gfxr_auxplot_brush` (2 sites), `_gfxr_fill_ellipse`, the flood-fill core, the dither pass itself, the
+artifact-removal copy, `sci_view_0.c`'s cel RLE, and ~10 driver sites. Then flip the real allocation to
+half-size with `nibble_packed = 1` and expect `PACK=1` to read 0.
 
 **RISK -- this is the same shape as the 16-bit LCD attempt that failed, four times bigger.** That broke
 because one writer was converted out of many; here there are ~10 in the driver PLUS shared decode paths, and

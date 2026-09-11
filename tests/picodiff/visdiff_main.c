@@ -97,6 +97,12 @@ run(gfx_mode_t *mode, int picnum, int verbose)
 	   correct for both formats -- a packed map simply uses the first half. */
 	pico_gfxr_init_static_palette();
 	p = pico_gfxr_init_pic(mode, res->id, 0);
+	/* PACK=1 turns the Pico side's visual map into a nibble-packed buffer
+	   BEFORE the writers understand it. The diff count is then a direct
+	   measure of how much of phase 2 is left: it starts near 100% and must
+	   reach 0 when every writer has been converted. */
+	if (getenv("PACK"))
+		p->visual_map->nibble_packed = 1;
 	p->visual_map->index_data   = calloc(W * H, 1);
 	p->priority_map->index_data = calloc(W * H, 1);
 	p->aux_map                  = calloc(W * H, 1);
@@ -116,11 +122,9 @@ run(gfx_mode_t *mode, int picnum, int verbose)
 	}
 
 	if (diffs || verbose)
-		printf("  pic %-4d %s  %d/%d differ%s%s\n", picnum,
+		printf("  pic %-4d %s  %d/%d differ\n", picnum,
 		       p->visual_map->nibble_packed ? "packed  " : "unpacked",
-		       diffs, n,
-		       first >= 0 ? "  first at " : "",
-		       first >= 0 ? "" : "");
+		       diffs, n);
 	if (first >= 0)
 		printf("           first at (%d,%d): desktop %d vs pico %d\n",
 		       first % W, first / W,
