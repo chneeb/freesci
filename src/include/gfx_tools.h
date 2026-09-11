@@ -290,4 +290,15 @@ alpha_mvi_crossblit_32_P(byte *dest, byte *src, int bytes_per_dest_line, int byt
 #endif /* __alpha__ */
 
 
+/* D16 dither selection, extracted from gfxr_dither_pic0's toggle so every packed
+   writer applies the IDENTICAL rule. With GFXR_DITHER_PATTERN_1 the `selection`
+   flag flips on every pixel AND at the end of every row, i.e. it is (x+y)&1:
+   even takes the low nibble of the dither pair, odd the high one.
+
+   This is the structural consequence of packing: a 4bpp buffer has no spare byte
+   to dither afterwards, so DITHERING MOVES FROM A POST-PASS INTO EVERY STORE.
+   Any writer that packs must use this; the post-pass must then skip the map. */
+#define GFX_D16_SELECT(color, x, y) \
+	((byte)((((x) + (y)) & 1) ? (((color) >> 4) & 0x0f) : ((color) & 0x0f)))
+
 #endif /* !_GFX_TOOLS_H_ */

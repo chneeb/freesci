@@ -61,6 +61,26 @@ int gfx_crossblit_alpha_threshold = 128;
 #undef PIXELWIDTH
 #undef DRAWLINE_FUNC
 
+/* Nibble-packed (2 px/byte) line, for the Pico 4bpp visual buffer. Same source,
+   same DDA, same pixels -- ONLY the store differs, which is the whole point:
+   a hand-written packed line would be free to disagree with the byte version
+   about which pixels a segment covers, and that is precisely the bug class this
+   avoids. `linewidth` stays in PIXELS; the byte offset is derived here. */
+#define DRAWLINE_FUNC _gfx_draw_line_buffer_packed
+#define PIXELWIDTH 1
+#define PLOT(X, Y)                                                        \
+	do {                                                              \
+		int _i = linewidth * (Y) + (X);                           \
+		byte *_b = buffer + (_i >> 1);                            \
+		byte _v = GFX_D16_SELECT(color, (X), (Y));                \
+		*_b = (_i & 1) ? ((*_b & 0x0f) | (byte)(_v << 4))         \
+			       : ((*_b & 0xf0) | _v);                     \
+	} while (0)
+#include "gfx_line.c"
+#undef PLOT
+#undef PIXELWIDTH
+#undef DRAWLINE_FUNC
+
 inline void
 gfx_draw_line_buffer(byte *buffer, int linewidth, int pixelwidth, point_t start, point_t end, unsigned int color)
 {
@@ -96,7 +116,13 @@ void
 gfx_draw_line_pixmap_i(gfx_pixmap_t *pxm, point_t start, point_t end, int color)
 {
 	if (!pxm->index_data) return;
-	gfx_draw_line_buffer(pxm->index_data, pxm->index_xl, 1, start, end, color);
+
+	/* Branch in the wrapper, on the pixmap: desktop pixmaps are never packed. */
+	if (pxm->nibble_packed)
+		_gfx_draw_line_buffer_packed(pxm->index_data, pxm->index_xl,
+					     start, end, color);
+	else
+		gfx_draw_line_buffer(pxm->index_data, pxm->index_xl, 1, start, end, color);
 }
 
 
@@ -130,20 +156,26 @@ gfx_draw_box_buffer_packed(byte *buffer, int linewidth, rect_t zone, int color)
      flood fill leaked through (see CLAUDE.md). Parameterise the store, never
      re-implement the walk. */
   int i, x;
-  byte v = (byte)(color & 0x0f);
-  byte pair = (byte)(v | (v << 4));
+  byte lo = (byte)(color & 0x0f);
+  byte hi = (byte)((color >> 4) & 0x0f);
 
   if (zone.xl <= 0 || zone.yl <= 0)
     return;
 
   for (i = 0; i < zone.yl; i++) {
-    int row = (zone.y + i) * linewidth;
+    int y = zone.y + i;
+    int row = y * linewidth;
+    /* Each packed byte holds pixels (even x, odd x) -- linewidth is even -- and
+       D16 selection is (x+y)&1, so the fill byte is constant along a row but
+       SWAPS between even and odd rows. */
+    byte pair = (y & 1) ? (byte)(hi | (lo << 4)) : (byte)(lo | (hi << 4));
+
     x = zone.x;
 
     /* leading odd pixel: high nibble of a shared byte */
     if (x & 1) {
       byte *b = buffer + ((row + x) >> 1);
-      *b = (*b & 0x0f) | (v << 4);
+      *b = (*b & 0x0f) | (byte)(GFX_D16_SELECT(color, x, y) << 4);
       x++;
     }
     /* whole bytes */
@@ -155,7 +187,7 @@ gfx_draw_box_buffer_packed(byte *buffer, int linewidth, rect_t zone, int color)
     /* trailing odd pixel: low nibble */
     if (x < zone.x + zone.xl) {
       byte *b = buffer + ((row + x) >> 1);
-      *b = (*b & 0xf0) | v;
+      *b = (*b & 0xf0) | GFX_D16_SELECT(color, x, y);
     }
   }
 }

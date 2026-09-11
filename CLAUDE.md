@@ -3533,10 +3533,34 @@ path that desktop and today's PIO firmware actually use. It held for these two w
 Cost so far: PIO `.text` +256 B for the packed box fill (it lives in shared `gfx_support.c`, ungated, and is
 dead code until something sets `nibble_packed` on a visual map); `.bss` unchanged at 17,608.
 
-**REMAINING WRITERS:** `gfx_draw_line_pixmap_i` (parameterise `gfx_draw_line_buffer`'s store, do NOT copy the
-DDA), `_gfxr_auxplot_brush` (2 sites), `_gfxr_fill_ellipse`, the flood-fill core, the dither pass itself, the
-artifact-removal copy, `sci_view_0.c`'s cel RLE, and ~10 driver sites. Then flip the real allocation to
-half-size with `nibble_packed = 1` and expect `PACK=1` to read 0.
+**KEY STRUCTURAL FINDING (2026-09-11): packing MOVES DITHERING FROM A POST-PASS INTO EVERY STORE.** The
+decoder writes dither PAIRS (two EGA indices in one byte) and `gfxr_dither_pic0` collapses each byte to one
+nibble afterwards. A 4bpp buffer has no spare byte to collapse later, so every packed writer must apply the
+D16 selection AT STORE TIME -- and the post-pass must then skip the map or it would dither twice.
+
+The rule, extracted from `gfxr_dither_pic0`'s toggle and now shared as `GFX_D16_SELECT` (`gfx_tools.h`) so
+every writer applies the identical one: with `GFXR_DITHER_PATTERN_1` the `selection` flag flips on every
+pixel AND at the end of every row, i.e. it is **`(x + y) & 1`** -- even takes the LOW nibble of the pair,
+odd the HIGH one. The first two packed stores took the low nibble unconditionally and were therefore wrong
+for half the pixels; caught offline, fixed, and it is why the shared macro exists rather than the rule being
+re-derived per writer.
+
+A consequence for the packed box fill: each packed byte holds pixels (even x, odd x) and `linewidth` is
+even, so the fill byte is constant along a row but **SWAPS between even and odd rows**.
+
+**`gfx_draw_line_pixmap_i` converted, and it validates the shape decision.** `gfx_line.c` is now included a
+FIFTH time from `gfx_support.c` with only a different `PLOT` macro -- same source, same DDA, same pixels,
+only the store differs. `PLOT` defaults to the original `memcpy`, so the four existing inclusions are
+byte-for-byte unchanged. Packed diffs on SQ3 pic 2 fell 45,132 -> 39,517.
+
+**REMAINING, and the fill is harder than it looks: `_gfxr_fill_ellipse` and the FLOOD FILL both READ the
+visual buffer** (`test_map = pic->visual_map->index_data`) to decide boundaries, so packing needs packed
+READS there too, not just writes -- and the fill is the dominant writer, which is why the diff count is
+still ~39k. Then `_gfxr_auxplot_brush` (2 sites), the dither pass (must become a no-op for a packed map),
+the artifact-removal copy, `sci_view_0.c`'s cel RLE, and ~10 driver sites. Finally flip the real allocation
+to half-size with `nibble_packed = 1` and expect `PACK=1` to read 0.
+
+
 
 **RISK -- this is the same shape as the 16-bit LCD attempt that failed, four times bigger.** That broke
 because one writer was converted out of many; here there are ~10 in the driver PLUS shared decode paths, and
