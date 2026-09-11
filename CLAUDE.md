@@ -3474,6 +3474,43 @@ would slow the hot flush loop). So this is a PIO-only lever.
 4. **The borrow paths**: parse-time PSRAM borrow sizes, and the decode-buffer reuse (`operations.c:2401`
    hands visual[0] to the decoder as `visual_map->index_data`).
 
+**PHASE 1 DONE (2026-09-11).**
+
+- **The D16 look is ACCEPTED on device, at zero cost.** `pic0_dither_mode` is already a config-file option
+  (`config.l:244`) and Pico already reads `0:/freesci.cfg`, so `pic0_dither_mode = d16` answered the visual
+  question with NO firmware change at all. Device verdict: "can't really tell if it did anything" with
+  `Reading configuration...` confirmed in the log -- i.e. indistinguishable, exactly as the 96%-identical
+  measurement predicted for SQ3. **Always settle the cheap visual question before the expensive packing
+  work.**
+- **Correction to the table above:** the shipped default is `GFXR_DITHER_MODE_D256` (`config.l:596`), not
+  F256, so the measured F256-vs-D16 figures are approximately, not exactly, the right baseline. D256 keeps
+  the 256-entry palette and only alternates nibble order, which is why the on-device delta is even smaller.
+- **`PICO_DITHER_D16` (CMake, default OFF) FORCES the mode** rather than defaulting it -- deliberately. Once
+  the buffer is packed, a stray `pic0_dither_mode = d256` on the SD card would write values >15 into nibbles
+  and silently corrupt the display. A packed buffer and a runtime-selectable dither mode cannot coexist. It
+  overrides both use sites (`sci_resmgr.c` line ~429 and the pic cache key at line ~58) so they cannot
+  disagree.
+- **PRECONDITION PROVEN, not assumed** (`tests/d16check.c`): decoding EVERY pic of the three SCI0 games we
+  actually run through the shared engine path with D16 --
+
+  ```
+  == 343 pics across 3 games; 0 violate the 0..15 invariant ==
+     worst-case distinct indices in one pic: 16 (of 16 representable)
+  ```
+
+  SQ3 115, PQ2 78, KQ4 150 pics, zero above 15. (The other games on disk crash or hang the harness and were
+  not counted -- do not read this as all-SCI0 coverage.) This is the assumption the entire packing plan rests
+  on, and packing a buffer that can exceed 15 corrupts the display silently, so it was worth proving.
+
+**PHASE 2 SCOPE, surveyed (not started).** The visual writers that must learn nibble packing, from
+`sci_pic_0.c` alone: `gfx_draw_box_pixmap_i` (2 sites), `gfx_draw_line_pixmap_i`, `_gfxr_auxplot_brush`
+(2 sites), `_gfxr_fill_ellipse`, the flood-fill core, the `memset` clears, the dither pass itself, and the
+artifact-removal copy -- plus `sci_view_0.c`'s cel RLE, plus ~10 driver sites. **Several go through SHARED
+helpers the desktop also uses** (`gfx_draw_box_pixmap_i`, `gfx_draw_line_pixmap_i`), so they cannot simply be
+rewritten in place. That is materially more surface than the control/priority packing (`ctl_set`/`ctl_fill`)
+that serves as the pattern, and it is why the next artifact should be a `tests/picodiff`-style packed-vs-
+unpacked differ BEFORE any writer is touched.
+
 **RISK -- this is the same shape as the 16-bit LCD attempt that failed, four times bigger.** That broke
 because one writer was converted out of many; here there are ~10 in the driver PLUS shared decode paths, and
 any missed writer shears the image. Mitigation: phases 1-2 are fully offline-verifiable, so only phase 3

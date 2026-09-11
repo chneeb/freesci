@@ -347,6 +347,23 @@ if(PLATFORM STREQUAL "pico")
     # GNF-build transient peak ([vocab] lines), then frees it and runs the game
     # parser-less as usual. OFF by default; flip on for one flash, read pico.log,
     # flip off. See CLAUDE.md "Pico roadmap #1".
+    # 4bpp groundwork. SCI0's visual buffer is 8bpp because each byte holds a
+    # DITHER PAIR (two EGA indices blended by INTERCOL, hence the 256-entry
+    # gfx_sci0_pic_colors). GFXR_DITHER_MODE_D16 -- "Sierra SCI style", what the
+    # original hardware showed -- collapses that to ONE index per pixel with a
+    # spatial checkerboard, so every value is 0..15 and the buffer can eventually
+    # be nibble-packed (64KB -> 32KB, PIO-only value; see CLAUDE.md).
+    #
+    # FORCES the mode rather than defaulting it, deliberately: pic0_dither_mode is
+    # a config-file option (config.l), and once the buffer is packed a stray
+    # "pic0_dither_mode = d256" on the SD card would write values >15 into nibbles
+    # and silently corrupt the display. A packed buffer and a runtime-selectable
+    # dither mode cannot coexist.
+    option(PICO_DITHER_D16 "Pico: force D16 dithering (one index per pixel, 0..15)" OFF)
+    if(PICO_DITHER_D16)
+        add_compile_definitions(PICO_DITHER_D16=1)
+    endif()
+
     option(PICO_VOCAB_PROBE "Measure text-parser vocab SRAM cost on Pico" OFF)
     if(PICO_VOCAB_PROBE)
         add_compile_definitions(PICO_VOCAB_PROBE=1)

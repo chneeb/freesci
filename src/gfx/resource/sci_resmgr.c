@@ -55,7 +55,11 @@ gfxr_interpreter_options_hash(gfx_resource_type_t type, int version,
 			return options->pic_port_bounds.y;
 		else
 			return (options->pic0_unscaled)? 0x10000 :
+#ifdef PICO_DITHER_D16
+				(GFXR_DITHER_MODE_D16 << 12)
+#else
 				(options->pic0_dither_mode << 12)
+#endif
 				| (options->pic0_dither_pattern << 8)
 				| (options->pic0_brush_mode << 4)
 				| (options->pic0_line_mode);
@@ -426,7 +430,14 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 
 		memcpy(scaled_pic->undithered_buffer, scaled_pic->visual_map->index_data, scaled_pic->undithered_buffer_size);
 
+#ifdef PICO_DITHER_D16
+		/* Forced, not defaulted -- see PICO_DITHER_D16 in CMakeLists.txt.
+		   The cache key below folds pic0_dither_mode in, so it is overridden
+		   there too and the two cannot disagree. */
+		gfxr_dither_pic0(scaled_pic, GFXR_DITHER_MODE_D16, state->options->pic0_dither_pattern);
+#else
 		gfxr_dither_pic0(scaled_pic, state->options->pic0_dither_mode, state->options->pic0_dither_pattern);
+#endif
 #endif
 	}
 
