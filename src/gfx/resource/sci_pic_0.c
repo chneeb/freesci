@@ -2282,6 +2282,16 @@ gfxr_dither_pic0(gfxr_pic_t *pic, int dmode, int pattern)
 	if (dmode == GFXR_DITHER_MODE_F256)
 		return; /* Nothing to do */
 
+#ifdef HAVE_PICO
+	/* A packed visual map was ALREADY dithered, one pixel at a time, by the
+	   writers (GFX_D16_SELECT at store time) -- a 4bpp buffer has no spare byte
+	   for a post-pass to collapse. Walking it again here would treat each byte
+	   as a dither pair and re-select from two unrelated pixels, destroying it.
+	   This skip is the other half of "dithering moves into the store". */
+	if (pic->visual_map->nibble_packed)
+		return;
+#endif
+
 	if (dmode == GFXR_DITHER_MODE_D16) { /* Limit to 16 colors */
 		pic->visual_map->colors = gfx_sci0_image_colors[sci0_palette];
 		pic->visual_map->colors_nr = GFX_SCI0_IMAGE_COLORS_NR;

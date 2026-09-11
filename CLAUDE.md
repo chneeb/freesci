@@ -3553,12 +3553,33 @@ FIFTH time from `gfx_support.c` with only a different `PLOT` macro -- same sourc
 only the store differs. `PLOT` defaults to the original `memcpy`, so the four existing inclusions are
 byte-for-byte unchanged. Packed diffs on SQ3 pic 2 fell 45,132 -> 39,517.
 
-**REMAINING, and the fill is harder than it looks: `_gfxr_fill_ellipse` and the FLOOD FILL both READ the
-visual buffer** (`test_map = pic->visual_map->index_data`) to decide boundaries, so packing needs packed
-READS there too, not just writes -- and the fill is the dominant writer, which is why the diff count is
-still ~39k. Then `_gfxr_auxplot_brush` (2 sites), the dither pass (must become a no-op for a packed map),
-the artifact-removal copy, `sci_view_0.c`'s cel RLE, and ~10 driver sites. Finally flip the real allocation
-to half-size with `nibble_packed = 1` and expect `PACK=1` to read 0.
+**THE FLOOD FILL AND THE DITHER PASS ARE CONVERTED, and both taught something the survey missed.**
+Packed diffs on SQ3 pic 2: **39,517 -> 23,970 -> 1,414 of 64,000 (97.8% correct)**; pic 3 1,355.
+
+1. **The fill's BOUNDARY TEST reads dither pairs, and packing made it never terminate.** `legalmask = 0x0ff0`
+   checks the HIGH nibble on odd coordinates and the LOW one on even -- it is reading the two halves of one
+   pixel's PAIR. Packed, that byte holds two DIFFERENT pixels, so the test reads nonsense and the fill
+   recursed **~52,000 frames deep into a stack overflow**. Fixed by routing it through the `bounds_packed` /
+   `ctl_get` path that already existed for the packed PRIORITY map, with nibble-wide masks
+   (`legalcolor = 0x0f`, `legalmask = 0x0f0f`): `ctl_get` returns the pixel's OWN nibble, so both coordinate
+   parities want the same mask and the background to compare against is index 0x0f, not the 0xff pair.
+   **A crash, not a wrong picture -- so "it segfaulted" was a CORRECTNESS signal here, not a bad pointer;
+   check recursion depth before suspecting the new code's addressing.**
+2. **The dither post-pass had to be SKIPPED for packed maps** -- the other half of "dithering moves into the
+   store". A packed map was already dithered per-pixel by the writers; walking it again treats each byte as
+   a pair and re-selects from two unrelated pixels. This alone took 23,970 -> 1,414.
+
+The fill's span write reuses `gfx_d16_fill_span_packed`, shared with the packed box, so the (x+y)&1 parity
+rule has exactly one implementation.
+
+**REMAINING: `_gfxr_auxplot_brush` (2 sites) and `_gfxr_fill_ellipse`** -- the ~1,400 residual pixels are the
+patterned/textured bits. Then `sci_view_0.c`'s cel RLE, the artifact-removal copy, and ~10 driver sites,
+before flipping the real allocation to half-size.
+
+**Coverage limit, to be explicit:** `visdiff` covers pic decode only. View cel decode, runtime drawing
+(dialog fills, kGraph lines) and the entire DRIVER half -- flush, blit, grab/restore, bake -- have NO offline
+coverage, and the driver half is exactly where the 16-bit LCD attempt died. Extend the harness (a viewdiff,
+and a packed-buffer-to-PNG renderer) before trusting those, or accept device testing for them.
 
 
 

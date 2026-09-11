@@ -201,6 +201,17 @@ FILL_FUNCTION_RECURSIVE(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy, 
 #endif
 
 		if (drawenable & GFX_MASK_VISUAL)
+#ifdef HAVE_PICO
+			if (pic->visual_map->nibble_packed)
+				/* D16-aware: `color` is a dither PAIR, so unlike the
+				   priority ctl_fill below the nibble alternates with
+				   (x+y)&1 -- see gfx_d16_fill_span_packed. */
+				gfx_d16_fill_span_packed(pic->visual_map->index_data,
+							 ytotal + xl, xr - xl + 1,
+							 color, xl,
+							 ytotal / pic->visual_map->index_xl);
+			else
+#endif
 			memset(pic->visual_map->index_data + ytotal + xl, color, xr - xl + 1);
 
 		if (drawenable & GFX_MASK_PRIORITY)
@@ -360,6 +371,24 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 		legalmask = 0x0ff0;
 		legalcolor = 0xff;
 #endif
+#ifdef HAVE_PICO
+		/* A PACKED visual map breaks the test above, and not subtly: legalmask
+		   0x0ff0 checks the HIGH nibble on odd coordinates and the LOW one on
+		   even, i.e. it reads the two halves of a DITHER PAIR for one pixel.
+		   Packed, that byte holds two DIFFERENT pixels, so the test reads
+		   nonsense, the fill never terminates, and it recurses ~52,000 frames
+		   deep into a stack overflow (observed).
+
+		   Routed through the existing bounds_packed/ctl_get path instead:
+		   ctl_get returns the pixel's OWN nibble, so both coordinate parities
+		   want the same nibble-wide mask, and the background to compare
+		   against is index 0x0f (white) rather than the 0xff pair. */
+		if (pic->visual_map->nibble_packed) {
+			bounds_packed = 1;
+			legalcolor = 0x0f;
+			legalmask = 0x0f0f;
+		}
+#endif
 	} else if (drawenable & GFX_MASK_PRIORITY) {
 		bounds = pic->priority_map->index_data;
 #ifdef HAVE_PICO
@@ -422,6 +451,17 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 		xr = x;
 
 		if (drawenable & GFX_MASK_VISUAL)
+#ifdef HAVE_PICO
+			if (pic->visual_map->nibble_packed)
+				/* D16-aware: `color` is a dither PAIR, so unlike the
+				   priority ctl_fill below the nibble alternates with
+				   (x+y)&1 -- see gfx_d16_fill_span_packed. */
+				gfx_d16_fill_span_packed(pic->visual_map->index_data,
+							 ytotal + xl, xr - xl + 1,
+							 color, xl,
+							 ytotal / pic->visual_map->index_xl);
+			else
+#endif
 			memset(pic->visual_map->index_data + ytotal + xl, color, xr - xl + 1);
 
 		if (drawenable & GFX_MASK_PRIORITY)

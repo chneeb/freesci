@@ -298,6 +298,10 @@ alpha_mvi_crossblit_32_P(byte *dest, byte *src, int bytes_per_dest_line, int byt
    This is the structural consequence of packing: a 4bpp buffer has no spare byte
    to dither afterwards, so DITHERING MOVES FROM A POST-PASS INTO EVERY STORE.
    Any writer that packs must use this; the post-pass must then skip the map. */
+void
+gfx_d16_fill_span_packed(byte *buffer, int first, int count,
+			 unsigned int color, int x, int y);
+
 #define GFX_D16_SELECT(color, x, y) \
 	((byte)((((x) + (y)) & 1) ? (((color) >> 4) & 0x0f) : ((color) & 0x0f)))
 

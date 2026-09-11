@@ -144,6 +144,45 @@ gfx_draw_box_buffer(byte *buffer, int linewidth, rect_t zone, int color)
 }
 
 
+/* Fill `count` pixels of a nibble-packed D16 buffer starting at pixel index
+   `first`, whose coordinates are (x, y). ONE implementation of the parity rule,
+   shared by the packed box and the flood fill's span write -- the nibble a
+   pixel takes from the dither pair is GFX_D16_SELECT(color, x, y), and getting
+   that subtly wrong in two places is exactly the bug this centralises away.
+
+   Each packed byte holds pixels (even x, odd x) because linewidth is even, so
+   the fill byte is CONSTANT along a row but SWAPS between even and odd rows. */
+void
+gfx_d16_fill_span_packed(byte *buffer, int first, int count,
+			 unsigned int color, int x, int y)
+{
+  byte lo = (byte)(color & 0x0f);
+  byte hi = (byte)((color >> 4) & 0x0f);
+  byte pair = (y & 1) ? (byte)(hi | (lo << 4)) : (byte)(lo | (hi << 4));
+  int i = first, end = first + count;
+
+  if (count <= 0)
+    return;
+
+  /* leading odd pixel: shares a byte with its predecessor */
+  if (i & 1) {
+    byte *b = buffer + (i >> 1);
+    *b = (*b & 0x0f) | (byte)(GFX_D16_SELECT(color, x, y) << 4);
+    i++; x++;
+  }
+  /* whole bytes */
+  if (end - i >= 2) {
+    int nbytes = (end - i) >> 1;
+    memset(buffer + (i >> 1), pair, nbytes);
+    i += nbytes << 1; x += nbytes << 1;
+  }
+  /* trailing odd pixel */
+  if (i < end) {
+    byte *b = buffer + (i >> 1);
+    *b = (*b & 0xf0) | GFX_D16_SELECT(color, x, y);
+  }
+}
+
 static void
 gfx_draw_box_buffer_packed(byte *buffer, int linewidth, rect_t zone, int color)
 {
@@ -155,41 +194,14 @@ gfx_draw_box_buffer_packed(byte *buffer, int linewidth, rect_t zone, int color)
      desktop midpoint DDA on ~32% of segments, opening a one-pixel gap that a
      flood fill leaked through (see CLAUDE.md). Parameterise the store, never
      re-implement the walk. */
-  int i, x;
-  byte lo = (byte)(color & 0x0f);
-  byte hi = (byte)((color >> 4) & 0x0f);
+  int i;
 
   if (zone.xl <= 0 || zone.yl <= 0)
     return;
 
-  for (i = 0; i < zone.yl; i++) {
-    int y = zone.y + i;
-    int row = y * linewidth;
-    /* Each packed byte holds pixels (even x, odd x) -- linewidth is even -- and
-       D16 selection is (x+y)&1, so the fill byte is constant along a row but
-       SWAPS between even and odd rows. */
-    byte pair = (y & 1) ? (byte)(hi | (lo << 4)) : (byte)(lo | (hi << 4));
-
-    x = zone.x;
-
-    /* leading odd pixel: high nibble of a shared byte */
-    if (x & 1) {
-      byte *b = buffer + ((row + x) >> 1);
-      *b = (*b & 0x0f) | (byte)(GFX_D16_SELECT(color, x, y) << 4);
-      x++;
-    }
-    /* whole bytes */
-    if (zone.x + zone.xl - x >= 2) {
-      int nbytes = (zone.x + zone.xl - x) >> 1;
-      memset(buffer + ((row + x) >> 1), pair, nbytes);
-      x += nbytes << 1;
-    }
-    /* trailing odd pixel: low nibble */
-    if (x < zone.x + zone.xl) {
-      byte *b = buffer + ((row + x) >> 1);
-      *b = (*b & 0xf0) | GFX_D16_SELECT(color, x, y);
-    }
-  }
+  for (i = 0; i < zone.yl; i++)
+    gfx_d16_fill_span_packed(buffer, (zone.y + i) * linewidth + zone.x,
+			     zone.xl, color, zone.x, zone.y + i);
 }
 
 void
