@@ -29,6 +29,35 @@
 #include <gfx_operations.h>
 
 #include <ctype.h>
+
+#ifdef FSCI_PROBE_DIRTY
+/* [dirty] — per-frame cel-draw / dirty-rect / buffer-propagate trace.
+   Exists to settle Pico SINGLE-BUFFER questions on the DESKTOP, without a flash.
+   The rect bookkeeping below (_gfxop_draw_cel_buffer's static_buf skip,
+   _gfxop_add_dirty, _gfxop_buffer_propagate_box) is SHARED code: desktop runs it
+   identically, it just cannot show the artifact because its GFX_BUFFER_STATIC
+   draws land in the off-screen visual[2] while Pico writes the displayed
+   visual[0].  So the sequence is measurable here even though the symptom is not.
+
+   Pair with -DFSCI_SIM_PICO_STATIC=ON to also mirror PIO's stopUpd-dynview
+   static routing (widgets.c), and read with tests/dirtytrace.py.
+   Runtime-gated so an enabled build stays quiet: FREESCI_DIRTYPROBE=1. */
+#include <stdlib.h>
+static int
+dirty_probe_on(void)
+{
+	static int on = -1;
+	if (on < 0)
+		on = getenv("FREESCI_DIRTYPROBE") ? 1 : 0;
+	return on;
+}
+#  define DIRTY_TRACE(fmt, ...)						\
+	do { if (dirty_probe_on())					\
+		fprintf(stderr, "[dirty] " fmt "\n", ##__VA_ARGS__);	\
+	} while (0)
+#else
+#  define DIRTY_TRACE(fmt, ...) do { } while (0)
+#endif
 #ifdef HAVE_PICO
 #include "psram_alloc.h"
 #include <malloc.h>
@@ -634,9 +663,13 @@ gfxdr_add_dirty(gfx_dirty_rect_t *base, rect_t box, int strategy)
 static void
 _gfxop_add_dirty(gfx_state_t *state, rect_t box)
 {
-	if (state->disable_dirty)
+	if (state->disable_dirty) {
+		DIRTY_TRACE("+dirty (%d,%d,%d,%d) SUPPRESSED (disable_dirty)",
+			    GFX_PRINT_RECT(box));
 		return;
+	}
 
+	DIRTY_TRACE("+dirty (%d,%d,%d,%d)", GFX_PRINT_RECT(box));
 	state->dirty_rects = gfxdr_add_dirty(state->dirty_rects, box, state->options->dirty_frames);
 }
 
@@ -1447,6 +1480,10 @@ gfxop_draw_box(gfx_state_t *state, rect_t box, gfx_color_t color1, gfx_color_t c
 	if (PALETTE_MODE || !(state->driver->capabilities & GFX_CAPABILITY_SHADING))
 		shade_type = GFX_BOX_SHADE_FLAT;
 
+	/* Dialog/window backgrounds arrive here — this is how the trace locates the
+	   box whose region the bleed is reported over. */
+	DIRTY_TRACE("box   (%d,%d,%d,%d) clip=(%d,%d,%d,%d)",
+		    GFX_PRINT_RECT(box), GFX_PRINT_RECT(state->clip_zone));
 
 	_gfxop_add_dirty(state, box);
 
@@ -1551,6 +1588,14 @@ _gfxop_buffer_propagate_box(gfx_state_t *state, rect_t box, gfx_buffer_t buffer)
 	if (_gfxop_clip(&box, gfx_rect(0, 0, 320 * state->driver->mode->xfact, 200 * state->driver->mode->yfact)))
 		return GFX_OK;
 
+	/* The single chokepoint for BOTH the BACK restore (repaint a region from
+	   the static buffer) and the FRONT flush (push it to the display) — which
+	   is exactly the distinction the Pico dialog-bleed question turns on. */
+	DIRTY_TRACE("prop  buf=%s (%d,%d,%d,%d)",
+		    buffer == GFX_BUFFER_FRONT ? "FRONT"
+		    : (buffer == GFX_BUFFER_BACK ? "BACK" : "STATIC"),
+		    GFX_PRINT_RECT(box));
+
 	if ((error = state->driver->update(state->driver, box, gfx_point(box.x, box.y), buffer))) {
 		GFXERROR("Error occured while updating region (%d,%d,%d,%d) in buffer %d\n",
 			 box.x, box.y, box.xl, box.yl, buffer);
@@ -1622,6 +1667,13 @@ gfxop_update(gfx_state_t *state)
 
 	BASIC_CHECKS(GFX_FATAL);
 	DRAW_POINTER;
+
+#ifdef FSCI_PROBE_DIRTY
+	{
+		static int frame = 0;
+		DIRTY_TRACE("=== update (frame %d): flushing dirty list ===", ++frame);
+	}
+#endif
 
 	retval = _gfxop_clear_dirty_rec(state, state->dirty_rects);
 
@@ -2206,6 +2258,11 @@ _gfxop_draw_cel_buffer(gfx_state_t *state, int nr, int loop, int cel,
 
 	pos.x *= state->driver->mode->xfact;
 	pos.y *= state->driver->mode->yfact;
+
+	DIRTY_TRACE("cel   static=%d view=%d/%d/%d rect=(%d,%d,%d,%d) clip=(%d,%d,%d,%d)",
+		    static_buf, nr, loop, cel,
+		    old_x, old_y, pxm->index_xl, pxm->index_yl,
+		    GFX_PRINT_RECT(state->clip_zone));
 
 	if (!static_buf)
 		_gfxop_add_dirty(state, gfx_rect(old_x, old_y, pxm->index_xl, pxm->index_yl));

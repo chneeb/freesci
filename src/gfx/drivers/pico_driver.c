@@ -79,6 +79,20 @@ struct _pico_state {
     gfx_pixmap_t   *static_bg;       /* current room's visual_map (PSRAM-backed) */
 #ifdef PICO_USE_STATIC_VISUAL
     int             static_dirty;    /* static buffer may predate static_bg */
+#else
+    /* PIO: the SECOND PSRAM surface. static_bg stays PRISTINE (the room's clean
+       plate); `composed` holds background + baked static views and is what BACK
+       restores read. Separating them is what makes a bake reversible -- baking
+       into static_bg itself destroyed the clean plate, so a view that later
+       animated away could never be erased (the documented BAKE ghosting), and it
+       corrupted the add_to_pic overlay base. Both surfaces are PSRAM, so this
+       costs 64KB of an 8MB chip and ZERO SRAM; the mapped target solves the same
+       problem with an SRAM buffer (PICO_USE_STATIC_VISUAL) it can afford and PIO
+       cannot. Allocated lazily on the first bake, so a room with no static views
+       pays nothing and behaves exactly as before. */
+    uint32_t        composed_addr;   /* PSRAM offset, valid iff composed_valid */
+    int             composed_valid;
+    gfx_pixmap_t    composed_pxm;    /* shallow mirror of *static_bg, addr swapped */
 #endif
 
     /* keyboard event ring buffer */
@@ -875,6 +889,159 @@ static int pico_unregister_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm)
    erases it. visual[0] holds palette-slot bytes and static_bg->index_data is the
    identical palette slots (identity LUT for the 256-color background), so the
    region copies straight across. */
+#ifndef PICO_USE_STATIC_VISUAL
+/* Row staging for the PSRAM->PSRAM copies below: the PIO PSRAM is store/load
+   only, with no block-copy primitive, so a copy has to land in SRAM in between.
+   One row (320 B) keeps the SRAM cost negligible. */
+static uint8_t s_compose_row[PICO_XSIZE];
+
+/* Set by the widget layer around the FULLSCREEN-clipped static draw of a settled
+   stopUpd dynview (widgets.c). It marks the one call whose dest rect is NOT
+   port-clipped, and therefore the one that must never touch the displayed
+   visual[0]: that out-of-port write is the PQ2 dialog bleed. kAddToPic picviews
+   go through gfxop_draw_cel_static_CLIPPED, leave this 0, and keep drawing to
+   visual[0] as before -- they draw exactly once (_gfxwop_pic_view_draw sets
+   draw = _gfxwop_draw_nop), so routing them composed-only would make them wait
+   on a later BACK restore to appear, which is very likely the original
+   "static-only makes it invisible" observation. */
+int pico_static_fullscreen = 0;
+
+/* Bring the composed surface into existence for the CURRENT static_bg, seeded
+   with a pristine copy of it. Lazy on purpose -- called from the bake path, so a
+   room that never draws a static view never allocates it and never pays the
+   copy. Re-allocated per room because psram_reset() rewinds the bump arena on
+   every room change (gfxr_free_all_pics), which silently invalidates the old
+   offset; composed_valid is cleared in pico_set_static_buffer to force that.
+   Returns 0 if there is no PSRAM-backed background to compose from. */
+static int pico_compose_ensure(struct _pico_state *ps)
+{
+    gfx_pixmap_t *bg = ps->static_bg;
+    int bw, bh, y;
+    uint32_t addr;
+
+    if (!bg || bg->index_data || !bg->psram_valid) return 0;
+    if (ps->composed_valid) return 1;
+
+    bw = bg->index_xl;
+    bh = bg->index_yl;
+    if (bw <= 0 || bh <= 0 || bw > PICO_XSIZE) return 0;
+
+    /* psram_alloc is an unchecked bump allocator -- it never returns a failure
+       and offset 0 is a LEGITIMATE address, so "if (!addr)" would both reject a
+       valid allocation and never catch exhaustion. Bound it explicitly against
+       the fixed parse scratch instead, and decline to compose rather than let
+       the arena run into it. */
+    addr = psram_alloc((size_t)bw * (size_t)bh);
+    if (addr + (uint32_t)(bw * bh) > PICO_PARSE_SCRATCH_ADDR)
+        return 0;                   /* arena exhausted: fall back to pristine */
+
+    for (y = 0; y < bh; y++) {
+        psram_load(bg->psram_addr + (uint32_t)(y * bw), s_compose_row, (size_t)bw);
+        psram_store(addr + (uint32_t)(y * bw), s_compose_row, (size_t)bw);
+    }
+
+    /* Shallow mirror: pico_blit_indexed reads index dims, colors and psram_addr,
+       none of which it owns, so sharing them with static_bg is safe as long as
+       this is refreshed whenever static_bg changes -- which composed_valid
+       guarantees, since it is cleared on every set_static_buffer. */
+    ps->composed_pxm = *bg;
+    ps->composed_pxm.psram_addr = addr;
+    ps->composed_addr = addr;
+    ps->composed_valid = 1;
+    return 1;
+}
+
+/* PHASE 2b -- "re-bake or be erased". Persisting a static view's COLOUR is only
+   safe if something un-persists it; without this, a view that moves or is
+   disposed leaves stale pixels in composed forever (device: SQ3's door stuck
+   CLOSED through its open animation; PQ2's picked-up card, glovebox lid and
+   closeup overlay all lingering).
+
+   Identity is not available down here -- the driver sees rects, not widgets --
+   but it does not need to be: a settled view is redrawn every frame it is still
+   part of the scene, at the SAME rect. So track the rects baked into composed,
+   mark each one that re-bakes, and at the frame boundary erase the ones that did
+   not. That covers BOTH failure modes with one rule: a view that moved leaves
+   its old rect unmarked, and a disposed view leaves its only rect unmarked.
+   Steady state costs nothing -- an unmoved view matches and no PSRAM is touched. */
+#define PICO_COMPOSED_MAX 24
+static struct { rect_t r; int used, seen; } s_composed_rects[PICO_COMPOSED_MAX];
+
+static void composed_mark(rect_t r)
+{
+    int i, free_slot = -1;
+    for (i = 0; i < PICO_COMPOSED_MAX; i++) {
+        if (!s_composed_rects[i].used) { if (free_slot < 0) free_slot = i; continue; }
+        if (s_composed_rects[i].r.x  == r.x  && s_composed_rects[i].r.y  == r.y
+         && s_composed_rects[i].r.xl == r.xl && s_composed_rects[i].r.yl == r.yl) {
+            s_composed_rects[i].seen = 1;
+            return;
+        }
+    }
+    /* Table full: the view still renders, it just can no longer be un-baked, so
+       it may ghost. 24 slots is far more than any observed scene's settled-view
+       count; if this ever bites, the symptom is a lingering view, never a crash. */
+    if (free_slot < 0) return;
+    s_composed_rects[free_slot].r = r;
+    s_composed_rects[free_slot].used = 1;
+    s_composed_rects[free_slot].seen = 1;
+}
+
+static void composed_forget_all(void)
+{
+    int i;
+    for (i = 0; i < PICO_COMPOSED_MAX; i++)
+        s_composed_rects[i].used = s_composed_rects[i].seen = 0;
+}
+
+/* Erase a baked static view: copy its rect back from the pristine static_bg into
+   the composed surface, so the next BACK restore reproduces clean background
+   there. This is the half that makes baking reversible -- WHO calls it (a
+   stopUpd view resuming or being disposed) is engine-side and still to be
+   wired; see CLAUDE.md. No-op until something has actually been composed. */
+void pico_invalidate_static_region(struct _gfx_driver *drv, rect_t area)
+{
+    struct _pico_state *ps = drv ? (struct _pico_state *)drv->state : NULL;
+    gfx_pixmap_t *bg;
+    int bw, bh, x0, x1, w, row;
+
+    if (!ps || !ps->composed_valid) return;
+    bg = ps->static_bg;
+    if (!bg || !bg->psram_valid) return;
+
+    bw = bg->index_xl;
+    bh = bg->index_yl;
+    x0 = area.x < 0 ? 0 : area.x;
+    x1 = area.x + area.xl;
+    if (x1 > bw) x1 = bw;
+    w = x1 - x0;
+    if (w <= 0) return;
+
+    for (row = 0; row < area.yl; row++) {
+        int by = area.y + row;
+        if (by < 0 || by >= bh) continue;
+        psram_load(bg->psram_addr + (uint32_t)(by * bw + x0),
+                   s_compose_row, (size_t)w);
+        psram_store(ps->composed_addr + (uint32_t)(by * bw + x0),
+                    s_compose_row, (size_t)w);
+    }
+}
+
+/* Frame boundary: erase every tracked rect that did NOT re-bake this frame.
+   Called from the FRONT flush, so a rect that goes stale is corrected on the
+   next frame's BACK restore -- one frame of latency, not a persistent ghost. */
+static void composed_sweep(struct _gfx_driver *drv)
+{
+    int i;
+    for (i = 0; i < PICO_COMPOSED_MAX; i++) {
+        if (!s_composed_rects[i].used) continue;
+        if (s_composed_rects[i].seen) { s_composed_rects[i].seen = 0; continue; }
+        pico_invalidate_static_region(drv, s_composed_rects[i].r);
+        s_composed_rects[i].used = 0;
+    }
+}
+#endif /* !PICO_USE_STATIC_VISUAL */
+
 static void pico_bake_static_region(struct _pico_state *ps, rect_t dest)
 {
     gfx_pixmap_t *bg = ps->static_bg;
@@ -919,12 +1086,33 @@ static void pico_bake_static_region(struct _pico_state *ps, rect_t dest)
     w = x1 - x0;
     if (w <= 0) return;
 
+#ifndef PICO_USE_STATIC_VISUAL
+    /* Bake into the COMPOSED surface, never into static_bg: the clean plate has
+       to survive so pico_invalidate_static_region can undo this, and so the
+       add_to_pic overlay path still finds an un-composited base. If the composed
+       surface cannot be created (no PSRAM background, or arena exhausted) do
+       NOTHING rather than fall back to writing the clean plate -- a bake that
+       cannot be undone is the ghosting bug, and skipping it merely costs the
+       view its persistence. */
+    {
+        uint32_t base;
+        if (!pico_compose_ensure(ps)) return;
+        base = ps->composed_addr;
+        for (int row = 0; row < dest.yl; row++) {
+            int by = dest.y + row;
+            if (by < 0 || by >= bh) continue;
+            psram_store(base + (uint32_t)(by * bw + x0),
+                        ps->visual[0] + by * PICO_XSIZE + x0, (size_t)w);
+        }
+    }
+#else
     for (int row = 0; row < dest.yl; row++) {
         int by = dest.y + row;
         if (by < 0 || by >= bh) continue;
         psram_store(bg->psram_addr + (uint32_t)(by * bw + x0),
                     ps->visual[0] + by * PICO_XSIZE + x0, (size_t)w);
     }
+#endif
 }
 
 static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
@@ -976,6 +1164,55 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
         }
         return GFX_OK;
     }
+
+#if !defined(PICO_USE_STATIC_VISUAL) && defined(PICO_STATIC_COMPOSED)
+    /* Desktop model, finally expressible now that a second surface exists.
+       Desktop never picks ONE clip for a static view -- it uses two
+       destinations, each with its own clip: visual[2] (persistence) takes the
+       FULLSCREEN-clipped draw, visual[1] (displayed) takes the port-clipped
+       one. Pico collapsed both into visual[0], so one clip had to serve both
+       roles -- which is why fullscreen bled over dialogs and the ambient clip
+       lost the door: with a single destination there was no third answer.
+
+       Here the fullscreen static draw goes to the COMPOSED surface ONLY. It
+       never touches visual[0], so it cannot overpaint a dialog; the view still
+       reaches the screen via the paired port-clipped gfxop_draw_cel and via
+       BACK restores, which read composed (measured: a BACK restore covers
+       100% of static draws in the SAME frame, and a FRONT flush 100%, so the
+       old "the Pico engine path does not reliably issue those" no longer
+       holds -- what was missing then was a surface worth restoring FROM).
+
+       Row-at-a-time read-modify-write: the cel may be transparent, so the
+       row must be preloaded with what composed already holds. Priority is
+       unchanged -- the same bake_static_pri path runs, just per row. */
+    if (buffer == GFX_BUFFER_STATIC && pico_static_fullscreen
+        && !pxm->data && pico_compose_ensure(S)) {
+        gfx_pixmap_t *bg = S->static_bg;
+        int bw = bg->index_xl;
+        gfx_pixmap_t *pmap = s_shared_priority;
+        uint8_t *pridata = (pmap && pmap->index_data) ? pmap->index_data : NULL;
+        int pri_stride = pridata ? pmap->index_xl : 0;
+        int x0 = dest.x < 0 ? 0 : dest.x;
+        int w  = dest.x + dest.xl > bw ? bw - x0 : dest.xl - (x0 - dest.x);
+
+        composed_mark(dest);
+        if (w > 0) for (int row = 0; row < dest.yl; row++) {
+            int dy = dest.y + row;
+            if (dy < 0 || dy >= bg->index_yl) continue;
+            psram_load(S->composed_addr + (uint32_t)(dy * bw + x0),
+                       s_compose_row, (size_t)w);
+            pico_blit_indexed(S, pxm, priority,
+                              gfx_rect(src.x + (x0 - dest.x), src.y + row, w, 1),
+                              gfx_rect(x0, dy, w, 1),
+                              s_compose_row, w,
+                              pridata ? pridata + dy * pri_stride + x0 : NULL,
+                              pri_stride, 1);
+            psram_store(S->composed_addr + (uint32_t)(dy * bw + x0),
+                        s_compose_row, (size_t)w);
+        }
+        return GFX_OK;
+    }
+#endif
 
     /* Normal pixmap: blit to visual buffer.
        If pxm->data is NULL (gfx_xlate_pixmap skipped on Pico), use the
@@ -1163,12 +1400,21 @@ static int pico_update(struct _gfx_driver *drv,
         }
         /* else fall through to the PSRAM restore below (static buffer missing) */
 #endif
-        /* Restore background from PSRAM into visual[0] for this dirty region. */
+        /* Restore background from PSRAM into visual[0] for this dirty region.
+           Reads the COMPOSED surface (background + baked static views) when one
+           exists, which is the whole point of keeping it: a kAddToPic picview
+           survives the restore instead of being erased by the picview-less
+           plate. Falls back to the pristine static_bg when nothing has been
+           baked this room -- byte-for-byte the previous behaviour. */
         if (S->static_bg && S->visual[0]) {
             uint8_t *destptr = S->visual[0] + dest.y * PICO_XSIZE + dest.x;
             rect_t bgsrc = gfx_rect(src.x, src.y, src.xl, src.yl);
             rect_t bgdst = gfx_rect(0, 0, src.xl, src.yl);
-            pico_blit_indexed(S, S->static_bg, -1, bgsrc, bgdst,
+            gfx_pixmap_t *srcmap = S->static_bg;
+#ifndef PICO_USE_STATIC_VISUAL
+            if (S->composed_valid) srcmap = &S->composed_pxm;
+#endif
+            pico_blit_indexed(S, srcmap, -1, bgsrc, bgdst,
                               destptr, PICO_XSIZE, NULL, 0, 0);
         }
         break;
@@ -1182,6 +1428,13 @@ static int pico_update(struct _gfx_driver *drv,
                   dest.x, dest.y, src.xl, src.yl);
 #endif
         flush_region(S, dest.x, dest.y, src.xl, src.yl);
+#if !defined(PICO_USE_STATIC_VISUAL) && defined(PICO_STATIC_COMPOSED)
+        /* Frame boundary for "re-bake or be erased". A settled view that stopped
+           drawing (moved, animated away, or was disposed) has its persisted
+           colour erased from composed here, so the next BACK restore reproduces
+           clean background instead of a ghost. */
+        composed_sweep(drv);
+#endif
 #ifdef FSCI_PROBE_FPS
         /* Frame rate == the sound poll rate (pico_sfx_poll is driven from here),
            and the poll rate sets the MINIMUM safe PICO_PWM_BUF_FRAMES, since the
@@ -1246,6 +1499,16 @@ static int pico_set_static_buffer(struct _gfx_driver *drv,
 {
     (void)priority;
     S->static_bg = pic;  /* save for BUFFER_BACK restoration */
+#ifndef PICO_USE_STATIC_VISUAL
+    /* Drop the composed surface: its PSRAM offset came from the bump arena,
+       which psram_reset() rewound on this room change, so the old offset now
+       aliases whatever the new room decoded into. It is re-created lazily on
+       the next bake. Clearing it here is what keeps a previous room's composite
+       from being served to BACK restores. */
+    S->composed_valid = 0;
+    S->composed_addr = 0;
+    composed_forget_all();   /* rects referred to the previous room's surface */
+#endif
 #ifdef PICO_USE_STATIC_VISUAL
     /* The static buffer now predates the current background. It is refreshed
        lazily at the next BACK restore rather than here, because the pic's PSRAM

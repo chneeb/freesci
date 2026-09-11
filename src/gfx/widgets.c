@@ -906,8 +906,14 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
    over dialogs. So it is compiled out here. NB this also means the glovebox
    items stay invisible (they were only visible BECAUSE of that fullscreen-clip
    draw); that is a separate clipping problem, tracked apart from priority. */
-#if defined(HAVE_PICO) && !defined(PICO_WORKING_PRIORITY) \
-    && (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE))
+/* FSCI_SIM_PICO_STATIC mirrors this routing on the DESKTOP so the PIO draw
+   sequence can be traced offline with FSCI_PROBE_DIRTY (the rect bookkeeping it
+   feeds is shared code). Desktop STATIC lands in the off-screen visual[2], so it
+   cannot reproduce the Pico artifact — and it DOES bake there, so a desktop
+   trace build will ghost. Trace builds only; never a shipping desktop option. */
+#if defined(FSCI_SIM_PICO_STATIC) \
+    || (defined(HAVE_PICO) && !defined(PICO_WORKING_PRIORITY) \
+        && (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)))
 	/* A settled stopUpd view (NO_UPDATE) is conceptually part of the background.
 	   Desktop keeps it via a persistent back buffer; Pico has a single visual[0].
 	   Route the view through the static path (GFX_BUFFER_STATIC) so the driver
@@ -928,10 +934,30 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 		extern int pico_priority_only_static;
 		pico_priority_only_static = 1;
 #endif
+#if defined(HAVE_PICO) && defined(PICO_STATIC_COMPOSED)
+		/* Tell the driver THIS is the fullscreen-clipped call, so it routes
+		   the colour to the composed surface instead of the displayed
+		   visual[0] (see pico_static_fullscreen). Set only around this one
+		   draw: the port-clipped picview path must keep its current
+		   behaviour. */
+		extern int pico_static_fullscreen;
+		pico_static_fullscreen = 1;
+#endif
+		/* MUST stay gfxop_draw_cel_static (forced gfx_rect_fullscreen), NOT
+		   the _clipped variant -- see "TRIED AND REVERTED: ambient clip" in
+		   CLAUDE.md. The ambient state->clip_zone here is frequently STALE
+		   (often disjoint from the cel), which is exactly why upstream
+		   overrides it; measured on an SQ3 trace, the fullscreen static draw
+		   is the ONLY thing painting the cel in 75.8% of cases, so clipping
+		   it makes settled stopUpd views vanish (device: SQ3's spaceship door
+		   stopped closing). */
 		GFX_ASSERT(gfxop_draw_cel_static(view->visual->gfx_state, view->view,
 						 view->loop, view->cel,
 						 _move_point(view->draw_bounds, pos),
 						 view->color, view->palette));
+#if defined(HAVE_PICO) && defined(PICO_STATIC_COMPOSED)
+		pico_static_fullscreen = 0;
+#endif
 #if defined(PICO_STATIC_VIEW_PRIORITY) && !defined(PICO_STATIC_VIEW_BAKE)
 		pico_priority_only_static = 0;
 #endif

@@ -3546,25 +3546,215 @@ replacing `gfxop_draw_cel_static`'s forced FULLSCREEN clip with the port clip (m
 `_gfxwop_pic_view_draw`) **did NOT fix the bleed**. So `view->parent->zone` still covers the dialog area, and
 **no clip change can fix this** -- do not re-attempt it.
 
-**MECHANISM (grounded in code, not yet device-confirmed): the static path skips DIRTY-RECT tracking.**
-`operations.c:2210`:
-```c
-if (!static_buf)
-        _gfxop_add_dirty(state, gfx_rect(old_x, old_y, ...));
+**RULED OUT by an offline desktop trace (2026-09-11) -- the "static path skips DIRTY-RECT tracking" mechanism
+is WRONG, and the dirty-rect fix it implied would have been a NO-OP.** Do not build it.
+
+The retracted claim was: `operations.c:2211` skips `_gfxop_add_dirty` when `static_buf`, so a static-routed
+draw paints the displayed `visual[0]` on Pico while registering nothing, and is never repaired. Correct about
+the skip; wrong about the consequence. **Both** widget paths follow the static draw with an UNCONDITIONAL
+normal draw of the same cel at the same position -- `_gfxwop_pic_view_draw` ("Draw again on the back buffer",
+`widgets.c:983`) and the Pico stopUpd route in `_gfxwop_dyn_view_draw` (`widgets.c:943`, which falls through).
+That normal draw registers `_gfxop_add_dirty` with the **UNCLIPPED** cel rect, which is exactly the area the
+static draw painted. So the region is already tracked.
+
+**Measured, not argued** (`FSCI_PROBE_DIRTY` + `FSCI_SIM_PICO_STATIC`, SQ3, 4352 frames):
+
 ```
-On desktop that is correct -- a `GFX_BUFFER_STATIC` draw lands in `visual[2]`, which is never displayed, so
-there is nothing to dirty. But `pico_draw_pixmap` **ignores the buffer parameter** and writes everything into
-`visual[0]`, the DISPLAYED buffer. So a static-routed draw paints into the visible frame while registering no
-dirty rect, and the normal BACK-restore/FRONT-flush cycle never repairs that region -- the dialog stays
-overpainted. It is an inconsistency between the engine's assumption (static == off-screen) and the Pico
-driver's reality (static == the visible buffer).
+static (GFX_BUFFER_STATIC)  14281
+  paired with a normal draw 14281  (100.0%)
+  rect covered by a +dirty  14281  (100.0%)
+```
 
-This accounts for every observation: clipping does not help (pixels are still written), `nopri` fixes it (no
-static draw at all), desktop is fine (static is genuinely off-screen), Pimoroni is fine (routing compiled out).
+The trace runs on the DESKTOP because the rect bookkeeping is shared code -- desktop executes the identical
+sequence, it just cannot show the artifact (its STATIC draws land in the off-screen `visual[2]`; Pico writes
+the displayed `visual[0]`). See `tests/dirtytrace.py` for capture + analysis.
 
-**Fix to try if resumed:** have the static-routed draw register a dirty rect on Pico, so the region is
-restored/redrawn normally. Watch for the documented trade -- the same fullscreen-clip static draw is what
-makes PQ2's glovebox items visible, so verify items + SQ3 door/motivator occlusion alongside dialogs.
+**What this leaves, and the corrected framing.** The dirty rect is not the missing repair -- it is the
+*delivery* mechanism: it FRONT-flushes the region, corrupted pixels included. `_gfxop_buffer_propagate_box`
+is the chokepoint for both, and a dirty rect only ever produces the FRONT flush (`_gfxop_update_box`), never
+a BACK restore. So what actually protects a dialog from a view drawn at overlapping coordinates is **draw
+ORDER** (the dialog's port is drawn after), not the clip -- which independently explains why the
+`PICO_STATIC_VIEW_CLIPPED` experiment failed, and why `nopri` works (no static draw at all).
+
+One asymmetry worth keeping: `_gfxwop_pic_view_draw` uses `gfxop_draw_cel_static_clipped` (PORT clip), so
+kAddToPic picviews are already clipped. Only the Pico stopUpd dynview route uses `gfxop_draw_cel_static`,
+which forces `gfx_rect_fullscreen`. So the fullscreen clip is specific to the routing PIO added.
+
+**TRIED AND REVERTED (2026-09-11): ambient clip -- `gfxop_draw_cel_static_clipped` instead of
+`gfxop_draw_cel_static`. DEVICE-TESTED: fixed PQ2, BROKE SQ3. Do not re-attempt.**
+
+Device result was genuinely split: **PQ2 fully fixed** -- dialogs clean, glovebox items show AND pick up
+cleanly, cars still occlude correctly. **SQ3 regressed** -- the spaceship door no longer visibly closes.
+
+**Why, and it is systemic, not one door.** The ambient `state->clip_zone` at a dynview's static draw is
+frequently **STALE** -- often disjoint from the cel entirely (measured: `rect=(22,16,60,66)` against
+`clip=(478,32,120,132)`; the pair `601/1/9` and `601/0/9` each carry the OTHER's zone, i.e. the clip lags a
+widget). That staleness is precisely why upstream overrides it with `gfx_rect_fullscreen` (`operations.c`
+comment: "Except that the area it's clipped against is... unusual ;-)"). Re-measured per static draw against
+its paired fall-through `gfxop_draw_cel`:
+
+| | static paints nothing | normal paints nothing | **both** -> cel invisible |
+|---|---|---|---|
+| fullscreen (baseline) | 0.0% | 75.8% | **0.0%** |
+| ambient clip (tried) | 75.7% | 75.7% | **75.7%** |
+
+So in **75.8% of cases the fullscreen static draw is the ONLY thing painting the cel** -- the paired normal
+draw is already clipped to nothing. Matching the static draw to it does not make the two agree; it makes
+both paint nothing. The door is one visible instance.
+
+**METHOD TRAP, recorded because it cost a device cycle.** The same number was in hand BEFORE the flash,
+under the label "static painted MORE than the paired normal draw: 75.8%, 32.3M excess pixels", and was read
+as excess-to-eliminate. Driving that metric to zero looked like a clean win ("excess 32,272,744 -> 0") while
+actually meaning "the static draw now paints nothing". **An `excess` metric cannot distinguish harmful
+overdraw from the only draw there is** -- the right metric was the one in the table above, *does any draw
+cover the cel at all*. Measure coverage, not excess.
+
+*Historical (the analysis that led to the reverted attempt -- the defect it names is REAL and is what the
+second-surface work below addresses; only the clip-based remedy was wrong):* every static draw uses
+`clip=(0,0,640,400)` (14281 of 14281), because
+`gfxop_draw_cel_static` overrides `state->clip_zone` with `gfx_rect_fullscreen` (`operations.c`, comment:
+"Except that the area it's clipped against is... unusual ;-)"). Upstream that is harmless -- the draw lands
+in the off-screen `visual[2]`. On Pico `pico_draw_pixmap` ignores the buffer and writes the DISPLAYED
+`visual[0]`, so those out-of-port pixels are painted where nothing repaints them. Measured against each
+static draw's PAIRED normal draw:
+
+| | static draws | painted more than the paired draw | excess pixels |
+|---|---|---|---|
+| `gfxop_draw_cel_static` (fullscreen) | 14281 | **10832 (75.8%)** | **32,272,744** |
+| `gfxop_draw_cel_static_clipped` (ambient) | 13961 | **0 (0.0%)** | **0** |
+
+**Why this is NOT the ruled-out `PICO_STATIC_VIEW_CLIPPED` attempt:** that one clipped to
+`view->parent->zone` -- the whole room port, which does cover the dialog area, hence "no clip change can
+fix this". This inherits `state->clip_zone`, the *narrower* clip the paired fall-through `gfxop_draw_cel`
+already uses (trace: `(204,44,242,210)`, `(126,256,58,64)`, `(588,152,24,70)` ... never fullscreen). The
+static draw then covers EXACTLY what the normal draw covers, so by construction it cannot write a pixel the
+frame does not legitimately show -- and it cannot lose anything either, for the same reason.
+
+**The glovebox coupling does NOT apply here** (this supersedes the 2026-07-19 worry): the items are
+`kAddToPic` picviews drawn by `_gfxwop_pic_view_draw`, which already calls `gfxop_draw_cel_static_clipped`
+under `view->parent->zone`. The stopUpd dynview route is the ONLY user of the fullscreen override, so
+clipping it is decoupled from the items.
+
+Change is one line in `_gfxwop_dyn_view_draw` (`widgets.c`). **Firmware diff verified to be exactly one real
+instruction** -- `bl gfxop_draw_cel_static` -> `bl gfxop_draw_cel_static_clipped` -- every other `.text`
+difference being a shifted `__LINE__` immediate; `.rodata`/`.data`/`.bss` byte-identical, `.bss` still
+17,284. Mapped is untouched (`PICO_WORKING_PRIORITY` compiles the block out); desktop untouched.
+
+**THE REAL FIX -- a SECOND PSRAM surface on PIO. PHASE 1 BUILT (2026-09-11), awaiting device test;
+phase 2 (the invalidation trigger) still to wire.** The defect the reverted attempt correctly identified is
+that on PIO, STATIC *is* the displayed buffer, so one write serves two incompatible roles -- it must persist
+the view (desktop does this in the off-screen `visual[2]`, from which BACK restores composite) AND it must
+not paint the live frame out-of-port. No clip setting can satisfy both; the surfaces must be separated.
+
+**This costs essentially NO SRAM.** The confusion to avoid: `PICO_STATIC_VISUAL` (+64KB SRAM) is the MAPPED
+implementation, affordable only because the engine moved to PSRAM there. PIO already keeps its static
+surface in PSRAM (`static_bg`, the room's `visual_map`) and BACK restores already read it per-row. Phase 1
+adds the SECOND PSRAM surface:
+
+| | before | after |
+|---|---|---|
+| `static_bg` | bake target -- clean plate DESTROYED | stays **PRISTINE** |
+| composed (new) | -- | background + baked static views; BACK restores read this |
+| undo a bake | impossible (nothing to restore from) | copy rect pristine -> composed |
+
+**Measured cost:** `.bss` 17,284 -> **17,604** (+320 B, exactly `s_compose_row[320]`, the staging buffer a
+PSRAM->PSRAM copy needs since the PIO link is store/load only), `.text` +184 B, 64KB of PSRAM out of 8MB,
+and **zero heap / zero arena change** -- the fragmentation and OOM picture is untouched.
+
+- **Lazy**: allocated on the FIRST bake, so a room that draws no static view allocates nothing, and BACK
+  restores fall back to `static_bg` -- byte-for-byte the old behaviour.
+- **Per-room**: `composed_valid` is cleared in `pico_set_static_buffer`, because `psram_reset()` rewinds the
+  bump arena on every room change and the old offset would alias the new room's decode.
+- **Live in the DEFAULT (priority-only) build**, not just with `PICO_STATIC_VIEW_BAKE`: the bake gate is
+  `buffer == GFX_BUFFER_STATIC && !pico_priority_only_static`, and kAddToPic picviews (PQ2 cars, glovebox
+  items) never set that flag, so they bake -- and now bake somewhere reversible.
+- **Expected side benefit to watch:** the driver comment at `pico_driver.c` already blamed baking-into-the-
+  clean-plate for corrupting the add_to_pic overlay base (the SQ3 "Pirates of Pestulon" title). That
+  corruption source is now gone. Not a claim -- something to check, ideally with the `[ovl]` probe.
+
+**TRAP recorded: `psram_alloc` is an unchecked bump allocator** (`psram_alloc.c`) -- it never signals
+failure, and **offset 0 is a legitimate address**, so the reflexive `if (!addr)` both rejects a valid
+allocation and catches nothing. Bound it against `PICO_PARSE_SCRATCH_ADDR` (0x700000) instead.
+
+**PHASE 2a BUILT (2026-09-11), behind `PICO_STATIC_COMPOSED` (default OFF) -- the desktop TWO-DESTINATION
+model, which the second surface is what makes expressible.** The insight the reverted clip attempt was
+missing: desktop never picks ONE clip for a static view. It uses two destinations, each with its own clip --
+`visual[2]` (persistence) takes the FULLSCREEN-clipped draw, `visual[1]` (displayed) takes the port-clipped
+one. Both calls ALREADY happen on Pico (`gfxop_draw_cel_static` then the fall-through `gfxop_draw_cel`); the
+bug is that Pico collapsed both into `visual[0]`, so one clip had to serve both roles. **That is why there
+was no third answer with a single destination: fullscreen bleeds over dialogs, ambient loses the door.**
+
+With `PICO_STATIC_COMPOSED=ON`, the fullscreen static draw of a settled stopUpd dynview goes to the
+**composed surface ONLY** and never touches `visual[0]`, so it cannot overpaint a dialog; the view still
+reaches the screen via the paired port-clipped draw and via BACK restores, which read composed. Implemented
+as a row-at-a-time read-modify-write (the cel may be transparent, so each row is preloaded from composed
+before the blit); priority is unchanged -- the same `bake_static_pri` path runs, just per row. The widget
+layer marks the one fullscreen call with `pico_static_fullscreen` (mirrors the existing
+`pico_priority_only_static` pattern).
+
+**The old objection is measured dead.** `pico_draw_pixmap` carried a comment that static-only draws are
+invisible because "the Pico engine path does not reliably issue" update(BACK)+update(FRONT). On the trace
+that is false: **a BACK restore covers 100% of static draws in the SAME frame, and a FRONT flush 100%**
+(14281/14281). What was missing when that comment was written was not the updates -- it was a static surface
+worth restoring FROM, which is exactly what phase 1 added.
+
+**Deliberately NOT applied to kAddToPic picviews.** They use `gfxop_draw_cel_static_CLIPPED` (already
+port-clipped, so they never bleed) and they draw exactly ONCE -- `_gfxwop_pic_view_draw` sets
+`draw = _gfxwop_draw_nop`. Routing them composed-only would leave them waiting on a later BACK restore to
+appear, which is very likely the original "invisible" observation. They keep writing `visual[0]`.
+
+**DEVICE RESULT (2026-09-11): the dialog bleed is FIXED and the door is NOT sacrificed** -- SQ3 "most of
+it looks correct", PQ2 dialogs clean, cars and HQ door fine. It also confirmed the predicted gap: with the
+colour now persisted and nothing un-persisting it, SQ3's door stayed **CLOSED through its open animation**
+and PQ2's picked-up card, glovebox lid and closeup overlay all lingered. That is phase 2b.
+
+Cost: `.text` +376 B, `.bss` +4 B over phase 1 (the flag). Default build byte-unchanged (`pico_static_fullscreen`
+is absent from it entirely). **Perf risk to watch, unmeasured:** the RMW does a PSRAM load+store per row per
+static draw per frame (~2.5ms for a 100x50 cel); several settled views redrawing each frame could add up.
+Watch with `FSCI_PROBE_FPS`/`FSCI_PROBE_PERF`; if it bites, the fix is to skip the write when the view has
+not moved or changed cel.
+
+**PHASE 2b BUILT (2026-09-11) -- "re-bake or be erased", the invalidation trigger.** Phase 2a persisted a
+stopUpd view's COLOUR, and device-testing showed exactly the predicted consequence: nothing un-persisted it.
+SQ3's door stayed **CLOSED through its open animation**; PQ2's picked-up card, glovebox lid and closeup
+overlay all lingered. (PQ2 leans heavily on stopUpd -- room 10 disassembles to 16 `stopUpd` vs 3 `addToPic`
+-- which is why its glovebox is affected at all, having been assumed picview-only.)
+
+**The rule needs no widget identity, which the driver does not have.** A settled view is redrawn every frame
+it is still part of the scene, at the SAME rect. So: track the rects baked into composed, mark each one that
+re-bakes, and at the frame boundary erase the ones that did not. One rule covers both failure modes -- a
+view that MOVED leaves its old rect unmarked, a view that was DISPOSED leaves its only rect unmarked. Steady
+state is free: an unmoved view matches its entry and no PSRAM is touched.
+
+- `composed_mark(dest)` on every composed static draw; `composed_sweep()` from the FRONT flush;
+  `composed_forget_all()` in `pico_set_static_buffer` (the old rects referred to the previous room's surface,
+  which `psram_reset` has already rewound).
+- Sweeping at the FRONT flush means a rect that goes stale is corrected on the NEXT frame's BACK restore --
+  one frame of latency, not a persistent ghost.
+- Fixed 24-slot table. If it ever fills, the view still renders and merely cannot be un-baked (it may
+  ghost) -- never a crash. Far above any observed scene's settled-view count.
+
+**DEVICE RESULT (2026-09-11): fixed PQ2, broke the SQ3 door -- the rule is WRONG and 2c replaces it.**
+PQ2 on a fresh boot is a clear net win (dialogs, glovebox items showing AND the card disappearing on pickup,
+lid closing, overlay dismissing, cars, HQ door); only a minor "blue box in the car" remains, to be checked
+against the historical note that PQ2's car-interior blue box is a pri-3 overlay CORRECTLY occluded and
+render-identical to desktop. But SQ3's spaceship door now **does not close**.
+
+**Why the premise is false:** "a settled view is redrawn every frame it is still part of the scene" -- but
+`stopUpd` MEANS it stops being redrawn. So a door that settles closed stops drawing, the sweep sees an
+unmarked rect and erases it. Combined with the 2a result, both symptoms are one missing distinction --
+*settled* vs *gone* -- and **that distinction does not exist in rects**, only in the widget/cast layer.
+Two rules have now failed the same way (the ambient clip, and this sweep): each fixed one symptom by
+accepting another, because each inferred intent from geometry instead of observing an event.
+
+Cost with `PICO_STATIC_COMPOSED=ON`: `.text` 769,084 / `.bss` 18,184. **Default build byte-unchanged**
+(768,308 / 17,604) -- the option is OFF, so none of 2a/2b links.
+
+**Also unmeasured:** the first bake in a room triggers a full pristine->composed copy, 64,000 B read +
+64,000 B written over a ~4MB/s link, so roughly 32ms plus per-chunk overhead (`psram_store`/`psram_load`
+move only 27/31 bytes per transaction). Once per room, on top of a ~100ms decode. Time it with
+`FSCI_PROBE_PERF` before assuming it is free, and keep the rule that invalidation copies a RECT, never the
+screen.
 
 **2. Right-size the audio buffers (~24KB reclaimable, both targets).** `PICO_PWM_BUF_FRAMES` (rate/11) and
 the 8192 ring were sized to survive RARE polls, before the poll fix existed. With polls now at 60Hz a batch

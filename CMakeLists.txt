@@ -173,6 +173,19 @@ add_compile_options(-fgnu89-inline -w -Wno-implicit-function-declaration)
 #   FSCI_PROBE_ARENA      — [arenagrow] names the sci_* alloc that grows the
 #                           heap arena (sbrk), pinpointing the restore-time
 #                           +32KB/restore ratchet trigger (Pico only)
+#   FSCI_PROBE_DIRTY      — [dirty] per-frame cel-draw / dirty-rect / buffer-
+#                           propagate trace. Runs on DESKTOP to settle Pico
+#                           single-buffer questions offline: the rect bookkeeping
+#                           is shared code, so desktop executes it identically
+#                           even though its 3 buffers hide the artifact. Env-gated
+#                           at runtime by FREESCI_DIRTYPROBE=1.
+#   FSCI_SIM_PICO_STATIC  — desktop-only: route settled stopUpd (NO_UPDATE)
+#                           dynviews through the STATIC path, mirroring the PIO
+#                           PICO_STATIC_VIEW_PRIORITY routing, so the same draw
+#                           sequence can be traced offline. Inert to the desktop
+#                           picture's correctness only in the sense that STATIC
+#                           lands in the off-screen visual[2] — it DOES bake there,
+#                           so expect desktop ghosting. Trace builds only.
 option(FSCI_PROBE_STR        "Probe: SCI string-kernel buffer overflows"        ON)
 option(FSCI_PROBE_GFX        "Probe: priority/control/occlusion gfx tracing"    OFF)
 option(FSCI_PROBE_MEM        "Probe: per-room SRAM/heap breakdown lines"        OFF)
@@ -180,6 +193,8 @@ option(FSCI_PROBE_MEM_CENSUS "Probe: live-alloc size histogram + call sites"    
 option(FSCI_PROBE_PARSER     "Probe: per-command GNF-rebuild transient size"    OFF)
 option(FSCI_PROBE_ARENA      "Probe: name the alloc that grows the heap arena"  OFF)
 option(FSCI_PROBE_PERF       "Probe: [perf] per-room pic-decode timing (us)"    OFF)
+option(FSCI_PROBE_DIRTY      "Probe: [dirty] cel-draw/dirty-rect/propagate trace" OFF)
+option(FSCI_SIM_PICO_STATIC  "Desktop: mirror the PIO stopUpd static routing"   OFF)
 if(FSCI_PROBE_MEM_CENSUS AND NOT FSCI_PROBE_MEM)
     message(STATUS "FSCI_PROBE_MEM_CENSUS implies FSCI_PROBE_MEM (census dumps in the breakdown) — enabling it")
     set(FSCI_PROBE_MEM ON)
@@ -204,6 +219,12 @@ if(FSCI_PROBE_ARENA)
 endif()
 if(FSCI_PROBE_PERF)
     add_compile_definitions(FSCI_PROBE_PERF=1)
+endif()
+if(FSCI_PROBE_DIRTY)
+    add_compile_definitions(FSCI_PROBE_DIRTY=1)
+endif()
+if(FSCI_SIM_PICO_STATIC)
+    add_compile_definitions(FSCI_SIM_PICO_STATIC=1)
 endif()
 
 if(PLATFORM STREQUAL "pico")
@@ -292,10 +313,21 @@ if(PLATFORM STREQUAL "pico")
     #     an opt-in experiment. Implies PRIORITY. See CLAUDE.md "Static-view occlusion".
     option(PICO_STATIC_VIEW_PRIORITY "Bake static-view priority on Pico (occlusion, no color)" ON)
     option(PICO_STATIC_VIEW_BAKE "Also persist NO_UPDATE-view color into static_bg (regresses dynamic scenes)" OFF)
+    # Route the FULLSCREEN-clipped static draw of a settled stopUpd dynview to
+    # the composed PSRAM surface instead of the displayed visual[0] -- the
+    # desktop two-destination model (visual[2] persistence + visual[1] display,
+    # each with its own clip), expressible only now that the second PSRAM
+    # surface exists. Targets the PQ2 dialog bleed AND the SQ3 door at once.
+    # Default OFF: it also makes a stopUpd view's COLOUR persist, so it needs
+    # the invalidation trigger (phase 2b) before it can be trusted not to ghost.
+    option(PICO_STATIC_COMPOSED "Pico/PIO: fullscreen static draws -> composed surface" OFF)
     if(PICO_STATIC_VIEW_BAKE)
         add_compile_definitions(PICO_STATIC_VIEW_BAKE=1 PICO_STATIC_VIEW_PRIORITY=1)
     elseif(PICO_STATIC_VIEW_PRIORITY)
         add_compile_definitions(PICO_STATIC_VIEW_PRIORITY=1)
+    endif()
+    if(PICO_STATIC_COMPOSED)
+        add_compile_definitions(PICO_STATIC_COMPOSED=1)
     endif()
 
     # THROWAWAY measurement build for roadmap #1 (text parser). When ON,
