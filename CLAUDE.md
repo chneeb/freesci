@@ -3747,8 +3747,53 @@ unmarked rect and erases it. Combined with the 2a result, both symptoms are one 
 Two rules have now failed the same way (the ambient clip, and this sweep): each fixed one symptom by
 accepting another, because each inferred intent from geometry instead of observing an event.
 
-Cost with `PICO_STATIC_COMPOSED=ON`: `.text` 769,084 / `.bss` 18,184. **Default build byte-unchanged**
-(768,308 / 17,604) -- the option is OFF, so none of 2a/2b links.
+**PHASE 2c BUILT + DEVICE-VALIDATED (2026-09-11) -- per-widget lifecycle invalidation. `PICO_STATIC_COMPOSED`
+is now the DEFAULT for the PIO target.** The 2b sweep is retired. `gfxw_dyn_view_t` gains a `HAVE_PICO`-only
+last-baked rect, and three observable EVENTS make a persisted view stale -- none inferred from geometry:
+
+| event | where | fixes |
+|---|---|---|
+| MOVED (baked rect != rect about to bake) | `_gfxwop_dyn_view_draw` | door/lid animations |
+| RESUMED updating (NO_UPDATE cleared) | `_gfxwop_dyn_view_draw` | a view stuck through its own open animation |
+| DISPOSED (widget freed) | `_gfxwop_basic_free` | PQ2 picked-up card, dismissed overlay |
+
+**DEVICE RESULT: PQ2 is clean** -- dialogs, glovebox items, card disappearing on pickup, lid closing,
+overlay dismissing, cars, HQ door. Only a small blue rectangle in the car around the glovebox overlay
+remains, accepted by the user as cosmetic; note the record already carries a PRE-EXISTING PQ2 "blue box in
+the car interior" from 2026-06, investigated then and concluded to be a pri-3 overlay CORRECTLY occluded and
+render-identical to desktop, so it may not be this work's at all. Confirmed NOT an under-covered
+invalidation: baking the driver's exact dest rect instead of `draw_bounds` changed nothing on device and was
+reverted rather than kept as unvalidated complexity.
+
+**Why it is the default despite SQ3's door:** the door does not visibly stay closed with this ON -- but it
+does not on baseline either. Priority-only never persisted a settled view's COLOUR, so the door has been
+like that since priority-only shipped; this is no regression, and PQ2 gains a great deal. Withheld on the
+MAPPED target (which has `PICO_STATIC_VISUAL` + real per-frame priority maps instead): the define is
+suppressed there even if the option is forced ON, because the widget hooks would otherwise reference
+`pico_invalidate_static_region`, which lives behind `!PICO_USE_STATIC_VISUAL`.
+
+**THE DOOR IS STILL OPEN, and it is not a tuning problem -- BOTH invalidation rules fail on the SAME single
+case.** 2b's sweep erases a view that stopped being redrawn; 2c's dispose hook erases a view whose widget is
+freed -- and SCI frees the widget PRECISELY when a stopUpd view becomes background. PQ2's views survive
+both because they are redrawn while present. SQ3's door is the one view that is baked once, never redrawn,
+and must persist, and **neither frame timing nor widget lifetime distinguishes that from a stale bake.**
+Per-widget state cannot bridge it either: widgets do not survive the settle->animate transition, so the new
+widget for the opening animation starts with `pico_has_baked = 0` and cannot undo the old bake.
+
+**Next idea (NOT built): mirror save-under restores into composed.** SCI has its own erase mechanism --
+`under_bits`, already in `gfxw_dyn_view_t`. When the engine wants a view gone it restores the region saved
+beneath it, and `pico_draw_pixmap` already has a `PICO_HANDLE_GRABBED` path for those restores; today that
+writes `visual[0]` but NOT composed, so composed keeps the stale view and every BACK restore paints it back.
+Using the engine's explicit "this area reverts to background" signal beats inferring one, and unlike widget
+identity it survives across frames. It would mean REMOVING the dispose hook, which is currently what makes
+PQ2 correct -- so it is a real A/B with a real risk of regressing PQ2 and must be tested in isolation.
+
+**TRAP recorded -- adding a field to a FreeSCI widget struct.** `_gfxw_new_widget` allocates with
+`sci_malloc` and initialises every field BY HAND; its `memset` sits behind `SATISFY_PURIFY`, which is not
+defined. A field left out therefore holds heap garbage, silently. Here a garbage `pico_has_baked` made the
+first draw invalidate a garbage rect, and `pico_invalidate_static_region` looped over a garbage `yl` doing
+PSRAM I/O -- presenting as a TOTAL FREEZE with screen and UART both dead, no fault, no log. Initialise new
+fields in the constructor, and bound any loop driven by widget-supplied geometry.
 
 **Also unmeasured:** the first bake in a room triggers a full pristine->composed copy, 64,000 B read +
 64,000 B written over a ~4MB/s link, so roughly 32ms plus per-chunk overhead (`psram_store`/`psram_load`

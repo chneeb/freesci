@@ -320,13 +320,25 @@ if(PLATFORM STREQUAL "pico")
     # surface exists. Targets the PQ2 dialog bleed AND the SQ3 door at once.
     # Default OFF: it also makes a stopUpd view's COLOUR persist, so it needs
     # the invalidation trigger (phase 2b) before it can be trusted not to ghost.
-    option(PICO_STATIC_COMPOSED "Pico/PIO: fullscreen static draws -> composed surface" OFF)
+    # Default ON for the PIO target: device-validated on PQ2 (dialogs, glovebox
+    # items, card pickup, lid, overlay, cars, HQ door all correct) and no worse
+    # than baseline on SQ3, whose spaceship door does not visibly stay closed
+    # either way -- priority-only never persisted a settled view's colour.
+    # MEANINGLESS on the mapped target, which has PICO_STATIC_VISUAL and real
+    # per-frame priority maps instead; the define is withheld there so the
+    # widget-layer hooks cannot reference a driver function that target does not
+    # build (pico_invalidate_static_region lives behind !PICO_USE_STATIC_VISUAL).
+    if(PICO_PSRAM_MAPPED)
+        option(PICO_STATIC_COMPOSED "Pico/PIO: fullscreen static draws -> composed surface" OFF)
+    else()
+        option(PICO_STATIC_COMPOSED "Pico/PIO: fullscreen static draws -> composed surface" ON)
+    endif()
     if(PICO_STATIC_VIEW_BAKE)
         add_compile_definitions(PICO_STATIC_VIEW_BAKE=1 PICO_STATIC_VIEW_PRIORITY=1)
     elseif(PICO_STATIC_VIEW_PRIORITY)
         add_compile_definitions(PICO_STATIC_VIEW_PRIORITY=1)
     endif()
-    if(PICO_STATIC_COMPOSED)
+    if(PICO_STATIC_COMPOSED AND NOT PICO_PSRAM_MAPPED)
         add_compile_definitions(PICO_STATIC_COMPOSED=1)
     endif()
 

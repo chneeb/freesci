@@ -153,9 +153,20 @@ typedef struct {
         rect_t draw_bounds; /* The correct position to draw to */
 	void *under_bitsp, *signalp;
 	int under_bits, signal;
-	int z; /* The z coordinate: Added to y, but used for sorting */ 
+	int z; /* The z coordinate: Added to y, but used for sorting */
 	int sequence; /* Sequence number: For sorting */
 	int force_precedence; /* Precedence enforcement variable for sorting- defaults to 0 */
+#if defined(HAVE_PICO) && defined(PICO_STATIC_COMPOSED)
+	/* The rect this view last persisted into the driver's composed PSRAM
+	   surface, or has_baked==0 if it has persisted nothing. Lives here, per
+	   widget, because the driver sees only rects and cannot tell a view that
+	   SETTLED (keep it) from one that is GONE (erase it) -- a frame-level
+	   "re-bake or be erased" sweep got that exactly backwards, since stopUpd
+	   means a settled view stops being redrawn. The widget layer observes the
+	   lifecycle events directly instead of inferring them from geometry. */
+	rect_t pico_baked;
+	int    pico_has_baked;
+#endif
 } gfxw_dyn_view_t;
 
 

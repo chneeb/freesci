@@ -28,6 +28,13 @@
 #include <sci_memory.h>
 #include <gfx_widgets.h>
 
+#if defined(HAVE_PICO) && defined(PICO_STATIC_COMPOSED)
+/* pico_driver.c: erase a view's persisted colour from the composed PSRAM
+   surface by copying that rect back from the pristine background. Declared here
+   rather than in a header because it is one Pico-only driver entry point. */
+void pico_invalidate_static_region(struct _gfx_driver *drv, rect_t area);
+#endif
+
 #undef GFXW_DEBUG_DIRTY /* Enable to debug dirty rectangle propagation (writes to stderr) */
 
 #ifdef GFXW_DEBUG_DIRTY
@@ -405,6 +412,21 @@ _gfxwop_basic_free(gfxw_widget_t *widget)
 
 		gfxw_remove_widget_from_container(widget->parent, widget);
 	}
+
+#if defined(HAVE_PICO) && defined(PICO_STATIC_COMPOSED)
+	/* Event 3: DISPOSED. A view that persisted colour into the composed surface
+	   and is now being freed will never draw again, so nothing else can erase
+	   it -- this is the PQ2 picked-up card and the dismissed glovebox overlay.
+	   Checked before the widget is freed, obviously. */
+	if (GFXW_IS_DYN_VIEW(widget)) {
+		gfxw_dyn_view_t *dv = (gfxw_dyn_view_t *) widget;
+
+		if (dv->pico_has_baked && state && state->driver) {
+			pico_invalidate_static_region(state->driver, dv->pico_baked);
+			dv->pico_has_baked = 0;
+		}
+	}
+#endif
 
 	_gfxw_unallocate_widget(state, widget);
 
@@ -929,6 +951,34 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 	   via the fall-through draw below, exactly like baseline, so nothing can ghost.
 	   With _BAKE the flag stays 0 and the color is also persisted (glovebox items
 	   stay visible, at the cost of the documented ghost regressions). */
+#if defined(HAVE_PICO) && defined(PICO_STATIC_COMPOSED)
+	/* PHASE 2c -- per-widget lifecycle invalidation, replacing the frame sweep.
+	   Only three events can make a persisted view stale, and each is observable
+	   right here or at the free path; none of them is inferable from rects:
+	     1. it MOVED           -> baked rect != the rect it is about to bake
+	     2. it RESUMED updating-> NO_UPDATE cleared, so it is animating again and
+	                              must stop being part of the background
+	     3. it was DISPOSED    -> handled in _gfxwop_basic_free
+	   A view that merely SETTLED matches case 0 (same rect, still NO_UPDATE) and
+	   is deliberately left alone -- that is the SQ3 door staying closed, which
+	   the sweep erased. */
+	{
+		rect_t now = _move_rect(view->draw_bounds, pos);
+		int stale = view->pico_has_baked
+			&& (!(view->signal & 0x0004)
+			    || view->pico_baked.x  != now.x
+			    || view->pico_baked.y  != now.y
+			    || view->pico_baked.xl != now.xl
+			    || view->pico_baked.yl != now.yl);
+
+		if (stale) {
+			pico_invalidate_static_region(view->visual->gfx_state->driver,
+						      view->pico_baked);
+			view->pico_has_baked = 0;
+		}
+	}
+#endif
+
 	if (view->signal & 0x0004) {
 #if defined(PICO_STATIC_VIEW_PRIORITY) && !defined(PICO_STATIC_VIEW_BAKE)
 		extern int pico_priority_only_static;
@@ -957,6 +1007,9 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 						 view->color, view->palette));
 #if defined(HAVE_PICO) && defined(PICO_STATIC_COMPOSED)
 		pico_static_fullscreen = 0;
+		/* Remember what was persisted, so the checks above can undo it. */
+		view->pico_baked = _move_rect(view->draw_bounds, pos);
+		view->pico_has_baked = 1;
 #endif
 #if defined(PICO_STATIC_VIEW_PRIORITY) && !defined(PICO_STATIC_VIEW_BAKE)
 		pico_priority_only_static = 0;
@@ -1158,6 +1211,16 @@ gfxw_new_dyn_view(gfx_state_t *state, point_t pos, int z, int view, int loop, in
 	widget->sequence = sequence;
 	widget->force_precedence = 0;
 	widget->palette = palette;
+#if defined(HAVE_PICO) && defined(PICO_STATIC_COMPOSED)
+	/* MUST be initialised explicitly: _gfxw_new_widget uses sci_malloc and sets
+	   every field by hand (its memset is behind SATISFY_PURIFY, which is not
+	   defined), so anything left out holds heap garbage. A garbage
+	   pico_has_baked makes the first draw invalidate a garbage rect, and
+	   pico_invalidate_static_region then loops over a garbage yl doing PSRAM
+	   I/O -- which hung SQ3's intro with screen and UART both frozen. */
+	widget->pico_baked = gfx_rect(0, 0, 0, 0);
+	widget->pico_has_baked = 0;
+#endif
 
 	if (halign == ALIGN_CENTER)
 		xalignmod = width >> 1;

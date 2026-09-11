@@ -951,48 +951,13 @@ static int pico_compose_ensure(struct _pico_state *ps)
     return 1;
 }
 
-/* PHASE 2b -- "re-bake or be erased". Persisting a static view's COLOUR is only
-   safe if something un-persists it; without this, a view that moves or is
-   disposed leaves stale pixels in composed forever (device: SQ3's door stuck
-   CLOSED through its open animation; PQ2's picked-up card, glovebox lid and
-   closeup overlay all lingering).
-
-   Identity is not available down here -- the driver sees rects, not widgets --
-   but it does not need to be: a settled view is redrawn every frame it is still
-   part of the scene, at the SAME rect. So track the rects baked into composed,
-   mark each one that re-bakes, and at the frame boundary erase the ones that did
-   not. That covers BOTH failure modes with one rule: a view that moved leaves
-   its old rect unmarked, and a disposed view leaves its only rect unmarked.
-   Steady state costs nothing -- an unmoved view matches and no PSRAM is touched. */
-#define PICO_COMPOSED_MAX 24
-static struct { rect_t r; int used, seen; } s_composed_rects[PICO_COMPOSED_MAX];
-
-static void composed_mark(rect_t r)
-{
-    int i, free_slot = -1;
-    for (i = 0; i < PICO_COMPOSED_MAX; i++) {
-        if (!s_composed_rects[i].used) { if (free_slot < 0) free_slot = i; continue; }
-        if (s_composed_rects[i].r.x  == r.x  && s_composed_rects[i].r.y  == r.y
-         && s_composed_rects[i].r.xl == r.xl && s_composed_rects[i].r.yl == r.yl) {
-            s_composed_rects[i].seen = 1;
-            return;
-        }
-    }
-    /* Table full: the view still renders, it just can no longer be un-baked, so
-       it may ghost. 24 slots is far more than any observed scene's settled-view
-       count; if this ever bites, the symptom is a lingering view, never a crash. */
-    if (free_slot < 0) return;
-    s_composed_rects[free_slot].r = r;
-    s_composed_rects[free_slot].used = 1;
-    s_composed_rects[free_slot].seen = 1;
-}
-
-static void composed_forget_all(void)
-{
-    int i;
-    for (i = 0; i < PICO_COMPOSED_MAX; i++)
-        s_composed_rects[i].used = s_composed_rects[i].seen = 0;
-}
+/* PHASE 2b was a frame-level "re-bake or be erased" sweep over tracked rects.
+   It is RETIRED: device-testing showed it erases exactly what should persist,
+   because stopUpd means a settled view stops being redrawn, so its rect goes
+   unmarked and the sweep wipes it (SQ3's door stopped closing). The
+   settled-vs-gone distinction is not visible in rects at all. Phase 2c moves it
+   to the widget layer (widgets.c), which observes move / resume-updating /
+   dispose directly; pico_invalidate_static_region below is what it calls. */
 
 /* Erase a baked static view: copy its rect back from the pristine static_bg into
    the composed surface, so the next BACK restore reproduces clean background
@@ -1011,6 +976,16 @@ void pico_invalidate_static_region(struct _gfx_driver *drv, rect_t area)
 
     bw = bg->index_xl;
     bh = bg->index_yl;
+
+    /* Bound the rect to the screen BEFORE looping. This is defence, not
+       cosmetics: an out-of-range yl here means iterating that many times doing
+       PSRAM I/O, which presents as a total freeze (screen and UART both dead)
+       rather than a fault -- exactly what an uninitialised pico_has_baked
+       produced. A bad rect must degrade to "restore nothing", never to a hang. */
+    if (area.xl <= 0 || area.yl <= 0) return;
+    if (area.xl > bw) area.xl = bw;
+    if (area.yl > bh) area.yl = bh;
+
     x0 = area.x < 0 ? 0 : area.x;
     x1 = area.x + area.xl;
     if (x1 > bw) x1 = bw;
@@ -1027,19 +1002,6 @@ void pico_invalidate_static_region(struct _gfx_driver *drv, rect_t area)
     }
 }
 
-/* Frame boundary: erase every tracked rect that did NOT re-bake this frame.
-   Called from the FRONT flush, so a rect that goes stale is corrected on the
-   next frame's BACK restore -- one frame of latency, not a persistent ghost. */
-static void composed_sweep(struct _gfx_driver *drv)
-{
-    int i;
-    for (i = 0; i < PICO_COMPOSED_MAX; i++) {
-        if (!s_composed_rects[i].used) continue;
-        if (s_composed_rects[i].seen) { s_composed_rects[i].seen = 0; continue; }
-        pico_invalidate_static_region(drv, s_composed_rects[i].r);
-        s_composed_rects[i].used = 0;
-    }
-}
 #endif /* !PICO_USE_STATIC_VISUAL */
 
 static void pico_bake_static_region(struct _pico_state *ps, rect_t dest)
@@ -1195,7 +1157,6 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
         int x0 = dest.x < 0 ? 0 : dest.x;
         int w  = dest.x + dest.xl > bw ? bw - x0 : dest.xl - (x0 - dest.x);
 
-        composed_mark(dest);
         if (w > 0) for (int row = 0; row < dest.yl; row++) {
             int dy = dest.y + row;
             if (dy < 0 || dy >= bg->index_yl) continue;
@@ -1428,13 +1389,6 @@ static int pico_update(struct _gfx_driver *drv,
                   dest.x, dest.y, src.xl, src.yl);
 #endif
         flush_region(S, dest.x, dest.y, src.xl, src.yl);
-#if !defined(PICO_USE_STATIC_VISUAL) && defined(PICO_STATIC_COMPOSED)
-        /* Frame boundary for "re-bake or be erased". A settled view that stopped
-           drawing (moved, animated away, or was disposed) has its persisted
-           colour erased from composed here, so the next BACK restore reproduces
-           clean background instead of a ghost. */
-        composed_sweep(drv);
-#endif
 #ifdef FSCI_PROBE_FPS
         /* Frame rate == the sound poll rate (pico_sfx_poll is driven from here),
            and the poll rate sets the MINIMUM safe PICO_PWM_BUF_FRAMES, since the
@@ -1507,7 +1461,6 @@ static int pico_set_static_buffer(struct _gfx_driver *drv,
        from being served to BACK restores. */
     S->composed_valid = 0;
     S->composed_addr = 0;
-    composed_forget_all();   /* rects referred to the previous room's surface */
 #endif
 #ifdef PICO_USE_STATIC_VISUAL
     /* The static buffer now predates the current background. It is refreshed
