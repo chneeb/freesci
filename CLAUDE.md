@@ -3433,6 +3433,53 @@ non-blocking USB stdout they are DROPPED rather than waited on -- so that work w
 `FSCI_PROBE_GFX=ON` build). Probes off took it to 17,276; the always-on timing above adds 8. Use 17,284 as
 the "PicoCalc build unchanged" check after shared-file edits.
 
+#### 4bpp visual buffer (D16 dithering) -- ASSESSED, not built. PIO-only value.
+
+Asked: would EGA/CGA reduce the buffers? **The answer is not CGA.** The 64KB visual buffer is 8bpp not
+because of 16 colours but because each byte holds a **dither PAIR** (two EGA indices, `i & 0xf` and
+`i >> 4`), which `INTERCOL` blends -- hence the 256-entry `gfx_sci0_pic_colors`. All 8 bits are
+load-bearing. CGA (4 colours, 2bpp) is also not applicable: SCI0 resources carry EGA pairs, there is no
+CGA data to switch to.
+
+The real option is **`GFXR_DITHER_MODE_D16`** -- commented `/* Sierra SCI style */` in `gfx_resource.h`,
+i.e. what the original hardware actually showed: one EGA index per pixel with a **spatial checkerboard**,
+16 colours, which permits a **4bpp buffer (64KB -> 32KB each)**.
+
+**Measured similarity** (`tests/ditherpreview.c` renders a pic both ways to BMP):
+
+| pic | byte-identical pixels | mean RGB diff |
+|---|---|---|
+| SQ3 pic 2 | **96.0%** | 1.3 / 255 |
+| SQ3 pic 3 | 87.9% | 4.5 |
+| KQ4 pic 25 | 78.5% | 7.2 |
+| PQ2 pic 1 | 75.5% | 10.1 |
+
+Most SCI0 art is solid colour -- both nibbles equal, so the blend equals the pure EGA colour and D16
+matches EXACTLY. Only genuinely dithered regions change (PQ2's brickwork and road are the visible case).
+SQ3 pic 2 uses just **18 distinct output colours** in F256, so the 256-entry table is barely exercised.
+
+**Value: ~32KB on PIO (more than doubling its ~26KB margin); NOTHING on Pimoroni** (~120KB free, and it
+would slow the hot flush loop). So this is a PIO-only lever.
+
+**Plan (as a build option, default OFF):**
+1. **Engine: select D16 at decode.** `gfxr_dither_pic0` already exists. Verifiable OFFLINE -- confirm the
+   visual map only ever holds 0-15.
+2. **Engine: packed visual writes.** Teach the visual draw paths the `nibble_packed` trick that
+   priority/control already use (`ctl_set`/`ctl_fill`). Riskiest phase: the visual writers (fills, lines,
+   brush/pattern, RLE cels) are MORE numerous than control's. Verifiable OFFLINE with a `tests/picodiff`-style
+   differ.
+3. **Driver: ~10 sites.** `flush_region` (nibble unpack per pixel -- the hottest loop), `pico_blit_indexed`,
+   `draw_line_raw`, filled-rect memset, grab/restore, `bake_static_region`, BACK-restore memcpy, alloc/clear,
+   buffer size 64000 -> 32000.
+4. **The borrow paths**: parse-time PSRAM borrow sizes, and the decode-buffer reuse (`operations.c:2401`
+   hands visual[0] to the decoder as `visual_map->index_data`).
+
+**RISK -- this is the same shape as the 16-bit LCD attempt that failed, four times bigger.** That broke
+because one writer was converted out of many; here there are ~10 in the driver PLUS shared decode paths, and
+any missed writer shears the image. Mitigation: phases 1-2 are fully offline-verifiable, so only phase 3
+needs hardware. Costs beyond the work: a slower flush loop, and a visibly different (arguably more
+authentic) picture.
+
 #### PARKED / NEXT STEPS (as of 2026-09-05, end of the sound session)
 
 Ordered roughly by value. Nothing here is in progress.
