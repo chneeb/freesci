@@ -111,13 +111,45 @@ run(gfx_mode_t *mode, int picnum, int verbose)
 	pico_gfxr_dither_pic0(p, GFXR_DITHER_MODE_D16, GFXR_DITHER_PATTERN_1);
 
 	n = d->visual_map->index_xl * d->visual_map->index_yl;
-	for (i = 0; i < n; i++) {
-		int a = d->visual_map->index_data[i];
-		int b = pixel_at(p->visual_map, i);
+	{
+		/* Classify each mismatch. "neighbour" means pico's value at i equals
+		   desktop's at i^1 -- the OTHER pixel sharing the same packed byte --
+		   which is an indexing/parity slip in a writer, NOT a wrong D16
+		   selection. Distinguishing the two decides where to look. */
+		int neigh = 0;
+		for (i = 0; i < n; i++) {
+			int a = d->visual_map->index_data[i];
+			int b = pixel_at(p->visual_map, i);
 
-		if (a != b) {
-			if (first < 0) first = i;
-			diffs++;
+			if (a != b) {
+				if (first < 0) first = i;
+				diffs++;
+				if (d->visual_map->index_data[i ^ 1] == b)
+					neigh++;
+			}
+		}
+		if (diffs && getenv("CLASSIFY")) {
+			int oddx = 0, oddy = 0, j;
+			for (j = 0; j < n; j++)
+				if (d->visual_map->index_data[j] != pixel_at(p->visual_map, j)) {
+					if ((j % W) & 1) oddx++;
+					if ((j / W) & 1) oddy++;
+				}
+			if (getenv("COORDS")) {
+				int shown = 0;
+				for (j = 0; j < n && shown < 24; j++)
+					if (d->visual_map->index_data[j] != pixel_at(p->visual_map, j)) {
+						printf("             (%3d,%3d) d=%2d p=%2d\n",
+						       j % W, j / W,
+						       d->visual_map->index_data[j],
+						       pixel_at(p->visual_map, j));
+						shown++;
+					}
+			}
+			printf("           %d diffs: %d neighbour-match (%.0f%%), "
+			       "odd-x %d (%.0f%%), odd-y %d (%.0f%%)\n",
+			       diffs, neigh, 100.0 * neigh / diffs,
+			       oddx, 100.0 * oddx / diffs, oddy, 100.0 * oddy / diffs);
 		}
 	}
 

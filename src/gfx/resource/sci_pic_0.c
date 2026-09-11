@@ -828,7 +828,7 @@ _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
 					gfx_d16_fill_span_packed(buffer, offset0, (oldxx << 1) + 1,
 								 color, offset0 % linewidth,
 								 offset0 / linewidth);
-					if (offset1 != offset0)
+					if (offset1)   /* sentinel: 0 == skip (menu bar) */
 						gfx_d16_fill_span_packed(buffer, offset1,
 									 (oldxx << 1) + 1, color,
 									 offset1 % linewidth,
@@ -849,7 +849,17 @@ _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
 			case ELLIPSE_OR:
 				for (j=0; j < (oldxx << 1) + 1; j++) {
 #ifdef HAVE_PICO
-					if (packed) {
+					if (packed == PICO_PACK_D16) {
+						/* OR-ing a dither PAIR into a packed map still needs
+						   the per-pixel nibble selection; ctl_set below would
+						   OR the whole pair in and corrupt the value. */
+						int i0 = offset0 + j, i1 = offset1 + j;
+						ctl_set(buffer, i0, ctl_get(buffer, i0)
+							| GFX_D16_SELECT(color, i0 % linewidth, i0 / linewidth));
+						if (offset1)
+							ctl_set(buffer, i1, ctl_get(buffer, i1)
+								| GFX_D16_SELECT(color, i1 % linewidth, i1 / linewidth));
+					} else if (packed) {
 						ctl_set(buffer, offset0 + j, ctl_get(buffer, offset0 + j) | color);
 						if (offset1)
 							ctl_set(buffer, offset1 + j, ctl_get(buffer, offset1 + j) | color);
@@ -1044,7 +1054,17 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 
 			if ((mask & map_nr) && map->index_data)
 #ifdef HAVE_PICO
-				if (map->nibble_packed)
+				/* `map` is chosen at RUNTIME and can be the VISUAL map, in
+				   which case `control` is a dither PAIR and ctl_fill would
+				   write one constant nibble, losing half the dither. This is
+				   the same trap as the brush and ellipse, but easier to miss
+				   because the map is not named at the call site. */
+				if (map->nibble_packed && map_nr == GFX_MASK_VISUAL)
+					gfx_d16_fill_span_packed(map->index_data,
+								 yoffset + offset + x, width, control,
+								 (yoffset + offset + x) % map->index_xl,
+								 (yoffset + offset + x) / map->index_xl);
+				else if (map->nibble_packed)
 					ctl_fill(map->index_data, yoffset + offset + x, width, control);
 				else
 #endif

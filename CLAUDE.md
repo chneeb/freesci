@@ -3589,14 +3589,32 @@ flag from the priority work and used `ctl_fill` -- correct for priority, and it 
 nibble everywhere on a visual map, silently losing half the dither. The visual call sites had been
 hardcoding 0.
 
-**RESIDUAL, precisely characterised (open):** every remaining differing pixel has the SAME signature --
-**desktop took the LOW nibble, pico the HIGH one** (4 vs 12, 5 vs 13, 1 vs 9, 0 vs 1, 15 vs 14 -- each pair
-differs by exactly one nibble position). So it is INVERTED PARITY at scattered pixels, not a missing writer.
-Ruled out so far: `gfxr_remove_artifacts_pic0` (only called from the scaled path in `sci_resmgr.c`, never
-from `gfxr_draw_pic01`), and the line writer's coordinate convention (`LINEMACRO`'s `linearmod` is
-+/-PIXELWIDTH, i.e. x is a BYTE offset -- which equals the pixel x only because the packed variant sets
-PIXELWIDTH 1; worth remembering if that ever changes). Two outliers, SQ3 pic 2 (108 px) and pic 120
-(1,164 px), may be a different cause again.
+**A FOURTH packed writer was hiding, found by classifying the residual rather than re-reading code:
+`_gfxr_plot_aux_pattern`.** It selects its target `map` at RUNTIME (`case GFX_MASK_VISUAL: map =
+pic->visual_map`), so the visual map reaches it without ever being named at the call site -- which is why the
+survey missed it. When packed it wrote via `ctl_fill`, i.e. ONE CONSTANT NIBBLE from a dither pair. Same trap
+as the brush and ellipse, harder to see. Fixing it took the differing-pic counts **SQ3 16 -> 4, PQ2 4 -> 1,
+KQ4 19 -> 6**, i.e. SQ3 111/115, PQ2 77/78, KQ4 144/150 now byte-exact.
+
+**How it was found, because the method generalises:** the differ was extended to CLASSIFY each mismatch
+rather than just count it -- does pico's value equal desktop's value at the NEIGHBOUR pixel `i^1` (the other
+pixel in the same packed byte)? what is the x- and y-parity of the differing pixels? Dumping coordinates then
+showed a contiguous horizontal run whose packed byte was the exact NIBBLE-SWAP of the correct one. Counting
+diffs tells you how much is wrong; classifying them tells you WHICH WRITER. Use `CLASSIFY=1` and `COORDS=1`.
+
+**Also fixed along the way, both real bugs:** the ellipse's `offset1` guard had been changed from the
+original `if (offset1)` -- a SENTINEL, zeroed to mean "skip, menu bar" -- to `if (offset1 != offset0)`,
+which both dropped and duplicated spans; and `ELLIPSE_OR` still OR-ed a whole dither pair into a packed map.
+Neither moved the counts (these paths are not exercised at `xfact == 1`, where the ellipse radius is 0), but
+both would have bitten later.
+
+**RESIDUAL (open), sharply characterised:** SQ3 pic 2 holds 108 of the remaining pixels and is UNCHANGED by
+the fix above, so it is a different cause again. Its signature: a contiguous horizontal run at y=18,
+**every differing pixel on an EVEN row (odd-y 0%)**, x-parity split 50/50, and the packed byte is the
+nibble-swap of the expected one. SQ3 pic 28 (31 px, 90% neighbour-match) looks like the same thing. Ruled
+out so far: `gfxr_remove_artifacts_pic0` (only reached from the scaled path in `sci_resmgr.c`, never from
+`gfxr_draw_pic01`); the `getenv("FOO1")` debug writes at ~1905 (dead); and the line writer's coordinate
+convention.
 
 **Coverage limit, to be explicit:** `visdiff` covers pic decode only. View cel decode, runtime drawing
 (dialog fills, kGraph lines) and the entire DRIVER half -- flush, blit, grab/restore, bake -- have NO offline
