@@ -1,0 +1,39 @@
+drvdiff -- run the REAL pico_driver.c on the desktop and capture exactly what it
+would send to the panel.
+
+visdiff (tests/picodiff) covers pic DECODE only. The driver half -- flush_region,
+pico_blit_indexed, draw_line, draw_filled_rect, grab/restore, bake_static_region,
+the BACK restore -- had NO offline coverage, and that is where the 16-bit LCD
+attempt died: one writer converted, the rest still emitting the old format, only
+visible as a sheared picture on hardware.
+
+pico_driver.c's hardware surface is small (13 functions), so drvstub.c stands in
+for it and captures hw_send_spi -- the bytes that actually reach the panel --
+plus every define_region_spi header, because correct pixels sent to the wrong
+window are still a wrong picture.
+
+Packed vs unpacked is a COMPILE-TIME choice, so this builds TWICE and diffs the
+captures rather than linking two renamed copies.
+
+  cd tests/drvdiff
+  LIBS=$(find ../../build -name '*.a' | tr '\n' ' ')
+  for cfg in "" "-DPICO_PACK_VISUAL=1"; do
+    out=$([ -z "$cfg" ] && echo unpacked || echo packed)
+    gcc -fgnu89-inline -w -include stdint.h -DHAVE_CONFIG_H=1 -DX_DISPLAY_MISSING=1 \
+        -DHAVE_PICO=1 -DPICO_DITHER_D16=1 $cfg \
+        -I. -I../../src/include -I../../build -I/usr/include/SDL2 -D_REENTRANT \
+        -o drvdiff_$out drvdiff_main.c ../../src/gfx/drivers/pico_driver.c drvstub.c \
+        -Wl,--start-group $LIBS -Wl,--end-group -lSDL2 -lm -lz -lpthread -ldl
+  done
+  ./drvdiff_unpacked cap_unpacked.bin && ./drvdiff_packed cap_packed.bin
+  cmp cap_unpacked.bin cap_packed.bin      # must be identical
+
+  PPM=1 ./drvdiff_unpacked cap.bin         # also dumps cap.bin.ppm to LOOK at
+
+Baseline with nothing converted: 192,020 bytes captured (20-byte region header +
+320*200*3 RGB), 16 distinct colours, packed == unpacked.
+
+TWO TRAPS, both of which produced a silently BLANK or flat frame and no error:
+ - gfx_color_t.mask must be set (GFX_MASK_VISUAL) or every draw is a no-op.
+ - a cel needs colors/colors_nr; a NULL palette collapses every index to one
+   colour. colors_nr 256 selects the identity path, as backgrounds use.

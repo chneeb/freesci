@@ -13,3 +13,7 @@ tests/picodiff/pico_pic.c
 tests/picodiff/pico_pic.o
 tests/picodiff/picodiff
 tests/picodiff/visdiff
+tests/drvdiff/drvdiff_unpacked
+tests/drvdiff/drvdiff_packed
+tests/drvdiff/*.bin
+tests/drvdiff/*.ppm
