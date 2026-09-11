@@ -3608,13 +3608,29 @@ which both dropped and duplicated spans; and `ELLIPSE_OR` still OR-ed a whole di
 Neither moved the counts (these paths are not exercised at `xfact == 1`, where the ellipse radius is 0), but
 both would have bitten later.
 
-**RESIDUAL (open), sharply characterised:** SQ3 pic 2 holds 108 of the remaining pixels and is UNCHANGED by
-the fix above, so it is a different cause again. Its signature: a contiguous horizontal run at y=18,
-**every differing pixel on an EVEN row (odd-y 0%)**, x-parity split 50/50, and the packed byte is the
-nibble-swap of the expected one. SQ3 pic 28 (31 px, 90% neighbour-match) looks like the same thing. Ruled
-out so far: `gfxr_remove_artifacts_pic0` (only reached from the scaled path in `sci_resmgr.c`, never from
-`gfxr_draw_pic01`); the `getenv("FOO1")` debug writes at ~1905 (dead); and the line writer's coordinate
-convention.
+**SCOPE REDUCTION: `sci_view_0.c`'s cel RLE is OUT of the 4bpp work, and cannot be packed at all.**
+Cel buffers use **255** as the transparency key -- `retval->color_key = 255; /* Pick something larger than
+15 */` (`sci_view_0.c:87`), the comment saying outright that it is chosen to be out of nibble range. A packed
+cel has no way to express "transparent", so the format is a hard blocker, not an effort question. It is also
+unnecessary: cels decode into `g_pico_priority_scratch` (the B-1.3 borrow) and are offloaded to PSRAM, and
+**nothing decodes a cel into `visual[0]`**, so they never touch the buffer being packed. Only the DRIVER's
+blit has to read an 8bpp cel and write packed. Do not re-open this.
+
+**So the endgame is the DRIVER HALF ALONE**, ~10 sites in `pico_driver.c`: `flush_region` (unpack per pixel,
+the hottest loop), `pico_blit_indexed` (8bpp cel in, packed out), `draw_line_raw`, the filled-rect memset,
+grab/restore, `bake_static_region`, the BACK-restore memcpy, alloc/clear, and the 64000 -> 32000 size. Plus
+the parse-time PSRAM borrow sizes and the decode-buffer reuse at `operations.c` (visual[0] handed to the
+decoder as `visual_map->index_data` -- which is where `nibble_packed` must finally be set, together with the
+half-size allocation).
+
+**RESIDUAL (open), sharply characterised:** SQ3 pic 2's 108 pixels are ALL ON ONE ROW -- y=18, x 66..319,
+non-contiguous -- and were unmoved by the `_gfxr_plot_aux_pattern` fix. Decisive detail: pico's underlying
+pair is `0x9B` where desktop's is `0xF9`, and those are NOT nibble-swaps of each other (0xF9 swapped is
+0x9F). Different COLOURS, not a mis-selected nibble -- so this looks like an ordering/overwrite difference
+on that row, i.e. a later op that applied on desktop and partially did not on the packed path, NOT a writer
+format bug. SQ3 pic 28 (31 px) is probably the same. Chase it with `CLASSIFY=1 COORDS=1`, and treat "which
+op paints y=18 last" as the question. Ruled out: `gfxr_remove_artifacts_pic0` (scaled path only), the
+`getenv("FOO1")` debug writes (dead), and the line writer's coordinate convention.
 
 **Coverage limit, to be explicit:** `visdiff` covers pic decode only. View cel decode, runtime drawing
 (dialog fills, kGraph lines) and the entire DRIVER half -- flush, blit, grab/restore, bake -- have NO offline

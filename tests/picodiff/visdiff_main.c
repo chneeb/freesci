@@ -137,7 +137,7 @@ run(gfx_mode_t *mode, int picnum, int verbose)
 				}
 			if (getenv("COORDS")) {
 				int shown = 0;
-				for (j = 0; j < n && shown < 24; j++)
+				for (j = 0; j < n && shown < 500; j++)
 					if (d->visual_map->index_data[j] != pixel_at(p->visual_map, j)) {
 						printf("             (%3d,%3d) d=%2d p=%2d\n",
 						       j % W, j / W,
