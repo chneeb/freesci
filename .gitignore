@@ -7,3 +7,9 @@ build-*/
 # wildcard over that category would silently hide files that belong in git.
 pico*.log
 asan.log
+
+# picodiff/visdiff build products (the harnesses are sources, these are not)
+tests/picodiff/pico_pic.c
+tests/picodiff/pico_pic.o
+tests/picodiff/picodiff
+tests/picodiff/visdiff

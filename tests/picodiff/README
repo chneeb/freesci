@@ -1,3 +1,22 @@
+Two differs live here, sharing picoprefix.h and psram_stub.c.
+
+  diff_main.c  -> picodiff : CONTROL map (byte path vs Pico nibble-packed)
+  visdiff_main.c -> visdiff : VISUAL map (the 4bpp/D16 safety net)
+
+Build both the same way; only the final link differs (see each file's header).
+visdiff exists BEFORE any visual writer is converted, deliberately: the 16-bit
+LCD attempt failed because one writer out of many was converted and the rest
+still emitted the old format. Re-run visdiff after each single conversion and a
+missed writer shows up as a per-pixel mismatch, offline, instead of as a sheared
+picture on the device. Baseline today (nothing converted yet):
+
+  sq3 115 pics / pq2 78 / kq4 150, 0 differ  -- the harness agreeing with itself
+
+NB under HAVE_PICO the decoder DEFERS every index_data allocation to its caller,
+so both differs must supply visual/priority/aux buffers themselves.
+
+--- picodiff (control map) ---
+
 Decodes a pic's CONTROL map twice -- once through the desktop byte-per-pixel path
 and once through the Pico nibble-packed path -- and diffs them. Compiles a SECOND
 copy of sci_pic_0.c with -DHAVE_PICO, renaming its exported symbols (picoprefix.h)
