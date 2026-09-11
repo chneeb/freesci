@@ -824,7 +824,16 @@ _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
 
 			case ELLIPSE_SOLID:
 #ifdef HAVE_PICO
-				if (packed) {
+				if (packed == PICO_PACK_D16) {
+					gfx_d16_fill_span_packed(buffer, offset0, (oldxx << 1) + 1,
+								 color, offset0 % linewidth,
+								 offset0 / linewidth);
+					if (offset1 != offset0)
+						gfx_d16_fill_span_packed(buffer, offset1,
+									 (oldxx << 1) + 1, color,
+									 offset1 % linewidth,
+									 offset1 / linewidth);
+				} else if (packed) {
 					ctl_fill(buffer, offset0, (oldxx << 1) + 1, color);
 					if (offset1)
 						ctl_fill(buffer, offset1, (oldxx << 1) + 1, color);
@@ -883,7 +892,12 @@ _gfxr_auxplot_brush(gfxr_pic_t *pic, byte *buffer, int yoffset, int offset, int 
 		if (plot)
 			for (yc = 0; yc < pic->mode->yfact; yc++) {
 #ifdef HAVE_PICO
-				if (packed)
+				if (packed == PICO_PACK_D16)
+					gfx_d16_fill_span_packed(buffer, full_offset,
+								 pic->mode->xfact, color,
+								 full_offset % line_width,
+								 full_offset / line_width);
+				else if (packed)
 					ctl_fill(buffer, full_offset, pic->mode->xfact, color);
 				else
 #endif
@@ -1057,7 +1071,9 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 					if (mask & GFX_MASK_VISUAL)
 						_gfxr_auxplot_brush(pic, pic->visual_map->index_data,
 								    yoffset, x + offset + j,
-								    1, color, brush_mode, random_index + x, 0);
+								    1, color, brush_mode, random_index + x,
+								    pic->visual_map->nibble_packed
+								    ? PICO_PACK_D16 : 0);
 
 					if (mask & GFX_MASK_PRIORITY)
 						_gfxr_auxplot_brush(pic, pic->priority_map->index_data,
@@ -1069,7 +1085,9 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 					if (mask & GFX_MASK_VISUAL)
 						_gfxr_auxplot_brush(pic, pic->visual_map->index_data,
 								    yoffset, x + offset + j,
-								    0, color, brush_mode, random_index + x, 0);
+								    0, color, brush_mode, random_index + x,
+								    pic->visual_map->nibble_packed
+								    ? PICO_PACK_D16 : 0);
 
 					if (mask & GFX_MASK_PRIORITY)
 						_gfxr_auxplot_brush(pic, pic->priority_map->index_data,
@@ -1196,7 +1214,9 @@ _gfxr_draw_pattern(gfxr_pic_t *pic, int x, int y, int color, int priority, int c
 				if (drawenable & GFX_MASK_VISUAL)
 					_gfxr_fill_ellipse(pic, pic->visual_map->index_data, 320 * pic->mode->xfact,
 							   scaled_x, scaled_y, xsize, ysize,
-							   color, ELLIPSE_SOLID, 0);
+							   color, ELLIPSE_SOLID,
+							   pic->visual_map->nibble_packed
+							   ? PICO_PACK_D16 : 0);
 
 				if (drawenable & GFX_MASK_PRIORITY)
 					_gfxr_fill_ellipse(pic, pic->priority_map->index_data, 320 * pic->mode->xfact,

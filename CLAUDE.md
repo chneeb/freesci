@@ -3572,9 +3572,31 @@ Packed diffs on SQ3 pic 2: **39,517 -> 23,970 -> 1,414 of 64,000 (97.8% correct)
 The fill's span write reuses `gfx_d16_fill_span_packed`, shared with the packed box, so the (x+y)&1 parity
 rule has exactly one implementation.
 
-**REMAINING: `_gfxr_auxplot_brush` (2 sites) and `_gfxr_fill_ellipse`** -- the ~1,400 residual pixels are the
-patterned/textured bits. Then `sci_view_0.c`'s cel RLE, the artifact-removal copy, and ~10 driver sites,
-before flipping the real allocation to half-size.
+**BRUSH + ELLIPSE CONVERTED -- the decode half is essentially done.** Packed results:
+
+| game | pics | fully exact | differing |
+|---|---|---|---|
+| SQ3 | 115 | **99** | 16 (thirteen of them by 1-6 pixels) |
+| PQ2 | 78 | **74** | 4 |
+| KQ4 | 150 | **131** | 19 |
+
+SQ3 pic 2 went 1,414 -> 108 of 64,000; **pic 3 reached exactly 0**.
+
+**`packed` is now THREE-state, because the two packed formats are NOT interchangeable** (`PICO_PACK_D16`
+in `gfx_tools.h`): 0 unpacked, 1 packed CONSTANT nibble (priority/control, one value), 2 packed DITHER PAIR
+(visual, nibble varies by (x+y)&1). `_gfxr_auxplot_brush` and `_gfxr_fill_ellipse` already took a `packed`
+flag from the priority work and used `ctl_fill` -- correct for priority, and it would have written the low
+nibble everywhere on a visual map, silently losing half the dither. The visual call sites had been
+hardcoding 0.
+
+**RESIDUAL, precisely characterised (open):** every remaining differing pixel has the SAME signature --
+**desktop took the LOW nibble, pico the HIGH one** (4 vs 12, 5 vs 13, 1 vs 9, 0 vs 1, 15 vs 14 -- each pair
+differs by exactly one nibble position). So it is INVERTED PARITY at scattered pixels, not a missing writer.
+Ruled out so far: `gfxr_remove_artifacts_pic0` (only called from the scaled path in `sci_resmgr.c`, never
+from `gfxr_draw_pic01`), and the line writer's coordinate convention (`LINEMACRO`'s `linearmod` is
++/-PIXELWIDTH, i.e. x is a BYTE offset -- which equals the pixel x only because the packed variant sets
+PIXELWIDTH 1; worth remembering if that ever changes). Two outliers, SQ3 pic 2 (108 px) and pic 120
+(1,164 px), may be a different cause again.
 
 **Coverage limit, to be explicit:** `visdiff` covers pic decode only. View cel decode, runtime drawing
 (dialog fills, kGraph lines) and the entire DRIVER half -- flush, blit, grab/restore, bake -- have NO offline
