@@ -46,32 +46,36 @@
 ** slow" plus a broken-tractor buzz). Because the polled player is a PCM feed,
 ** the song tempo follows the sample clock and drags with it.
 **
-** RIGHT-SIZED 2026-09-12 from rate/11 to rate/30. The old value targeted a
-** ~11Hz worst-case poll rate, chosen BEFORE pico_sfx_poll had been fixed to run
-** from the front flush and usec_sleep -- back then polls really could be that
-** rare (measured 0.3-7/sec). They are now ~60Hz, so the steady-state floor is
-** buf_size >= rate/poll_rate = rate/60, and rate/30 keeps 2x margin on that,
-** tolerating polls sustained at 30Hz.
+** rate/11 (= 1002 frames at 11025) is MEASURED-CORRECT -- do not shrink it.
+** Tried rate/30 on 2026-09-12 on the theory that polls run at ~60Hz post-fix, so
+** the floor would be rate/60. The DEVICE SAYS OTHERWISE. soft.c's own
+** "[sfx-mixer] Output starving: demand N > buf_size" lines give the real poll
+** rate directly, and on SQ3 they read:
 **
-** STALLS ARE THE RING'S JOB, NOT THIS ONE. A ~250ms room decode is absorbed by
-** the ring (371ms, see PWM_SYNTH_RING_SIZE); buf_size only has to let
-** production OUTRUN consumption afterwards so the ring refills -- at 60Hz x
-** rate/30 that is 2x the consumption rate.
+**     demand  402 -> 36ms frame  -> 28Hz   <- ORDINARY frames
+**     demand  496 -> 44ms frame  -> 23Hz
+**     demand 2400 -> 217ms frame -> 4.6Hz
+**     demand 9339 -> 847ms frame -> 1.2Hz  <- song load / room decode
 **
-** Costs ~12 bytes per frame: compbuf 2*N*4 (mixer/soft.c) plus the feed buffer
-** ~4*N. At 11025 that is 12.0KB -> 4.4KB; at 22050, 24.0KB -> 8.8KB. On PIO,
-** where sound has ~26KB of margin, that ~7.6KB is what may decide whether it
-** fits at all.
+** So the steady-state poll rate is 22-28Hz, NOT 60Hz: the real floor is about
+** rate/22 ~ 500, and rate/30 = 367 sits BELOW it -- ordinary frames starve, the
+** PWM IRQ holds last_sample, and the audio sticks (heard on device). rate/11
+** clears the ordinary case with ~2x margin.
+**
+** The multi-hundred-ms stalls cannot be covered by ANY sane buf_size (9339
+** frames would be 112KB of compbuf); those are the ring's job, and starvation
+** lines for them are expected, not a fault.
 **
 ** Raising this cannot be replaced by polling more often: the mixer sizes each
 ** batch from elapsed WALL-CLOCK time, so back-to-back calls compute ~0 frames.
-** NB a reduction was tried and rejected ONCE BEFORE -- but that was pre-poll-fix,
-** when the premise above did not hold. Override with -DPICO_SND_BUF_FRAMES=N if
-** a device ever shows underruns ([snd] probe: underrun should be 0). */
+** Costs ~12 bytes/frame (compbuf 2*N*4 in mixer/soft.c plus feed buf ~4*N):
+** 12.0KB at 11025, 24.0KB at 22050. That looks like the cheapest large saving
+** available and it is NOT -- it is load-bearing. Override with
+** -DPICO_SND_BUF_FRAMES=N only with the starving lines in hand. */
 #ifdef PICO_SND_BUF_FRAMES
 #  define PICO_PWM_BUF_FRAMES PICO_SND_BUF_FRAMES
 #else
-#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 30)
+#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 11)
 #endif
 
 /* Diagnostic: compare PRODUCTION (pushed) against CONSUMPTION (IRQs). Both

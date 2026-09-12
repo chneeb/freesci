@@ -4238,26 +4238,36 @@ move only 27/31 bytes per transaction). Once per room, on top of a ~100ms decode
 `FSCI_PROBE_PERF` before assuming it is free, and keep the rule that invalidation copies a RECT, never the
 screen.
 
-**2. Right-size the audio buffers -- DONE (2026-09-12), `rate/11` -> `rate/30`.** `PICO_PWM_BUF_FRAMES`
-targeted a ~11Hz worst-case poll rate, chosen BEFORE `pico_sfx_poll` was fixed to run from the front flush
-and `usec_sleep` -- back then polls really were that rare (measured 0.3-7/sec). They are ~60Hz now, so the
-steady-state floor is `buf_size >= rate/poll_rate = rate/60`, and `rate/30` keeps **2x margin**, tolerating
-polls sustained at 30Hz.
+**2. Right-sizing the audio buffers is RULED OUT (tried and reverted, 2026-09-12). The ~24KB is NOT
+reclaimable -- `PICO_PWM_BUF_FRAMES` is load-bearing.** The parked note used to call this "the cheapest
+large saving available"; that was wrong, and the device settled it in one flash.
 
-**The key correction to the old sizing: STALLS ARE THE RING'S JOB, not buf_size's.** A ~250ms room decode is
-absorbed by the ring (371ms, `PWM_SYNTH_RING_SIZE`); `buf_size` only has to let production OUTRUN
-consumption afterwards so the ring refills -- at 60Hz x rate/30 that is 2x the consumption rate. The ring is
-deliberately left alone.
+`rate/11` was reduced to `rate/30` on the theory that polls run at ~60Hz since the `pico_sfx_poll` fix, so
+the floor would be `rate/60`. **soft.c's own pre-existing diagnostic measures the poll rate directly** --
+`[sfx-mixer] Output starving: demand N > buf_size` -- and on SQ3 at 11025 it read:
 
-Cost is ~12 bytes per frame: compbuf `2*N*4` (`mixer/soft.c:96-97`) plus the feed buffer ~`4*N`
-(`soft.c:171`). **At 11025: 12.0KB -> 4.4KB (~7.6KB saved); at 22050: 24.0KB -> 8.8KB (~15KB).** On PIO,
-where sound has ~26KB of margin, that ~7.6KB is roughly 29% more headroom -- which is what may decide
-whether PQ2 fits.
+| demand | implied frame | poll rate |
+|---|---|---|
+| 402 | 36 ms | **28 Hz** <- ORDINARY frames |
+| 496 | 44 ms | **23 Hz** |
+| 2400 | 217 ms | 4.6 Hz |
+| 8027 / 9339 | 728 / 847 ms | ~1.2 Hz <- song load / room decode |
 
-**NB these are HEAP (`sci_malloc`) buffers, so the saving does NOT show in `.bss` or `arm-none-eabi-size`** --
-the sound build is 930,772/25,332 either way. Measure it at runtime with `FSCI_PROBE_MEM`, not statically.
-A reduction was tried and rejected once before, pre-poll-fix, when the premise did not hold; the escape
-hatch if a device ever shows underruns is `-DPICO_SND_BUF_FRAMES=N` (watch `[snd]`: `underrun` must be 0).
+**Steady-state polling is 22-28Hz, not 60Hz**, so the real floor is ~`rate/22` = 500 and `rate/30` = 367
+sits BELOW it. Ordinary frames then starve, the PWM IRQ holds `last_sample`, and the audio sticks -- heard
+on device as "Adlib plays well but gets stuck sometimes". Reverted to `rate/11`, which clears the ordinary
+case with ~2x margin.
+
+**Two things worth keeping from this:**
+- **The multi-hundred-ms stalls cannot be covered by ANY sane `buf_size`** (9339 frames would be 112KB of
+  compbuf). Those are the ring's job, and starvation lines for them are EXPECTED, not a fault. Only the
+  ordinary-frame lines (demand a few hundred) indicate a mis-sized buffer.
+- **`[sfx-mixer] Output starving` is a free poll-rate meter.** `demand / rate` is the frame time. Read it
+  before theorising about audio timing -- it is the same lesson as the `[snd]` probe that localised the
+  original starved-poll bug.
+
+Still open from the same session's log: a **shrill "feep" at higher volume** (8-bit PWM quantisation noise,
+separate from starvation) and `[perf] resource load: 14958 ms` for 635 resources.
 
 **3. PIO sound at 11kHz.** Analysed, NOT device-tested. The quality blocker is inherited for free (the poll
 fix is shared code), so the only question is memory. With the oversized buffers it is ~27KB against a ~26KB
