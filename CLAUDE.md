@@ -2799,6 +2799,34 @@ tag added, for this diagnosis; restore the throttle and drop the every-cel/`<TOP
 starfield behind the Two-Guys panels, AND a third overlay scene — now composite correctly. The fix is in
 `gfxr_interpreter_calculate_pic` (`sci_resmgr.c`, SCI0 Pico decode block, `HAVE_PICO`-only).
 
+**RE-CONFIRMED INTERMITTENT (2026-09-12), and the mechanism is now named.** The SAME binary
+(`build-pico`, composed ON) rendered Pestulon MISSING on one run and CORRECTLY on the next -- so it is
+neither a composed-surface regression nor memory exhaustion, it is the documented runtime-state fragility
+below, still present.
+
+**What the failing run showed, and what it ruled out:** two `malloc 64000 failed` lines immediately before
+the Pestulon screen, but **NO `Could not add pic`** -- so `gfxr_add_to_pic` SUCCEEDED and the overlay was
+drawn; the logo was lost inside a decode that completed. That rules out the obvious causal story (failed
+allocation -> overlay skipped) which was proposed and disproved by that one grep. **Check for the error line
+before building a theory on an allocation failure; the recovery paths here are designed to be silent.**
+
+**The fragility has a concrete shape: an OVERLAY decode is the most exposed one in the engine**, because
+`gfxop_add_to_pic` has NEITHER mitigation `gfxop_new_pic` gives a fresh pic -- no `visual[0]` borrow (so it
+must find a FRESH 64,000-byte contiguous block) and no early-pin retry. That is why the deferred-alloc
+failure correlates with the flip even though it is not the direct cause.
+
+**Untried fix, built once and reverted unbundled (2026-09-12):** give `gfxop_add_to_pic` the same
+`visual[0]` borrow the fresh-pic path uses, which removes the 64KB allocation from the overlay path
+entirely rather than adding a retry. Safe for the same reason as the fresh-pic borrow -- `restore_base`
+reloads the base from PSRAM into the decode buffer first, and `pico_render_background` restages `visual[0]`
+after -- and both `gfxr_add_to_pic` calls need arming, since `sci_resmgr` consumes the pointer on use. It
+targets the fragility rather than a hard failure, so **judging it needs SEVERAL COLD BOOTS, not one**.
+
+**To name the exact flip, capture a FAILING run with `FSCI_PROBE_GFX`** and read `[ovl]` against the healthy
+baseline below: `restore_base=0` means the base-restore condition failed; `sum_before` around 16.3M means
+the base came back white (the clear ran instead of the restore); garbage `sum_before` means a stale vaddr;
+`delta=0` means the overlay drew nothing.
+
 **RE-INVESTIGATED + STILL-RESOLVED-AT-HEAD (2026-06-29) — a reported "Pestulon disappeared again" was NOT a
 committed regression; it renders correctly at clean HEAD.** A device session reported the title hidden *behind*
 the SQ3 logo (not on white). Findings:
