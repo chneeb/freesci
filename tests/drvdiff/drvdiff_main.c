@@ -135,6 +135,12 @@ main(int argc, char **argv)
 		gfx_pixmap_t *sv = make_cel(47, 24);   /* odd width */
 
 		bg->index_xl = W; bg->index_yl = H;
+		/* static_bg needs a palette like any other pixmap: the BACK restore
+		   blits THROUGH it, and a NULL colors[] leaves the driver's lut[]
+		   uninitialised -- which differs run to run and build to build, and
+		   looks exactly like a packing bug. */
+		bg->colors = gfx_sci0_pic_colors;
+		bg->colors_nr = GFX_SCI0_PIC_COLORS_NR;
 		bg->index_data = NULL;            /* PSRAM-resident, as on device */
 		bg->psram_addr = psram_alloc((size_t)W * H);
 		bg->psram_valid = 1;

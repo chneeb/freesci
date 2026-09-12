@@ -3635,12 +3635,25 @@ because the harness scene never grabbed anything. **A harness only proves the pa
 walks.** The scene was extended to grab a region and restore it elsewhere before the pass meant anything.
 Check coverage before trusting a green result.
 
-**STILL UNCONVERTED: `pico_bake_static_region`**, which reads `visual[0]` as raw bytes. It needs care rather
-than effort: it stores into the COMPOSED PSRAM surface, whose format must match what the BACK-restore blit
-expects -- and `composed_pxm` is a shallow copy of `static_bg`, so it inherits `nibble_packed`. Under packing
-`static_bg` (the pic's own visual_map) is packed too, so composed must be stored PACKED, which means
-read-modify-write on the edge bytes when x0 or w is odd (a straight store would clobber the neighbouring
-pixels sharing those bytes). Decide that format question before writing the code.
+**DRIVER HALF COMPLETE (2026-09-12) -- packed and unpacked produce BYTE-IDENTICAL panel output across a
+scene covering filled rect, line, cel blit, STATIC draw, bake, compose, BACK restore, grab, restore and
+flush.** `pico_bake_static_region`, `pico_compose_ensure` and `pico_invalidate_static_region` are converted:
+both surfaces share the pixel->byte mapping, so the interior is a straight byte copy and only the shared
+first/last bytes need read-modify-write (at an odd x0 the low nibble belongs to x0-1, at an odd end the high
+nibble belongs to x0+w).
+
+**Two REAL bugs surfaced on the way, neither found by reading the code:**
+- `pico_compose_ensure` / `pico_invalidate_static_region` copied BYTE-PER-PIXEL rows, which on a packed
+  surface reads past the row and leaves the tail unwritten.
+- **the blit's PSRAM VISUAL source read was never packed-aware** -- the priority map had a packed branch, the
+  visual one did not -- so a packed composed surface came back as garbage.
+
+**The last "failure" was HARNESS FIDELITY, not a driver bug, and it cost four patches to learn:** the
+harness's `static_bg` had no `colors[]`, so the BACK restore blitted THROUGH an uninitialised `lut[]`, which
+differs between builds and looks exactly like a packing bug. Instrumenting finally settled it -- a probe
+showed the bake wrote pixel 98 = 3 and the restore read byte 0x63 (low nibble 3) at the same address, i.e.
+bake and restore already AGREED. **When the plumbing traces identical and the content still differs, suspect
+the harness's model of the world before the code under test.**
 
 **NO SHIPPING EXPOSURE: `PICO_PACK_VISUAL` has no CMake option** -- it is set only by the two harnesses, so
 no firmware can build with a half-converted driver. Wiring the option is the LAST step, together with setting
