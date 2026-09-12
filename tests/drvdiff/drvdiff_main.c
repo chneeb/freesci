@@ -126,6 +126,20 @@ main(int argc, char **argv)
 			 gfx_rect(0, 0, 60, 30), gfx_rect(40, 55, 60, 30),
 			 GFX_BUFFER_BACK);
 
+	/* Grab a region and restore it elsewhere. Without this the capture would
+	   NOT cover grab/restore at all, and cmp passing would be a FALSE pass --
+	   the harness only proves the paths the scene actually walks. */
+	{
+		gfx_pixmap_t *grab = gfx_new_pixmap(80, 40, GFX_RESID_NONE, 0, 0);
+
+		grab->xl = grab->index_xl = 80;
+		grab->yl = grab->index_yl = 40;
+		drv->grab_pixmap(drv, gfx_rect(20, 20, 80, 40), grab, GFX_MASK_VISUAL);
+		drv->draw_pixmap(drv, grab, GFX_NO_PRIORITY,
+				 gfx_rect(0, 0, 80, 40), gfx_rect(150, 100, 80, 40),
+				 GFX_BUFFER_BACK);
+	}
+
 	/* Push it to the "panel" -- this is what gets captured. */
 	drv->update(drv, gfx_rect(0, 0, W, H), gfx_point(0, 0), GFX_BUFFER_FRONT);
 

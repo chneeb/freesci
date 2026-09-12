@@ -66,6 +66,44 @@ extern void define_region_spi(int xstart, int ystart, int xend, int yend, int rw
 #  define PICO_NVISUAL     1
 #endif
 
+/* ---- 4bpp visual buffer (PICO_PACK_VISUAL) --------------------------------
+   With D16 dithering every pixel is one index 0..15 (proved across 343 pics by
+   tests/d16check.c), so visual[0] can hold two pixels per byte: 64000 -> 32000,
+   the whole point of the exercise on the SRAM-bound PIO target.
+
+   Everything below goes through PICO_VIS_BYTES / VIS_GET / VIS_SET so the
+   unpacked build is byte-identical -- the accessors compile to plain indexing.
+   That matters because the 16-bit LCD attempt failed by converting ONE writer
+   and leaving the rest: with accessors, a missed site is a compile-visible
+   direct `visual[0][i]` rather than a silent shear. Verify with tests/drvdiff,
+   which runs this file on the desktop and diffs the actual panel bytes. */
+#ifdef PICO_PACK_VISUAL
+#  define PICO_VIS_BYTES   ((PICO_XSIZE * PICO_YSIZE + 1) >> 1)
+#  define PICO_VIS_PACKED  1
+#  define VIS_GET(buf, i)  (((i) & 1) ? ((buf)[(i) >> 1] >> 4) \
+				      : ((buf)[(i) >> 1] & 0x0f))
+#  define VIS_SET(buf, i, v)                                            \
+	do {                                                            \
+		uint8_t *_p = (buf) + ((i) >> 1);                        \
+		uint8_t _n = (uint8_t)((v) & 0x0f);                      \
+		*_p = ((i) & 1) ? (uint8_t)((*_p & 0x0f) | (_n << 4))    \
+				: (uint8_t)((*_p & 0xf0) | _n);          \
+	} while (0)
+#else
+#  define PICO_VIS_BYTES   (PICO_XSIZE * PICO_YSIZE)
+#  define PICO_VIS_PACKED  0
+#  define VIS_GET(buf, i)  ((buf)[(i)])
+#  define VIS_SET(buf, i, v) do { (buf)[(i)] = (uint8_t)(v); } while (0)
+#endif
+
+#ifdef PICO_PACK_VISUAL
+/* Grabbed pixmaps stay 8bpp: their data is consumed elsewhere as plain bytes
+   (and a grab can start at an odd x, where a packed copy would need partial-byte
+   edges for no benefit). So the pack boundary is crossed HERE, on the way in and
+   out, and grab/restore stay symmetric. */
+static uint8_t s_vis_row[PICO_XSIZE];
+#endif
+
 struct _pico_state {
     uint8_t        *visual[PICO_NVISUAL]; /* [0]=back/front (drawing+display) */
     /* priority buffer removed — uses engine's priority_map via s_shared_priority */
@@ -146,9 +184,9 @@ void pico_alloc_visual(gfx_driver_t *drv)
 {
     struct _pico_state *ps = (struct _pico_state *)drv->state;
     if (ps && !ps->visual[0]) {
-        ps->visual[0] = (uint8_t *)sci_malloc_sram(PICO_XSIZE * PICO_YSIZE);
+        ps->visual[0] = (uint8_t *)sci_malloc_sram(PICO_VIS_BYTES);
         if (ps->visual[0])
-            memset(ps->visual[0], 0, PICO_XSIZE * PICO_YSIZE);
+            memset(ps->visual[0], 0, PICO_VIS_BYTES);
     }
 #ifdef PICO_USE_STATIC_VISUAL
     /* The static buffer is best-effort: every use site falls back to the back
@@ -156,7 +194,7 @@ void pico_alloc_visual(gfx_driver_t *drv)
        behaviour rather than failing. */
     if (ps && !ps->visual[PICO_VIS_STATIC]) {
         ps->visual[PICO_VIS_STATIC] =
-            (uint8_t *)sci_malloc_sram(PICO_XSIZE * PICO_YSIZE);
+            (uint8_t *)sci_malloc_sram(PICO_VIS_BYTES);
         if (ps->visual[PICO_VIS_STATIC])
             memset(ps->visual[PICO_VIS_STATIC], 0, PICO_XSIZE * PICO_YSIZE);
     }
@@ -195,7 +233,7 @@ int pico_borrow_visual(gfx_driver_t *drv)
     struct _pico_state *ps = (struct _pico_state *)drv->state;
     if (!ps || !ps->visual[0])
         return 0;
-    psram_store(PICO_PARSE_SCRATCH_ADDR, ps->visual[0], PICO_XSIZE * PICO_YSIZE);
+    psram_store(PICO_PARSE_SCRATCH_ADDR, ps->visual[0], PICO_VIS_BYTES);
     sci_free(ps->visual[0]);
     ps->visual[0] = NULL;
     return 1;
@@ -210,8 +248,8 @@ void pico_return_visual(gfx_driver_t *drv)
     struct _pico_state *ps = (struct _pico_state *)drv->state;
     if (!ps || ps->visual[0])
         return;  /* nothing was borrowed, or already restored */
-    ps->visual[0] = (uint8_t *)sci_malloc_sram(PICO_XSIZE * PICO_YSIZE);
-    psram_load(PICO_PARSE_SCRATCH_ADDR, ps->visual[0], PICO_XSIZE * PICO_YSIZE);
+    ps->visual[0] = (uint8_t *)sci_malloc_sram(PICO_VIS_BYTES);
+    psram_load(PICO_PARSE_SCRATCH_ADDR, ps->visual[0], PICO_VIS_BYTES);
 }
 
 #define S  ((struct _pico_state *)(drv->state))
@@ -331,24 +369,35 @@ static void flush_region(struct _pico_state *ps,
                       x + w - 1, y + TFT_Y_OFFSET + h - 1, 1);
 
     for (int row = 0; row < h; row++) {
+#ifdef PICO_PACK_VISUAL
+        /* HOTTEST loop in the driver: one nibble unpack per pixel. Kept as a
+           separate block rather than routed through VIS_GET on a per-pixel
+           index so the row base is computed once. */
+        const int base = (y + row) * PICO_XSIZE + x;
+        const uint8_t *packed = ps->visual[0];
+#       define SRC_AT(col) ((uint8_t)VIS_GET(packed, base + (col)))
+#else
         const uint8_t *src = ps->visual[0] + (y + row) * PICO_XSIZE + x;
+#       define SRC_AT(col) (src[(col)])
+#endif
 #ifdef PICO_LCD_16BIT
         /* RGB565, big-endian on the wire (panel is set to 0x3A=0x65). */
         for (int col = 0; col < w; col++) {
-            uint16_t p = ps->pal565[src[col]];
+            uint16_t p = ps->pal565[SRC_AT(col)];
             line_buf[col * 2    ] = (uint8_t)(p >> 8);
             line_buf[col * 2 + 1] = (uint8_t)(p & 0xff);
         }
         hw_send_spi(line_buf, w * 2);
 #else
         for (int col = 0; col < w; col++) {
-            uint8_t idx = src[col];
+            uint8_t idx = SRC_AT(col);
             line_buf[col * 3    ] = ps->palette[idx][0];
             line_buf[col * 3 + 1] = ps->palette[idx][1];
             line_buf[col * 3 + 2] = ps->palette[idx][2];
         }
         hw_send_spi(line_buf, w * 3);
 #endif
+#       undef SRC_AT
     }
     spi_finish(spi1);
     lcd_spi_raise_cs();
@@ -501,7 +550,11 @@ static void draw_line_raw(uint8_t *buf, int pitch,
     dy = sy * dy + 1;
 
     int x = 0, y = 0;
-    uint8_t *pixel = buf + y1 * pitch + x1;
+    /* Index rather than pointer arithmetic: a packed buffer has no byte per
+       pixel to point at. Same algorithm, same pixel sequence -- only the
+       addressing changes, deliberately, since re-implementing a traversal is
+       how the ctl_draw_line flood-fill gap happened. */
+    int pixel = y1 * pitch + x1;
     int pixx = sx, pixy = sy * pitch;
 
     if (dx < dy) {
@@ -511,7 +564,7 @@ static void draw_line_raw(uint8_t *buf, int pitch,
     }
 
     for (; x < dx; x++, pixel += pixx) {
-        *pixel = color;
+        VIS_SET(buf, pixel, color);
         y += dy;
         if (y >= dx) { y -= dx; pixel += pixy; }
     }
@@ -553,7 +606,24 @@ static int pico_draw_filled_rect(struct _gfx_driver *drv, rect_t rect,
         if (!pico_ensure_visual(drv)) return GFX_ERROR;
         uint8_t c = pico_map_color(drv, color1);
         for (int row = rect.y; row < rect.y + rect.yl; row++)
+#ifdef PICO_PACK_VISUAL
+            {
+                /* Constant index, NOT a dither pair: by the time the driver
+                   sees a colour the engine has already resolved it to one
+                   palette slot, so both nibbles are the same value. */
+                int i = row * PICO_XSIZE + rect.x, end = i + rect.xl;
+                uint8_t pair = (uint8_t)((c & 0x0f) | ((c & 0x0f) << 4));
+
+                if (i & 1) { VIS_SET(S->visual[0], i, c); i++; }
+                if (end - i >= 2) {
+                    memset(S->visual[0] + (i >> 1), pair, (end - i) >> 1);
+                    i += ((end - i) >> 1) << 1;
+                }
+                if (i < end) VIS_SET(S->visual[0], i, c);
+            }
+#else
             memset(S->visual[0] + row * PICO_XSIZE + rect.x, c, rect.xl);
+#endif
     }
     if ((color1.mask & GFX_MASK_PRIORITY) && s_shared_priority)
         gfx_draw_box_pixmap_i(s_shared_priority, rect, color1.priority);
@@ -588,7 +658,10 @@ nearest_pal(struct _pico_state *ps, int r, int g, int b)
 static void
 pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                   rect_t src, rect_t dest,
-                  uint8_t *destbuf,    /* already homed to (dest.x, dest.y) */
+                  uint8_t *destbuf,    /* BASE, not homed: a packed buffer has no
+                                          byte to point at for an odd x */
+                  int dest_index,      /* first pixel = dest.y*stride + dest.x */
+                  int dest_packed,     /* destbuf is 2 px/byte */
                   int dest_stride,
                   uint8_t *pri_buf,    /* priority index_data, or NULL */
                   int pri_stride,
@@ -639,8 +712,23 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                                  pxm->colors[i].g, pxm->colors[i].b);
     }
 
-    uint8_t *row_dst = destbuf;
+    int row_dst = dest_index;
     uint8_t *row_pri = pri_buf;
+
+/* One destination store for the whole blit. dest_packed is a RUNTIME flag, not
+   a compile-time one, because this function serves several destinations at once:
+   visual[0] (packed under PICO_PACK_VISUAL), the mapped static buffer, and the
+   single-row compose scratch -- which are not all the same format. */
+#define BLIT_PUT(idx_, v_)                                              \
+	do {                                                            \
+		if (dest_packed) {                                      \
+			uint8_t *_p = destbuf + ((idx_) >> 1);          \
+			uint8_t _n = (uint8_t)((v_) & 0x0f);            \
+			*_p = ((idx_) & 1)                              \
+			      ? (uint8_t)((*_p & 0x0f) | (_n << 4))     \
+			      : (uint8_t)((*_p & 0xf0) | _n);           \
+		} else destbuf[(idx_)] = (uint8_t)(v_);                 \
+	} while (0)
 
     /* Priority source for occlusion gating.  The engine's priority_map holds the
        background's baked-in priorities, but on Pico its index_data is offloaded to
@@ -736,7 +824,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                         if (bp > pb_max) pb_max = bp;
                     }
                     if ((int)pri_row[x] <= priority) {
-                        row_dst[x] = lut[idx];
+                        BLIT_PUT(row_dst + x, lut[idx]);
                         if (row_pri)  /* SRAM working map, when one exists */
                             row_pri[x] = (uint8_t)priority;
                         else if (bake_pri && pri_loaded
@@ -753,7 +841,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                     }
                 } else {
                     /* No priority map (background fill, text): always write. */
-                    row_dst[x] = lut[idx];
+                    BLIT_PUT(row_dst + x, lut[idx]);
                 }
             }
         }
@@ -816,7 +904,9 @@ void pico_render_background(gfx_driver_t *drv)
     gfx_pixmap_t *bg = ps->static_bg;
     rect_t full = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
     rect_t dst  = gfx_rect(0, 0, bg->index_xl, bg->index_yl);
-    pico_blit_indexed(ps, bg, -1, full, dst, ps->visual[0], PICO_XSIZE, NULL, 0, 0);
+    pico_blit_indexed(ps, bg, -1, full, dst, ps->visual[0],
+                      dst.y * PICO_XSIZE + dst.x, PICO_VIS_PACKED,
+                      PICO_XSIZE, NULL, 0, 0);
 #ifdef PICO_USE_STATIC_VISUAL
     /* Seed the static buffer with the new room background. Picviews drawn after
        this (kAddToPic) composite on top of it, and every later BACK restore
@@ -1114,15 +1204,32 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
         if (pxm->internal.info) {
             /* PSRAM grab: restore row-by-row from PSRAM */
             uint32_t addr = (uint32_t)(uintptr_t)pxm->data;
-            for (int row = 0; row < dest.yl; row++)
+            for (int row = 0; row < dest.yl; row++) {
+#ifdef PICO_PACK_VISUAL
+                int b = (dest.y + row) * PICO_XSIZE + dest.x, c;
+                psram_load(addr + (uint32_t)((src.y + row) * pxm->xl + src.x),
+                           s_vis_row, (size_t)copy_w);
+                for (c = 0; c < copy_w; c++)
+                    VIS_SET(S->visual[bufnr], b + c, s_vis_row[c]);
+#else
                 psram_load(addr + (uint32_t)((src.y + row) * pxm->xl + src.x),
                            S->visual[bufnr] + (dest.y + row) * PICO_XSIZE + dest.x,
                            (size_t)copy_w);
+#endif
+            }
         } else if (pxm->data) {
             /* SRAM grab */
-            for (int row = 0; row < dest.yl; row++)
+            for (int row = 0; row < dest.yl; row++) {
+#ifdef PICO_PACK_VISUAL
+                int b = (dest.y + row) * PICO_XSIZE + dest.x, c;
+                const uint8_t *srow = pxm->data + (src.y + row) * pxm->xl + src.x;
+                for (c = 0; c < copy_w; c++)
+                    VIS_SET(S->visual[bufnr], b + c, srow[c]);
+#else
                 memcpy(S->visual[bufnr] + (dest.y + row) * PICO_XSIZE + dest.x,
                        pxm->data + (src.y + row) * pxm->xl + src.x, copy_w);
+#endif
+            }
         }
         return GFX_OK;
     }
@@ -1165,7 +1272,7 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
             pico_blit_indexed(S, pxm, priority,
                               gfx_rect(src.x + (x0 - dest.x), src.y + row, w, 1),
                               gfx_rect(x0, dy, w, 1),
-                              s_compose_row, w,
+                              s_compose_row, 0, 0, w,
                               pridata ? pridata + dy * pri_stride + x0 : NULL,
                               pri_stride, 1);
             psram_store(S->composed_addr + (uint32_t)(dy * bw + x0),
@@ -1194,8 +1301,10 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
                           ? (pridata + dest.y * pmap->index_xl + dest.x)
                           : NULL;
         int pri_stride = pridata ? pmap->index_xl : 0;
-        pico_blit_indexed(S, pxm, priority, src, dest, destptr, PICO_XSIZE,
-                          priptr, pri_stride,
+        pico_blit_indexed(S, pxm, priority, src, dest,
+                          S->visual[bufnr], dest.y * PICO_XSIZE + dest.x,
+                          bufnr == 0 ? PICO_VIS_PACKED : 0,
+                          PICO_XSIZE, priptr, pri_stride,
                           buffer == GFX_BUFFER_STATIC);
     } else if (s_shared_priority && s_shared_priority->index_data) {
         gfx_crossblit_pixmap(drv->mode, pxm, priority, src, dest,
@@ -1276,10 +1385,18 @@ static int pico_grab_pixmap(struct _gfx_driver *drv, rect_t src,
             /* Large grab: save row-by-row into PSRAM to avoid SRAM pressure.
                PSRAM address is bump-allocated and reclaimed on psram_reset(). */
             uint32_t addr = psram_alloc(sz);
-            for (int row = 0; row < src.yl; row++)
+            for (int row = 0; row < src.yl; row++) {
+#ifdef PICO_PACK_VISUAL
+                int b = (src.y + row) * PICO_XSIZE + src.x, c;
+                for (c = 0; c < src.xl; c++)
+                    s_vis_row[c] = (uint8_t)VIS_GET(S->visual[0], b + c);
+                psram_store(addr + (uint32_t)(row * src.xl), s_vis_row, src.xl);
+#else
                 psram_store(addr + (uint32_t)(row * src.xl),
                             S->visual[0] + (src.y + row) * PICO_XSIZE + src.x,
                             src.xl);
+#endif
+            }
             pxm->data = (uint8_t *)(uintptr_t)addr;
             pxm->internal.info = (void *)(uintptr_t)1;
             pico_grab_psram_total++;
@@ -1292,10 +1409,18 @@ static int pico_grab_pixmap(struct _gfx_driver *drv, rect_t src,
                 pico_grab_sram_bytes += sz;
                 pico_grab_sram_total++;
             }
-            for (int row = 0; row < src.yl; row++)
+            for (int row = 0; row < src.yl; row++) {
+#ifdef PICO_PACK_VISUAL
+                int b = (src.y + row) * PICO_XSIZE + src.x, c;
+                for (c = 0; c < src.xl; c++)
+                    pxm->data[row * src.xl + c] =
+                        (uint8_t)VIS_GET(S->visual[0], b + c);
+#else
                 memcpy(pxm->data + row * src.xl,
                        S->visual[0] + (src.y + row) * PICO_XSIZE + src.x,
                        src.xl);
+#endif
+            }
         }
         return GFX_OK;
     }
@@ -1346,7 +1471,7 @@ static int pico_update(struct _gfx_driver *drv,
                 rect_t d = gfx_rect(0, 0, S->static_bg->index_xl,
                                     S->static_bg->index_yl);
                 pico_blit_indexed(S, S->static_bg, -1, f, d,
-                                  S->visual[PICO_VIS_STATIC], PICO_XSIZE,
+                                  S->visual[PICO_VIS_STATIC], 0, 0, PICO_XSIZE,
                                   NULL, 0, 0);
                 S->static_dirty = 0;
             }
@@ -1376,7 +1501,8 @@ static int pico_update(struct _gfx_driver *drv,
             if (S->composed_valid) srcmap = &S->composed_pxm;
 #endif
             pico_blit_indexed(S, srcmap, -1, bgsrc, bgdst,
-                              destptr, PICO_XSIZE, NULL, 0, 0);
+                              S->visual[0], dest.y * PICO_XSIZE + dest.x,
+                              PICO_VIS_PACKED, PICO_XSIZE, NULL, 0, 0);
         }
         break;
 

@@ -3616,12 +3616,37 @@ unnecessary: cels decode into `g_pico_priority_scratch` (the B-1.3 borrow) and a
 **nothing decodes a cel into `visual[0]`**, so they never touch the buffer being packed. Only the DRIVER's
 blit has to read an 8bpp cel and write packed. Do not re-open this.
 
-**So the endgame is the DRIVER HALF ALONE**, ~10 sites in `pico_driver.c`: `flush_region` (unpack per pixel,
-the hottest loop), `pico_blit_indexed` (8bpp cel in, packed out), `draw_line_raw`, the filled-rect memset,
-grab/restore, `bake_static_region`, the BACK-restore memcpy, alloc/clear, and the 64000 -> 32000 size. Plus
-the parse-time PSRAM borrow sizes and the decode-buffer reuse at `operations.c` (visual[0] handed to the
-decoder as `visual_map->index_data` -- which is where `nibble_packed` must finally be set, together with the
-half-size allocation).
+**DRIVER HALF: MOSTLY CONVERTED (2026-09-12), verified by `tests/drvdiff` -- packed and unpacked produce
+BYTE-IDENTICAL panel output.** `PICO_VIS_BYTES` goes 64,000 -> **32,000**, which is the whole point.
+
+Everything routes through three macros so the unpacked build is byte-identical and a MISSED site is a
+compile-visible direct `visual[0][i]` rather than a silent shear: `PICO_VIS_BYTES`, `VIS_GET`, `VIS_SET`.
+
+| site | how |
+|---|---|
+| `flush_region` | per-pixel unpack, row base hoisted (hottest loop) |
+| `draw_line_raw` | pointer arithmetic -> INDEX arithmetic; same algorithm, same pixels |
+| `pico_draw_filled_rect` | packed span fill, constant index (the driver's colour is already resolved to ONE slot -- not a dither pair) |
+| `pico_blit_indexed` | `destbuf` changed from "already homed to (dest.x,dest.y)" to BASE + `dest_index` + `dest_packed` -- **a packed buffer cannot be homed by pointer at an odd x**. 5 call sites updated. `dest_packed` is a RUNTIME flag because the blit serves visual[0], the mapped static buffer AND the one-row compose scratch, which are not all the same format |
+| `pico_grab_pixmap` / grabbed restore | grabs stay 8bpp (their data is consumed elsewhere as bytes, and a grab can start at an odd x), so the pack boundary is crossed on the way in and out, symmetrically |
+
+**FALSE-PASS TRAP, worth internalising:** the first `cmp` passed while grab/restore were still UNCONVERTED --
+because the harness scene never grabbed anything. **A harness only proves the paths its scene actually
+walks.** The scene was extended to grab a region and restore it elsewhere before the pass meant anything.
+Check coverage before trusting a green result.
+
+**STILL UNCONVERTED: `pico_bake_static_region`**, which reads `visual[0]` as raw bytes. It needs care rather
+than effort: it stores into the COMPOSED PSRAM surface, whose format must match what the BACK-restore blit
+expects -- and `composed_pxm` is a shallow copy of `static_bg`, so it inherits `nibble_packed`. Under packing
+`static_bg` (the pic's own visual_map) is packed too, so composed must be stored PACKED, which means
+read-modify-write on the edge bytes when x0 or w is odd (a straight store would clobber the neighbouring
+pixels sharing those bytes). Decide that format question before writing the code.
+
+**NO SHIPPING EXPOSURE: `PICO_PACK_VISUAL` has no CMake option** -- it is set only by the two harnesses, so
+no firmware can build with a half-converted driver. Wiring the option is the LAST step, together with setting
+`nibble_packed` + the half-size allocation on the decode path in `operations.c`.
+
+
 
 **RESIDUAL (open), sharply characterised:** SQ3 pic 2's 108 pixels are ALL ON ONE ROW -- y=18, x 66..319,
 non-contiguous -- and were unmoved by the `_gfxr_plot_aux_pattern` fix. Decisive detail: pico's underlying
