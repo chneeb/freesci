@@ -17,3 +17,8 @@ tests/drvdiff/drvdiff_unpacked
 tests/drvdiff/drvdiff_packed
 tests/drvdiff/*.bin
 tests/drvdiff/*.ppm
+
+# decompdiff harness build products (stream_decomp.c is a COPY of decompress0.c)
+tests/decompdiff/stream_decomp.c
+tests/decompdiff/stream_decomp.o
+tests/decompdiff/decompdiff

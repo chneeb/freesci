@@ -4370,12 +4370,39 @@ direction: the item-2 buffers are load-bearing, so there is no shrinking them to
 **Verdict: sound on PIO is an SQ3-specific build.** The failure is a clean legible `[OOM]` halt, not a
 fault, so trying it costs nothing but a power cycle.
 
-**The one remaining idea, NOT attempted:** that compressed-input buffer is read STRICTLY SEQUENTIALLY by the
-decompressor -- the one access pattern PIO PSRAM is actually good at (contrast the flood-fill aux, which is
-random-access and was ruled out for exactly that reason). Streaming it through a small SRAM window would
-remove a 59KB contiguous SRAM requirement outright. NB this is NOT the thing that was tried and reverted
-before: that was a fixed permanently-resident 16KB *scratch* for the same site, which was both too small
-(59,153 here) and net-negative in arena. Streaming is a different shape.
+**STREAMING THE COMPRESSED INPUT -- flag + harness landed, implementation not written
+(`PICO_STREAM_DECOMPRESS`, default OFF).** That buffer (`decompress0.c` `sci_malloc_sram(compressedLength)`)
+is the largest single contiguous transient left on the resource path and a recorded OOM site. NB this is NOT
+the thing that was tried and reverted before: that was a fixed permanently-resident 16KB *scratch* for the
+same site, both too small (59,153 here) and net-negative in arena. Streaming is a different shape.
+
+**Source is the FILE, not PSRAM** (corrects the earlier "stream it from PSRAM" framing): the buffer is filled
+by a single `read(resh, buffer, compressedLength)` from an already-open fd, so the window refills straight
+from the file and a PSRAM round-trip would buy nothing.
+
+**All three SCI0 methods are streamable -- including the one that looked fatal** (verified by code read):
+
+| method | access pattern | what the window needs |
+|---|---|---|
+| 0 uncompressed | `memcpy(result->data, buffer, len)` | nothing -- read *directly* into `result->data`, dropping the buffer AND the memcpy |
+| 1 LZW (`decrypt1`) | `src[bytectr]`, `+1`, `+2` | forward, <=2 bytes lookahead |
+| 2 Huffman (`decrypt2`) | a node table at `src+2` walked RANDOMLY by `getc2` (`node += next<<1`), concurrent with a forward bitstream | the table is bounded at **510 bytes** (`numnodes = src[0]`, a byte) -> copy it to SRAM up front, stream the rest |
+
+**Gated on `PICO_STREAM_DECOMPRESS`, deliberately NOT on `HAVE_PICO`**, so the desktop differ can build and
+prove both paths.
+
+**`tests/decompdiff` is built and baselined** -- decompresses every resource of a game twice (stock vs
+streaming) and compares return code, `result->size` and every output byte. Baseline with both copies still
+identical: **2,139 resources across SQ3/PQ2/KQ4, 0 differ**, and the `methods exercised` line confirms all
+three methods are covered in all three games (0: 32/20/21, 1: 497/452/798, 2: 106/66/147) -- that line exists
+because `drvdiff` passed three times on paths its scene never walked. See `tests/decompdiff/README`.
+
+**The one implementation subtlety already identified:** cap total reads at `compressedLength` so the file
+position on return matches the stock path -- a read-ahead window that over-reads past the compressed block
+would desync the caller.
+
+**Still on the output side:** `result->data` (up to `result->size`) still needs contiguous SRAM. This removes
+the input-side requirement only.
 
 **4. Dropped notes: implement voice stealing** (`opl2.c` `adlibemu_start_note`). Upstream FreeSCI simply
 discards a note when all ADLIB_VOICES (12) are busy -- literally `XXX implement overflow code`. Affects

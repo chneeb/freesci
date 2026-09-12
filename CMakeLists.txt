@@ -394,6 +394,23 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_REBOOT_BETWEEN_GAMES=1)
     endif()
 
+    # Stream the COMPRESSED INPUT buffer for a resource decompress instead of
+    # reading it whole into one contiguous SRAM block.
+    #
+    # decompress0.c's sci_malloc_sram(compressedLength) is the largest single
+    # contiguous transient left on the resource path -- 59,153 bytes for one PQ2
+    # resource -- and it is a recorded OOM site. All three SCI0 methods can be
+    # fed from a small sliding window over the already-open fd: method 0 is a
+    # straight copy, decrypt1 reads strictly forward with <=2 bytes of lookahead,
+    # and decrypt2's only random access is its Huffman node table, which is
+    # bounded at 510 bytes (numnodes is src[0], a byte) and is copied out up
+    # front. NOT tied to HAVE_PICO on purpose: the desktop differ
+    # (tests/decompdiff) builds both paths to prove them byte-identical.
+    option(PICO_STREAM_DECOMPRESS "Stream the compressed input buffer instead of reading it whole" OFF)
+    if(PICO_STREAM_DECOMPRESS)
+        add_compile_definitions(PICO_STREAM_DECOMPRESS=1)
+    endif()
+
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)

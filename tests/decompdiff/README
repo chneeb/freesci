@@ -1,0 +1,80 @@
+decompdiff -- offline safety net for the streaming resource decompressor
+(PICO_STREAM_DECOMPRESS, default OFF)
+
+WHAT IT PROVES
+    That feeding decompress0 from a small sliding window over the fd produces
+    byte-identical output to reading the whole compressed block into one
+    contiguous SRAM buffer.
+
+    The buffer being removed is decompress0.c's sci_malloc_sram(compressedLength)
+    -- the largest single contiguous transient left on the resource path (59,153
+    bytes for one PQ2 resource) and a recorded OOM site.
+
+WHY A HARNESS FIRST
+    decompress0 is on the path of EVERY resource: scripts, pics, views, vocab,
+    sound. A bug here does not corrupt one picture, it corrupts everything, and
+    on device it would surface as an unrelated-looking fault a long way from the
+    cause. Offline, it is a byte compare over the whole corpus.
+
+BUILD
+    cd tests/decompdiff
+    cp ../../src/scicore/decompress0.c stream_decomp.c
+    gcc -c -fgnu89-inline -w -DHAVE_CONFIG_H=1 -DX_DISPLAY_MISSING=1 \
+        -DPICO_STREAM_DECOMPRESS=1 -include streamprefix.h \
+        -I. -I../../src/include -I../../build -I/usr/include/SDL2 -D_REENTRANT \
+        -o stream_decomp.o stream_decomp.c
+    LIBS=$(find ../../build -name '*.a' | tr '\n' ' ')
+    gcc -fgnu89-inline -w -DHAVE_CONFIG_H=1 -DX_DISPLAY_MISSING=1 \
+        -I../../src/include -I../../build -I/usr/include/SDL2 -D_REENTRANT \
+        -o decompdiff decompdiff_main.c stream_decomp.o \
+        -Wl,--start-group $LIBS -Wl,--end-group -lSDL2 -lm -lz -lpthread -ldl
+
+    Re-copy stream_decomp.c after every edit to src/scicore/decompress0.c --
+    it is a COPY, so an un-copied edit silently tests the previous version.
+
+    If the link reports "multiple definition of <sym>", that symbol is a new
+    non-static function in decompress0.c: add it to streamprefix.h. Check with
+        nm -g --defined-only stream_decomp.o | awk '$2=="T"{print $3}'
+    which must list stream_* names only.
+
+RUN
+    ./decompdiff ~/Downloads/quest/sq3 ~/Downloads/quest/pq2 ~/Downloads/quest/kq4
+
+BASELINE (before any streaming code exists -- the harness validating itself)
+    sq3  635 resources, 0 differ    methods  0=32  1=497  2=106
+    pq2  538 resources, 0 differ    methods  0=20  1=452  2=66
+    kq4  966 resources, 0 differ    methods  0=21  1=798  2=147
+    == 2139 resources compared across 3 games; 0 differ ==
+
+    The "methods exercised" line is not decoration. drvdiff passed three times
+    on paths its scene never walked; a green result here means nothing for a
+    compression method the corpus does not contain. All three are covered in
+    all three games, so check that line stayed populated before trusting a pass.
+
+WHAT IS COMPARED
+    Return code, result->size, and every output byte. Comparing bytes alone
+    would let a truncated decode pass whenever the tail happened to be zero.
+
+WHAT IS SKIPPED, AND WHY THAT IS CORRECT
+    Patch-file sources (4 across the three games). Those load via
+    _scir_load_from_patch_file and never reach decompress0, so including them
+    would be testing a path that does not exist.
+
+    Non-SCI0 games are skipped wholesale: the resmgr dispatches those to
+    decompress01/1/11, and comparing them here would be meaningless.
+
+ACCESS PATTERNS THE STREAMING PATH RELIES ON (verified by reading the code)
+    method 0   memcpy(result->data, buffer, len)   -- can read straight into
+               result->data, dropping both the buffer and the memcpy
+    method 1   decrypt1: src[bytectr], +1, +2      -- strictly forward,
+               <=2 bytes of lookahead
+    method 2   decrypt2: a Huffman node table at src+2 walked RANDOMLY by
+               getc2 (node += next<<1), concurrent with a forward bitstream.
+               The table is bounded at 510 bytes because numnodes = src[0] is
+               a byte, so it is copied into SRAM up front and the remainder is
+               a forward stream with 1 byte of lookahead.
+
+ONE THING TO GET RIGHT IN THE IMPLEMENTATION
+    Cap total reads at compressedLength so the file position on return matches
+    the stock path exactly. A read-ahead window that over-reads past the end of
+    the compressed block would desync the caller.
