@@ -3010,6 +3010,46 @@ User-reported on device (2026-06-23): **The Colonel's Bequest** generally **load
   dialog open+dismiss, compared against the SDL render, to see whether the box-fill pixmap is dropped at blit
   (color_key) or the dispose path skips the BACK/static restore over the corner regions.
 
+### ACCEPTED LIMITATION (2026-09-12) — SQ3 intro: Two Guys panels survive as partial bands
+
+**Bisected to `PICO_STATIC_VIEW_PRIORITY`, DETERMINISTIC, and deliberately NOT fixed.** In the SQ3 intro the
+Two Guys portrait panels persist into the following credits screens as partial horizontal bands with the new
+screen's text drawn over them, every run. `-DPICO_STATIC_VIEW_PRIORITY=OFF` clears it completely;
+`-DPICO_STATIC_COMPOSED=OFF` does not. Same flag, and per the record the same flag, that causes the PIO
+dialog bleed.
+
+**DECISION: keep `PICO_STATIC_VIEW_PRIORITY=ON` (user, 2026-09-12).** The ledger:
+
+| ON buys | ON costs |
+|---|---|
+| actors occluded by settled stopUpd views -- Roger behind SQ3's door and motivator, PQ2's cars in front of the officer | SQ3 intro panel bands (this item) |
+| | the PQ2 dialog bleed (open item 1b) |
+
+Gameplay occlusion outweighs two intro/dialog cosmetics. Note the SQ3 door **not closing** is broken either
+way, so it is NOT on the ON side of this ledger. The proper fix for both costs is the **transient working
+priority map** (already parked for SRAM; it is what the mapped target does by default), not flipping this flag.
+
+**THREE HYPOTHESES TRIED AND DISPROVED on this bug -- do not repeat them:**
+1. *The composed surface persists the panels.* No: `-DPICO_STATIC_COMPOSED=OFF` does not clear it, and in
+   priority-only mode `pico_priority_only_static` skips the colour bake, so nothing puts them in `composed`.
+2. *`pico_compose_ensure` failing makes the fullscreen static draw fall through into `visual[0]`.* Removing
+   `compose_ensure` from that gate, so the draw always goes to the scratch row and never touches `visual[0]`,
+   **changed nothing on device**.
+3. *Cels with `pxm->data` set bypass the gate via the crossblit.* No: `gfx_xlate_pixmap` is skipped on Pico,
+   so `pxm->data` is NULL and the gate was already being taken.
+
+So the mechanism is NOT simply "the fullscreen static draw paints visual[0]" -- routing that draw away from
+visual[0] entirely does not help. Whatever `PICO_STATIC_VIEW_PRIORITY` does that matters here is something
+else in that block (it also sets `pico_priority_only_static` and bakes priority into the PSRAM map).
+**Start there, and bisect rather than reason -- the bisect found in one flash what three rounds of code
+reading did not.**
+
+### Also accepted: SQ3 "Pirates of Pestulon" is INTERMITTENT, and separate from the above
+
+Same binary, missing on one run and correct on the next (2026-09-12). Unlike the panels this is NOT
+deterministic, so it is a different bug -- the long-standing runtime-state fragility of the overlay path.
+Accepted as-is; see the Pestulon section for the `[ovl]` probe fields that would name it.
+
 ### Known graphics limitations on Pico (not yet fixed)
 
 These are correctness gaps in the Pico render path vs the SDL pipeline. Lower priority than the
