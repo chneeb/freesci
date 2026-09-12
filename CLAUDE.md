@@ -123,6 +123,22 @@ kept as cheap standing insurance — it was the canary for the now-CLOSED "aspb"
 | `FSCI_PROBE_ARENA` (OFF) | `FSCI_PROBE_ARENA` | `[arenagrow]` — names the allocation that forces an sbrk grow (`sci_*` sites plus the raw decode/restore sites via `PICO_ARENA_PROBE_RAW`) | `sci_memory.c`, `sci_resmgr.c`, `operations.c`, `savegame.c` |
 | `FSCI_PROBE_PERF` (OFF) | `FSCI_PROBE_PERF` | `[perf]` per-room pic-decode time. Built for the XIP-RAM comparison; kept as a reusable decode timer | `operations.c`, `pico_time.c` |
 | `FSCI_PROBE_SND` (OFF) | `FSCI_PROBE_SND` | `[snd] span/polls/produced/consumed/underrun/ring \| seq` — audio production vs consumption per interval. **This is what localised the starved sound poll**; for a timing bug, measure the two rates before reasoning about the code | `pico_pwm.c`, `pwm_synth.c`, `polled.c` |
+**CMAKE CACHE TRAP -- a changed `option()` DEFAULT never reaches an existing build dir.** Found the hard
+way (2026-09-12): `build-pico` still had `PICO_STATIC_COMPOSED=OFF` long after that option became default-ON,
+because the cache was created before the change. Flashing it would have silently lost every PQ2 fix
+(dialogs, glovebox, card pickup, overlay) with no build-time signal -- the same class as the leftover-probe
+flags below, but harder to spot because nothing is printed. **Before trusting any build dir, check the
+options you care about, not just the probes:**
+
+```bash
+grep -E '^(PICO_|FSCI_)[A-Z_]*:BOOL' build-pico/CMakeCache.txt | sort
+```
+
+and when a default changes, `rm -rf` the dir and re-configure rather than rebuilding in place. The canonical
+PIO shipping config, verified 2026-09-12: `PICO_STATIC_COMPOSED=ON`, `PICO_STATIC_VIEW_PRIORITY=ON`,
+`PICO_CONTROL_MAP=ON`, `PICO_PACK_VOCAB=ON`; `PICO_STATIC_VIEW_BAKE`/`PICO_PWM_AUDIO`/`PICO_DITHER_D16`/
+`PICO_PACK_VISUAL` OFF; 133 MHz, SD 30000; probes off except `FSCI_PROBE_STR`; `.bss` 17,608.
+
 **Always-on Pico timing (NOT probes -- one line each, negligible cost, no flag needed):**
 
 | line | where | what it tells you |
