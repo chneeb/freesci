@@ -4269,12 +4269,33 @@ case with ~2x margin.
 Still open from the same session's log: a **shrill "feep" at higher volume** (8-bit PWM quantisation noise,
 separate from starvation) and `[perf] resource load: 14958 ms` for 635 resources.
 
-**3. PIO sound at 11kHz.** Analysed, NOT device-tested. The quality blocker is inherited for free (the poll
-fix is shared code), so the only question is memory. With the oversized buffers it is ~27KB against a ~26KB
-margin; with item 2's right-sized buffers it is closer to ~17KB, which is plausible. But the documented PIO
-failure was `calloc 16384 failed` at `sm_allocate_stack` -- a CONTIGUITY failure at ~15KB resident -- so it
-may trip regardless. Worth one flash, not worth engineering effort. `build-pico-sound11k` recipe:
-`-DPICO_PWM_AUDIO=ON -DPICO_SND_RATE=11025`.
+**3. PIO sound at 11kHz -- SETTLED (2026-09-12): SQ3 YES, PQ2 NO.**
+
+**SQ3 plays with music.** Confirmed twice now (2026-09-06 and 2026-09-12) with
+`-DPICO_PWM_AUDIO=ON -DPICO_SND_RATE=11025`. Use `rate/11` buffers (see item 2 -- shrinking them makes the
+audio stick).
+
+**PQ2 does NOT fit, measured twice at two different sites:**
+- `sci_refcount_alloc` (song memdup, 9,019 B) with `free=104` -- true exhaustion.
+- `decompress0.c:370` `sci_malloc_sram(compressedLength)` -- the COMPRESSED INPUT buffer for a 59,153-byte
+  resource, with `free=48,760`, `arena=450,364` (24,740 below the 475,104 ceiling). `free < size`, so a
+  genuine shortfall; even spending all remaining arena growth leaves 59KB *contiguous* wanted out of ~73KB
+  scattered.
+
+PQ2 is simply the heavier game (1843 vocab words vs SQ3's 1489, 540 resources) and sound's ~13KB resident
+plus song data is what pushes it over -- **with sound OFF, that same allocation succeeds.** Note the
+direction: the item-2 buffers are load-bearing, so there is no shrinking them to make room; `rate/11` is
+~7.6KB *larger* than the build PQ2 was measured on, i.e. it fails harder, not closer.
+
+**Verdict: sound on PIO is an SQ3-specific build.** The failure is a clean legible `[OOM]` halt, not a
+fault, so trying it costs nothing but a power cycle.
+
+**The one remaining idea, NOT attempted:** that compressed-input buffer is read STRICTLY SEQUENTIALLY by the
+decompressor -- the one access pattern PIO PSRAM is actually good at (contrast the flood-fill aux, which is
+random-access and was ruled out for exactly that reason). Streaming it through a small SRAM window would
+remove a 59KB contiguous SRAM requirement outright. NB this is NOT the thing that was tried and reverted
+before: that was a fixed permanently-resident 16KB *scratch* for the same site, which was both too small
+(59,153 here) and net-negative in arena. Streaming is a different shape.
 
 **4. Dropped notes: implement voice stealing** (`opl2.c` `adlibemu_start_note`). Upstream FreeSCI simply
 discards a note when all ADLIB_VOICES (12) are busy -- literally `XXX implement overflow code`. Affects
