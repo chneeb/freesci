@@ -3711,6 +3711,21 @@ overran it. Hence a fault late, on leaving the car, rather than at boot. Both si
 decode + background blit + flush are all correct at 4bpp on real hardware. That is the core of the scheme
 working.
 
+**SECOND DEVICE TEST: a NEW fault, and it was MY bug in the aux fallback.** Dump decoded to
+`PC = free_int_hash_map_node_t_recursive` (`int_hashmap.c:33`), `LR = sm_free_script`
+(`seg_manager.c:490`), `CFSR = 0x8200` (precise bus fault), `BFAR = 0x35fe159b` (wild) -- a script hashmap
+node with a garbage `next`, i.e. heap corruption again with a different victim.
+
+Cause: the aux-allocation-failure path I added did a bare `free(control_buf)`. **`control_buf` IS the
+permanent B-1 priority scratch when `priority_is_scratch`**, and both pre-existing free sites guard on
+exactly that ("never free it, just detach"). Omitting the guard freed a buffer used for the rest of the
+session -- a use-after-free, which is why the victim rotated (a widget `widfree` pointer first, then a
+hashmap node). **When adding a code path that frees a shared buffer, copy the guards from the existing free
+sites; here there were two, both correct, and the new path had neither.** Fixed.
+
+That path is also reached far more often than it looks: the extra 64KB aux transient makes the malloc fail
+on a tight heap, which is precisely when the bad free fires.
+
 **Do NOT chase the 2x-magnified artifacts yet.** The build that produced them had an active 32KB heap
 overrun, and heap corruption can produce arbitrary visual garbage; some or all of the artifacts may simply
 be it. Retest with the aux fix first, then re-characterise whatever survives. If they do survive, the

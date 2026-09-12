@@ -392,7 +392,14 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 				reuse_aux_buf = (byte *)malloc(GFXR_AUX_MAP_SIZE);
 			if (!reuse_aux_buf) {
 				GFXWARN("aux_map: 64KB alloc failed - decoding without collision\n");
-				free(control_buf);
+				/* MUST honour priority_is_scratch, exactly like the other two
+				   free sites below: control_buf IS the permanent B-1 priority
+				   scratch in that case, so freeing it is a use-after-free for
+				   the rest of the session -- observed as heap corruption with
+				   rotating victims (a widget widfree pointer, then a script
+				   hashmap node). Omitting this guard was the bug. */
+				if (!priority_is_scratch)
+					free(control_buf);
 				control_buf = NULL;
 			}
 #endif
