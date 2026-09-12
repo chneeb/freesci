@@ -307,8 +307,26 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			vmap->psram_addr  = psram_alloc(sz);
 			vmap->psram_valid = 1;
 			psram_store(vmap->psram_addr, vmap->index_data, sz);
+#ifdef PICO_PACK_VISUAL
+			/* DESIGN COLLISION: the control pass borrows this buffer as its
+			   flood-fill aux_map, which is GFXR_AUX_MAP_SIZE = 320*200 bytes,
+			   ONE BYTE PER PIXEL -- it carries flag bits 0x40 (FRESH_PAINT) and
+			   0x10 alongside the colour nibble, so it needs >=7 bits per pixel
+			   and canNOT be packed. A packed visual[0] is only half that, so
+			   reusing it here overran the buffer by 32,000 bytes: heap
+			   corruption, and the device HardFaulted leaving the PQ2 car.
+			   Allocate a real aux instead, and let the cost be visible rather
+			   than hidden -- see CLAUDE.md, this materially changes the 4bpp
+			   value proposition. */
+			if (visual_borrowed)
+				reuse_aux_buf = NULL;       /* visual[0] is the driver's; leave it */
+			else
+				free(vmap->index_data);
+			vmap->index_data = NULL;
+#else
 			reuse_aux_buf = vmap->index_data;
 			vmap->index_data = NULL;
+#endif
 		}
 
 		{	/* Push priority (nibble-packed) to PSRAM; gfxop_scan_bitmask and
@@ -366,6 +384,18 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			byte *control_buf = scaled_pic->priority_map->index_data;
 			scaled_pic->priority_map->index_data = NULL;
 
+#ifdef PICO_PACK_VISUAL
+			/* A packed visual[0] cannot serve as the aux (see above), so the
+			   control pass needs its own 64KB transient -- exactly the kind of
+			   large contiguous allocation this port spent months eliminating. */
+			if (!reuse_aux_buf)
+				reuse_aux_buf = (byte *)malloc(GFXR_AUX_MAP_SIZE);
+			if (!reuse_aux_buf) {
+				GFXWARN("aux_map: 64KB alloc failed - decoding without collision\n");
+				free(control_buf);
+				control_buf = NULL;
+			}
+#endif
 			scaled_pic->aux_map = reuse_aux_buf;            /* the 64KB visual buffer */
 			scaled_pic->control_map->index_data = control_buf; /* 32KB packed */
 			scaled_pic->control_map->nibble_packed = 1;

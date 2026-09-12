@@ -3672,12 +3672,37 @@ fallback matches it. `nibble_packed` is set on the visual map at both hand-off p
 **Size: `.bss` 17,768 -> 18,088 (+320, the row staging). The 32,000-byte saving is in the HEAP**, since
 visual[0] is `sci_malloc`'d -- it shows as runtime headroom, not in `arm-none-eabi-size`.
 
-**UNVERIFIED END TO END -- treat the first flash as an experiment.** `visdiff` verifies the decode half and
-`drvdiff` the driver half, but **nothing has exercised them TOGETHER**, and no hardware has run this at all.
-Specifically untested: PSRAM timing with the extra per-row unpacking; the real palette plumbing; and
-**whether 16 palette slots actually suffice for text, cursor and UI under D16** -- the driver writes resolved
-palette SLOTS into visual[0], and only 0..15 now fit, so anything mapping above 15 would be silently
-truncated. That last one is the most likely thing to bite and is worth checking first.
+**DEVICE-TESTED 2026-09-12: renders, but WRONG -- and it exposed a DESIGN COLLISION that changes the value
+proposition. Read this before doing more 4bpp work.**
+
+Observed on device: SQ3 boots to a grey box with a green stripe; the Sierra logo renders with black
+horizontal slashes; intro text is surrounded by **2x-magnified image fragments**; PQ2's intro shows the same,
+the glovebox scene too, and **leaving the car HardFaults**.
+
+**THE HARD FAULT: packing visual[0] destroys the buffer the CONTROL PASS borrows.** `sci_resmgr.c` hands the
+just-offloaded visual buffer to the control pass as its flood-fill `aux_map` (`reuse_aux_buf`). But
+`GFXR_AUX_MAP_SIZE` is `320*200` = 64,000 bytes, **ONE BYTE PER PIXEL**: it carries flag bits `0x40`
+(FRESH_PAINT) and `0x10` alongside the colour nibble, so it needs >=7 bits per pixel and **cannot be
+packed**. A packed visual[0] is half that, so the control pass overran it by 32,000 bytes -- heap
+corruption, hence the fault. Now fixed by allocating a real aux when packed.
+
+**WHY THAT MATTERS MORE THAN THE BUG:** the 32KB saved on visual[0] is handed straight back as a 64KB
+TRANSIENT for the aux -- and a large contiguous transient is exactly what this port spent months
+eliminating (B-1, B-1.2, B-1.3, the whole fragmentation story). Net at the decode PEAK the packed build may
+be WORSE, not better; it only wins in the valley between decodes. **Before any further 4bpp work, measure
+peak arena with and without packing.** If the peak regresses, the honest options are to drop the control map
+(loses collision), find another 64KB donor, or abandon 4bpp.
+
+**The "2x-magnified fragments" are a SEPARATE, still-open bug** and the signature is diagnostic: writing one
+byte per pixel into a packed buffer makes each written byte display as TWO pixels, i.e. a 2x horizontal
+stretch. So a writer is still emitting unpacked bytes. The driver is clean (`VIS_SET`/`BLIT_PUT` everywhere,
+verified by drvdiff), and the pic decoder is clean (verified by visdiff), so the culprit is a path NEITHER
+harness covers -- most likely the kgraphics transition/animation code (`animate_do_animation`'s
+`old_screen`/`newscreen`) or text layout. **Note `pico_init_specific` still allocates `xsize * ysize`
+(64,000) rather than `PICO_VIS_BYTES`** -- harmless (over-allocation) but it means the saving is not even
+realised on the main path yet, and it should be fixed before measuring anything.
+
+
 
 
 
