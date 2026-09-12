@@ -106,4 +106,5 @@ target_link_libraries(scipicoplatform PUBLIC
     hardware_dma
     hardware_irq
     hardware_pio
+    hardware_watchdog
 )

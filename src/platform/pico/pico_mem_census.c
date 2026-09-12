@@ -105,8 +105,14 @@ static int census_depth = 0;
  *
  * Site identity is the (file-pointer, line) pair: __FILE__ is a string literal
  * with a stable address, so comparing the pointer is enough and avoids strcmp. */
-#define SITE_LO 32
-#define SITE_HI 128
+/* SITES window.  Retarget this at whatever size class a hunt is chasing -- it
+   was [32,128) for the clone-variables leak.  It is now wide-open at the bottom
+   end of "big enough to matter": the cross-game residual at the chooser is only
+   a few KB total, so a narrow window simply misses it.  Do NOT drop SITE_LO to
+   0: the 8-byte blocks alone run ~1900 live in a room and would blow
+   CENSUS_NPTRS. */
+#define SITE_LO 128
+#define SITE_HI (1u << 24)
 #define CENSUS_NSITES   96
 #define CENSUS_NPTRS    2048   /* power of two; > peak live tagged blocks */
 
@@ -216,14 +222,26 @@ census_site_deregister(void *ptr)
 	}
 }
 
-/* Prints the live tagged-bucket sites ([SITE_LO,SITE_HI), currently
-   [16384,32768)), most blocks first, for offline resolution against the source.
-   Called from pico_mem_breakdown. */
+/* Prints the live tagged sites in [SITE_LO,SITE_HI), most blocks first, for
+   offline resolution against the source.  Called from pico_mem_breakdown and
+   from the chooser reset (pico_main.c), where it names the cross-game residual.
+   Prints the bucket histogram first: that covers EVERY live block including raw
+   mallocs and anything outside the SITES window, so if the sites line comes up
+   short the histogram still gives the size classes to retarget on. */
 void
 census_dump_sites(void)
 {
 	int i, printed = 0;
-	printf("[mem] SITES256:");
+
+	printf("[mem] LIVE %lu B in %d blocks:",
+	       (unsigned long) pico_census_total_bytes, pico_census_total_count);
+	for (i = 0; i < CENSUS_NBUCKETS; i++)
+		if (pico_census_count[i])
+			printf(" %lu:%d/%lu", (unsigned long) ((size_t) 1 << (i + 3)),
+			       pico_census_count[i], (unsigned long) pico_census_bytes[i]);
+	printf("\n");
+
+	printf("[mem] SITES:");
 	for (;;) {
 		int best = -1, b;
 		for (b = 0; b < census_nsites; b++) {
@@ -232,7 +250,7 @@ census_dump_sites(void)
 			if (best < 0 || census_sites[b].live_count > census_sites[best].live_count)
 				best = b;
 		}
-		if (best < 0 || printed >= 8)
+		if (best < 0 || printed >= 24)
 			break;
 		printf(" %s:%d=%d/%lu", census_sites[best].file, census_sites[best].line,
 		       census_sites[best].live_count,

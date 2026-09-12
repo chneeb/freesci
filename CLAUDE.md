@@ -1189,6 +1189,70 @@ contiguous block for it (the `decompress0.c:324` OOM, the wall the prior several
   7506 + view 10797 both went through the scratch, NO `decompress0.c:324` OOM). The decode-output OOM lever is
   closed — it got the game *further* than any prior restore session.
 
+### MEASURED + FIX BUILT, awaiting device test (2026-09-12) — the cross-game floor is `malloc_trim`'s top-chunk limit, not a leak
+
+**The `[mem] post-trim` measurement settled it, and the answer was none of the three cases predicted below.**
+SQ3 -> chooser, `FSCI_PROBE_MEM` build:
+
+```
+[mem] after chooser: free=3720   arena=3724   used=4        <- cold boot, first ever
+[mem] post-trim:     free=145056 arena=167564 used=22508    <- after quitting SQ3
+```
+
+**The trim WORKS** (arena 413,324 -> 167,564) -- so "the trim released nothing" is dead, as is the vocab
+hypothesis. What it could not do is get past **22,508 bytes that survive the game exit** where a cold boot
+has 4.
+
+**Two lazy "allocate once, never free" scratches were the bulk**, both correct within a game and pure
+inherited ballast across the chooser:
+
+| | bytes | why it was never freed |
+|---|---|---|
+| `decrypt1` LZW token tables (`decompress0.c`) | 16,384 | hoisted off the stack to fix the 2026-06-08 decrypt1 HardFault; "game-independent scratch" |
+| `said_tree` + `said_tokens` (`said.c`) | 4,512 | same reasoning; only live once the player actually types a parser command |
+
+Both now have `pico_reset_decrypt_scratch()` / `pico_reset_said_scratch()` called from the chooser reset
+(`said.y` patched in lockstep with the generated `said.c`). Device-measured result: `used` 22,508 -> **6,108**
+-- i.e. exactly the decrypt1 block came off. said's 4,512 did NOT, because that session typed no parser
+command, so it was never allocated; the reset is still correct, just unexercised.
+
+**THE LOAD-BEARING FINDING -- freeing bytes moved the floor the WRONG WAY.** Same session, after the fix:
+
+```
+[mem] post-trim: free=386736 arena=392844 used=6108
+```
+
+`used` fell by 16,400 and the arena floor ROSE 167,564 -> **392,844**. `malloc_trim` can only release the
+**top** free chunk, so the arena floor is set by the single **highest-addressed survivor**, whatever its
+size. decrypt1's block had been that top block; removing it merely exposed a ~6KB residual sitting higher
+still. **A 6KB residual in an unlucky spot costs just as much floor as a 22KB one.** Chasing residuals down
+one at a time is whack-a-mole and cannot converge -- which retires the "find the leftover allocations"
+framing entirely.
+
+**FIX BUILT (default ON, awaiting device test): `PICO_REBOOT_BETWEEN_GAMES`.** After a game exits, reboot
+into the chooser (`watchdog_reboot`) instead of looping back to it in-process. The destination is unchanged
+-- that loop was headed to the chooser anyway -- and the next game starts on a genuinely cold heap **by
+construction**, with no dependence on where the allocator happened to place anything. This is precisely the
+power-cycle workaround, automated. Cost: an SD remount + chooser redraw. Safe on both targets (PIO rebuilds
+its PIO state machine; the mapped QMI init already exits QPI first *because* a watchdog reset does not
+power-cycle the PSRAM). Escape hatch: `-DPICO_REBOOT_BETWEEN_GAMES=OFF` restores the in-process trim path,
+which is kept intact and is still correct as far as it goes.
+
+**The scratch resets are kept regardless** -- they are right in their own right, and they are what the OFF
+path depends on.
+
+**Census instrumentation, if the residual ever needs naming anyway:** `census_dump_sites()` is now also
+called at the chooser reset, and prints a `[mem] LIVE <bytes> in <n> blocks:` bucket histogram (covers
+EVERY live block, including raw mallocs and anything outside the SITES window) before the `[mem] SITES:`
+line. The SITES window was retargeted `[32,128)` -> `[128, 1<<24)`: the old window was aimed at the
+clone-variables hunt and misses a few-KB cross-game residual entirely. **Do not drop `SITE_LO` to 0** --
+the 8-byte blocks alone run ~1900 live in a room and would blow `CENSUS_NPTRS`.
+
+---
+
+*Historical (the OPEN framing this replaced -- its three-case prediction was wrong, but the A/B that proved
+the failure is cross-game still stands):*
+
 ### OPEN (2026-09-12) — cross-game switch STILL leaves PQ2 short, despite the chooser reset
 
 **Confirmed cross-game, by the cheapest possible A/B: PQ2 cold-boots fine, but OOMs after a KQ4 session.**

@@ -376,6 +376,24 @@ if(PLATFORM STREQUAL "pico")
     # visual[0] alloc on a cross-game switch). Now DEFAULT ON — it is the shipping
     # config; the Stage-1 unpacked measurement is long done. -DPICO_PACK_VOCAB=OFF
     # to A/B. See CLAUDE.md "Pico roadmap #1".
+    # Reboot into the chooser instead of looping back to it in-process.
+    #
+    # picolibc never returns sbrk'd memory on its own, and malloc_trim can only
+    # release the TOP free chunk -- so the next game's heap floor is set by
+    # whichever surviving allocation happens to sit highest, no matter how few
+    # bytes it is.  Measured: freeing 16KB of cross-game leftovers moved the
+    # floor the WRONG way (arena 167,564 -> 392,844), because the block that came
+    # off had been the top one and a 6KB residual underneath it was higher still.
+    # Chasing residuals is whack-a-mole; a reset is cold-heap BY CONSTRUCTION,
+    # which is what power-cycling between games already achieves by hand.
+    # Costs an SD remount + chooser redraw.  Safe on both targets: PIO re-inits
+    # its PIO state machine, and the mapped QMI init already exits QPI first
+    # precisely because a watchdog reset does not power-cycle the PSRAM.
+    option(PICO_REBOOT_BETWEEN_GAMES "Reboot into the chooser after a game exits" ON)
+    if(PICO_REBOOT_BETWEEN_GAMES)
+        add_compile_definitions(PICO_REBOOT_BETWEEN_GAMES=1)
+    endif()
+
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)

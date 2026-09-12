@@ -3,6 +3,9 @@
 
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
+#ifdef PICO_REBOOT_BETWEEN_GAMES
+#include "hardware/watchdog.h"
+#endif
 #include "pico_sdcard.h"
 #include "kbd_input.h"
 #ifdef PICO_PWM_AUDIO
@@ -45,6 +48,9 @@ int freesci_main(int argc, char **argv);
 void pico_reset_resident_vocab(void);  /* game.c */
 #endif
 void pico_reset_decode_scratches(void);  /* operations.c */
+void pico_reset_decrypt_scratch(void);   /* decompress0.c */
+void pico_reset_said_scratch(void);      /* said.c */
+void census_dump_sites(void);            /* pico_mem_census.c (no-op when OFF) */
 
 /* ---- HardFault diagnostics (RP2350 / Cortex-M33) ---------------------- */
 /* The RP2350 has no MMU, so a wild pointer doesn't fault at the access — but a
@@ -376,10 +382,41 @@ int main(void)
            (e.g. loading PQ2 right after SQ3).  Free the permanent decode scratches
            (which otherwise pin the break high), then malloc_trim releases the now-
            free top of the heap via sbrk, so the next game grows from a low arena —
-           a cold-boot heap without the power cycle. */
+           a cold-boot heap without the power cycle.
+
+           Measured (FSCI_PROBE_MEM, SQ3 -> chooser): the trim DOES work
+           (arena 413,324 -> 167,564), but 22,508 bytes stayed live where a cold
+           boot has 4 — and malloc_trim can only release the top free chunk, so
+           whatever survives sets the next game's floor.  The two lazy
+           "allocate once, never free" scratches below are ~20.9KB of that:
+           decrypt1's LZW token tables (16,384) and said's parse scratch
+           (~4,512).  Both are genuinely game-independent WITHIN a game, which
+           is why they were never freed; across the chooser they are just
+           inherited ballast. */
         pico_reset_decode_scratches();
+        pico_reset_decrypt_scratch();
+        pico_reset_said_scratch();
         malloc_trim(0);
         MEMPRINT("post-trim");
+        /* Whatever `used` still reports here is the residual cross-game floor.
+           On a census build, name it rather than guess: the histogram gives the
+           size classes and the SITES line the call sites. */
+        census_dump_sites();
+#ifdef PICO_REBOOT_BETWEEN_GAMES
+        /* The trim above is best-effort and structurally cannot guarantee a low
+           floor: it only releases the TOP free chunk, so one surviving block in
+           an unlucky spot pins the arena regardless of how small it is.  Reboot
+           instead — the chooser is where this loop was headed anyway, so the
+           destination is unchanged and the next game starts on a genuinely cold
+           heap.  (This is the power-cycle workaround, automated.)  The resets
+           above are deliberately kept: they are correct in their own right, and
+           they are what the OFF path relies on. */
+        printf("[mem] rebooting into the chooser for a cold heap\n");
+        stdio_flush();
+        watchdog_reboot(0, 0, 0);
+        for (;;)
+            ;
+#endif
         /* After the game exits, loop back to the chooser */
     }
 }

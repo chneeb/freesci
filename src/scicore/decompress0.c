@@ -80,6 +80,29 @@ pico_decompress_alloc(int type, unsigned int size)
 #  define DECOMPRESS_FREE_DATA(p) free(p)
 #endif
 
+#ifdef HAVE_PICO
+/* decrypt1's two LZW token tables, hoisted off its stack frame — see the long
+   comment at the top of decrypt1.  File scope (rather than function-scope
+   statics) purely so pico_reset_decrypt_scratch can reach them. */
+static guint16 *pico_tokenlist = NULL;        /* pointers to dest[] */
+static guint16 *pico_tokenlengthlist = NULL;  /* char length of each token */
+
+/* Called from the chooser after a game exits.  These 16 KB are allocated on the
+   first resource decompress and would otherwise stay live forever, pinning the
+   next game's heap floor that much higher — the cross-game arena ratchet.  They
+   re-allocate on the next game's first decompress. */
+void
+pico_reset_decrypt_scratch(void)
+{
+	if (pico_tokenlist)
+		free(pico_tokenlist);
+	if (pico_tokenlengthlist)
+		free(pico_tokenlengthlist);
+	pico_tokenlist = NULL;
+	pico_tokenlengthlist = NULL;
+}
+#endif
+
 /* 9-12 bit LZW encoding */
 int
 decrypt1(guint8 *dest, guint8 *src, int length, int complength)
@@ -117,9 +140,14 @@ decrypt1(guint8 *dest, guint8 *src, int length, int complength)
 	   garbage (the decrypt1 HardFault). Move them off the stack to malloc-once
 	   file-scope statics so this frame stays small. decrypt1 is core0-serial
 	   (SCI decompression is never concurrent), so non-reentrancy is fine; the
-	   buffers are game-independent scratch, allocated once and never freed. */
-	static guint16 *tokenlist = NULL;        /* pointers to dest[] */
-	static guint16 *tokenlengthlist = NULL;  /* char length of each token */
+	   buffers are game-independent scratch, allocated once and reused for the
+	   rest of the game — but they ARE freed at the chooser
+	   (pico_reset_decrypt_scratch), or they would be 16 KB of the next game's
+	   inherited heap floor.  These two locals are just ALIASES onto those
+	   file-scope buffers, so the frame costs 8 bytes rather than 16 KB and the
+	   body below needs no changes. */
+	guint16 *tokenlist;
+	guint16 *tokenlengthlist;
 #else
 	guint16 tokenlist[4096]; /* pointers to dest[] */
 	guint16 tokenlengthlist[4096]; /* char length of each token */
@@ -131,10 +159,12 @@ decrypt1(guint8 *dest, guint8 *src, int length, int complength)
 	guint16 destctr = 0;
 
 #ifdef HAVE_PICO
-	if (!tokenlist) {
-		tokenlist       = (guint16 *) sci_malloc(4096 * sizeof(guint16));
-		tokenlengthlist = (guint16 *) sci_malloc(4096 * sizeof(guint16));
+	if (!pico_tokenlist) {
+		pico_tokenlist       = (guint16 *) sci_malloc(4096 * sizeof(guint16));
+		pico_tokenlengthlist = (guint16 *) sci_malloc(4096 * sizeof(guint16));
 	}
+	tokenlist       = pico_tokenlist;
+	tokenlengthlist = pico_tokenlengthlist;
 #endif
 
 	while (bytectr < complength) {

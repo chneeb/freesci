@@ -149,8 +149,10 @@ static char *said_parse_error;
 static int said_token;
 static int said_tokens_nr;
 /* Lazily allocated on first use in said() (~4.5KB total with said_tree).  Only
-   touched when s->parser_valid, which requires a loaded vocabulary; Pico disables
-   the parser, so these stay NULL there and the SRAM is never spent. */
+   touched when s->parser_valid, which requires a loaded vocabulary, so a build
+   with no parser never spends the SRAM.  The Pico parser IS enabled, so these
+   are live there and are released at the chooser -- see
+   pico_reset_said_scratch below. */
 static int *said_tokens = NULL;
 
 static int said_blessed;  /* increminated by said_top_branch */
@@ -161,6 +163,24 @@ static int said_tree_pos; /* Set to 0 if we're out of space */
 #define VALUE_IGNORE -424242
 
 static parse_tree_node_t *said_tree = NULL;
+
+#ifdef HAVE_PICO
+/* Called from the chooser after a game exits.  said_tokens + said_tree are
+   allocated on the first Said match and never freed within a game (deliberately
+   -- they are game-independent scratch).  Across the chooser that is ~4.5KB of
+   the next game's inherited heap floor, so drop them; they re-allocate on the
+   next game's first Said. */
+void
+pico_reset_said_scratch(void)
+{
+	if (said_tokens)
+		free(said_tokens);
+	if (said_tree)
+		free(said_tree);
+	said_tokens = NULL;
+	said_tree = NULL;
+}
+#endif
 
 typedef int wgroup_t;
 typedef int tree_t;
