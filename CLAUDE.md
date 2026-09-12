@@ -3655,9 +3655,31 @@ showed the bake wrote pixel 98 = 3 and the restore read byte 0x63 (low nibble 3)
 bake and restore already AGREED. **When the plumbing traces identical and the content still differs, suspect
 the harness's model of the world before the code under test.**
 
-**NO SHIPPING EXPOSURE: `PICO_PACK_VISUAL` has no CMake option** -- it is set only by the two harnesses, so
-no firmware can build with a half-converted driver. Wiring the option is the LAST step, together with setting
-`nibble_packed` + the half-size allocation on the decode path in `operations.c`.
+**`PICO_PACK_VISUAL` IS NOW A CMAKE OPTION (default OFF) and the firmware BUILDS.** It forces
+`PICO_DITHER_D16` on (a nibble holds 0..15, so the two must not disagree) and FATAL_ERRORs if combined with
+`PICO_PSRAM_MAPPED` -- packing is PIO-only; the mapped target has SRAM to spare and a different render model.
+
+```
+cmake -B build-pico-4bpp -DPLATFORM=pico -DPICO_SDK_PATH=~/Source/pico-sdk \
+      -DPICO_BOARD=pico2 -DPICO_PACK_VISUAL=ON
+```
+
+The decode path was wired to match: `GFXR_VIS_BYTES` in `sci_resmgr.c` is the ONE place that knows the
+visual map's byte extent, so the deferred decode alloc, the borrowed visual[0], the PSRAM offload, the
+overlay base-restore and the `[ovl]` probe's byte sums cannot drift apart; `operations.c`'s early-pin
+fallback matches it. `nibble_packed` is set on the visual map at both hand-off points.
+
+**Size: `.bss` 17,768 -> 18,088 (+320, the row staging). The 32,000-byte saving is in the HEAP**, since
+visual[0] is `sci_malloc`'d -- it shows as runtime headroom, not in `arm-none-eabi-size`.
+
+**UNVERIFIED END TO END -- treat the first flash as an experiment.** `visdiff` verifies the decode half and
+`drvdiff` the driver half, but **nothing has exercised them TOGETHER**, and no hardware has run this at all.
+Specifically untested: PSRAM timing with the extra per-row unpacking; the real palette plumbing; and
+**whether 16 palette slots actually suffice for text, cursor and UI under D16** -- the driver writes resolved
+palette SLOTS into visual[0], and only 0..15 now fit, so anything mapping above 15 would be silently
+truncated. That last one is the most likely thing to bite and is worth checking first.
+
+
 
 
 

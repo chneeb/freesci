@@ -364,6 +364,24 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_DITHER_D16=1)
     endif()
 
+    # Nibble-pack the visual buffer: 64000 -> 32000 bytes of SRAM, the point of
+    # the whole D16 exercise on the SRAM-bound PIO target. REQUIRES D16 (a nibble
+    # holds 0..15), so it forces it on rather than letting the two disagree.
+    #
+    # Default OFF and UNVERIFIED ON DEVICE. The decode half (visdiff) and the
+    # driver half (drvdiff) are each verified offline, but nothing has yet
+    # exercised them TOGETHER, and no hardware has run this at all -- PSRAM
+    # timing, the real palette plumbing, and whether 16 slots suffice for text
+    # and UI under D16 are all untested. Treat the first flash as an experiment.
+    option(PICO_PACK_VISUAL "Pico/PIO: 4bpp nibble-packed visual buffer (needs D16)" OFF)
+    if(PICO_PACK_VISUAL)
+        if(PICO_PSRAM_MAPPED)
+            message(FATAL_ERROR "PICO_PACK_VISUAL is PIO-only: the mapped target has SRAM to spare and a different render model")
+        endif()
+        add_compile_definitions(PICO_PACK_VISUAL=1 PICO_DITHER_D16=1)
+        message(STATUS "PICO_PACK_VISUAL: visual buffer 64000 -> 32000 B; D16 forced on")
+    endif()
+
     option(PICO_VOCAB_PROBE "Measure text-parser vocab SRAM cost on Pico" OFF)
     if(PICO_VOCAB_PROBE)
         add_compile_definitions(PICO_VOCAB_PROBE=1)

@@ -35,6 +35,18 @@
 #include <pico/stdlib.h>
 /* Globals in operations.c consumed here during pic decode */
 extern byte *g_pico_decode_visual_buf;
+
+/* The visual map is nibble-packed (2 px/byte) when the driver's visual[0] is --
+   see PICO_PACK_VISUAL in pico_driver.c. GFXR_VIS_BYTES is the ONE place that
+   knows the decode buffer's byte extent, so the deferred alloc, the PSRAM
+   offload and the overlay base-restore cannot drift apart. */
+#ifdef PICO_PACK_VISUAL
+#  define GFXR_VIS_PACKED    1
+#  define GFXR_VIS_BYTES(n)  (((n) + 1) >> 1)
+#else
+#  define GFXR_VIS_PACKED    0
+#  define GFXR_VIS_BYTES(n)  (n)
+#endif
 extern byte *g_pico_priority_scratch;
 extern int g_pico_visual_defer_failed;
 extern int g_pico_decode_visual_borrowed;
@@ -179,10 +191,15 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 
 		if (g_pico_decode_visual_buf) {
 			scaled_pic->visual_map->index_data = g_pico_decode_visual_buf;
+			/* This IS the driver's visual[0], so it carries the driver's
+			   format; every writer keys off nibble_packed. */
+			scaled_pic->visual_map->nibble_packed = GFXR_VIS_PACKED;
 			g_pico_decode_visual_buf = NULL;
 		} else {
-			scaled_pic->visual_map->index_data = (byte*)malloc(GFXR_AUX_MAP_SIZE);
-			PICO_ARENA_PROBE_RAW(GFXR_AUX_MAP_SIZE);
+			scaled_pic->visual_map->index_data =
+				(byte*)malloc(GFXR_VIS_BYTES(GFXR_AUX_MAP_SIZE));
+			PICO_ARENA_PROBE_RAW(GFXR_VIS_BYTES(GFXR_AUX_MAP_SIZE));
+			scaled_pic->visual_map->nibble_packed = GFXR_VIS_PACKED;
 			if (!scaled_pic->visual_map->index_data) {
 				/* Deferred alloc failed.  Signal gfxop_new_pic to retry with an
 				   early pin from the freshly-freed region; if that also fails
@@ -238,7 +255,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			   clearing to white; the overlay's own commands then draw on top. */
 			gfx_pixmap_t *vmap = scaled_pic->visual_map;
 			gfx_pixmap_t *pmap = scaled_pic->priority_map;
-			size_t vsz = (size_t)(vmap->index_xl * vmap->index_yl);
+			size_t vsz = GFXR_VIS_BYTES((size_t)(vmap->index_xl * vmap->index_yl));
 			size_t pnpix = (size_t)(pmap->index_xl * pmap->index_yl);
 			psram_load(base_vis_addr, vmap->index_data, vsz);
 			psram_load(base_pri_addr, pmap->index_data, (pnpix + 1) >> 1);
@@ -255,7 +272,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		unsigned long _ovl_before = 0;
 		if (flags & DRAWPIC01_FLAG_OVERLAID_PIC) {
 			gfx_pixmap_t *_vm = scaled_pic->visual_map;
-			size_t _n = (size_t)(_vm->index_xl * _vm->index_yl), _i;
+			size_t _n = GFXR_VIS_BYTES((size_t)(_vm->index_xl * _vm->index_yl)), _i;
 			for (_i = 0; _i < _n; _i++) _ovl_before += _vm->index_data[_i];
 		}
 #endif
@@ -270,7 +287,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 #ifdef FSCI_PROBE_GFX
 		if (flags & DRAWPIC01_FLAG_OVERLAID_PIC) {
 			gfx_pixmap_t *_vm = scaled_pic->visual_map;
-			size_t _n = (size_t)(_vm->index_xl * _vm->index_yl), _i;
+			size_t _n = GFXR_VIS_BYTES((size_t)(_vm->index_xl * _vm->index_yl)), _i;
 			unsigned long _ovl_after = 0;
 			for (_i = 0; _i < _n; _i++) _ovl_after += _vm->index_data[_i];
 			sciprintf("[ovl] id=%d restore_base=%d vaddr=%lu N=%lu "
@@ -286,7 +303,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			   Keep the 64KB buffer (don't free yet) to reuse as the control
 			   pass's flood-fill aux_map below. */
 			gfx_pixmap_t *vmap = scaled_pic->visual_map;
-			size_t sz = (size_t)(vmap->index_xl * vmap->index_yl);
+			size_t sz = GFXR_VIS_BYTES((size_t)(vmap->index_xl * vmap->index_yl));
 			vmap->psram_addr  = psram_alloc(sz);
 			vmap->psram_valid = 1;
 			psram_store(vmap->psram_addr, vmap->index_data, sz);
