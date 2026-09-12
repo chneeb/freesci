@@ -37,3 +37,41 @@ TWO TRAPS, both of which produced a silently BLANK or flat frame and no error:
  - gfx_color_t.mask must be set (GFX_MASK_VISUAL) or every draw is a no-op.
  - a cel needs colors/colors_nr; a NULL palette collapses every index to one
    colour. colors_nr 256 selects the identity path, as backgrounds use.
+
+--- COVERAGE IS THE WHOLE GAME -----------------------------------------------
+
+This harness gave THREE false passes in a row, each time because the scene did
+not walk the path being converted. A green cmp means only "the paths this scene
+exercises agree".
+
+  1. grab/restore were unconverted and cmp still passed -- the scene never
+     grabbed. Fixed by grabbing a region and restoring it elsewhere.
+  2. a static draw was added to exercise the bake, but the driver REJECTED it
+     ("scaling not supported") because src and dest sizes differed, so the bake
+     never ran and cmp passed again. Watch stderr: any driver complaint means
+     the path did not execute.
+  3. the bake writes to PSRAM, not the panel, so even a successful bake changed
+     nothing in the capture. It needs a following BACK restore to read the
+     composed surface back into visual[0] before anything reaches the wire.
+
+Only after all three did the packed build actually fail -- which is the harness
+finally doing its job.
+
+  NOGRAB=1 ./drvdiff_...      # isolate: drops the grab from the scene
+
+--- KNOWN FAILING (packed, as of 2026-09-12) ---------------------------------
+
+With -DPICO_PACK_VISUAL=1 -DPICO_STATIC_COMPOSED=1 the BACK-restore region
+differs in FULL -- 60x28 = 1680 px, every pixel -- so the composed-surface round
+trip is wrong end to end, not at the edges. The unpacked build shows the baked
+static cel there; the packed build shows background, i.e. the cel is missing
+from composed by the time the restore reads it.
+
+Already fixed and NOT the cause (all real bugs, keep them): pico_compose_ensure
+and pico_invalidate_static_region copied byte-per-pixel rows; and the blit's
+PSRAM VISUAL source read was not packed-aware (the priority map had a packed
+branch, the visual one did not).
+
+Next: instrument whether pico_bake_static_region writes where the restore reads
+-- the two agree on paper (both index = y*320 + x, then >>1) which is precisely
+why it needs measuring rather than re-reading.

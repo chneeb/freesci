@@ -636,7 +636,8 @@ static int pico_draw_filled_rect(struct _gfx_driver *drv, rect_t rect,
 /* Used when pxm->data is NULL (skipped in gfx_xlate_pixmap for Pico) */
 /* ------------------------------------------------------------------ */
 
-static uint8_t s_psram_row[PICO_XSIZE]; /* scratch row for PSRAM reads (source index) */
+static uint8_t s_psram_row[PICO_XSIZE];
+static uint8_t s_psram_packed[(PICO_XSIZE + 1) >> 1]; /* packed row staging */ /* scratch row for PSRAM reads (source index) */
 static uint8_t s_pri_row[PICO_XSIZE];   /* scratch row for PSRAM reads (priority) */
 static uint8_t s_pri_pack[(PICO_XSIZE >> 1) + 1]; /* packed-nibble scratch for the priority readback */
 
@@ -766,8 +767,27 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
     for (int y = 0; y < yl; y++) {
         const byte *row_src;
         if (use_psram) {
-            uint32_t row_offset = (uint32_t)((src.y + y) * pxm->index_xl);
-            psram_load(pxm->psram_addr + row_offset, s_psram_row, (size_t)pxm->index_xl);
+            if (pxm->nibble_packed) {
+                /* 2 px/byte in PSRAM -- read the packed row and unpack, exactly
+                   as the priority map below already does. Without this the load
+                   reads index_xl BYTES of a row that is only half that long,
+                   running past it and mis-indexing every pixel. This is how the
+                   composed surface (which inherits nibble_packed from static_bg)
+                   came back as garbage once the visual buffer was packed. */
+                int rowbytes = (pxm->index_xl + 1) >> 1;
+                uint32_t row_offset = (uint32_t)((src.y + y) * rowbytes);
+                int c;
+
+                psram_load(pxm->psram_addr + row_offset, s_psram_packed,
+                           (size_t)rowbytes);
+                for (c = 0; c < pxm->index_xl; c++)
+                    s_psram_row[c] = (c & 1) ? (uint8_t)(s_psram_packed[c >> 1] >> 4)
+                                             : (uint8_t)(s_psram_packed[c >> 1] & 0x0f);
+            } else {
+                uint32_t row_offset = (uint32_t)((src.y + y) * pxm->index_xl);
+                psram_load(pxm->psram_addr + row_offset, s_psram_row,
+                           (size_t)pxm->index_xl);
+            }
             row_src = s_psram_row + src.x;
         } else {
             row_src = pxm->index_data + (src.y + y) * pxm->index_xl + src.x;
@@ -1025,9 +1045,17 @@ static int pico_compose_ensure(struct _pico_state *ps)
     if (addr + (uint32_t)(bw * bh) > PICO_PARSE_SCRATCH_ADDR)
         return 0;                   /* arena exhausted: fall back to pristine */
 
-    for (y = 0; y < bh; y++) {
-        psram_load(bg->psram_addr + (uint32_t)(y * bw), s_compose_row, (size_t)bw);
-        psram_store(addr + (uint32_t)(y * bw), s_compose_row, (size_t)bw);
+    {
+        /* Row length is in BYTES, and a packed surface holds 2 px/byte -- copying
+           bw bytes there would read past the row and leave the tail unwritten. */
+        int rowbytes = bg->nibble_packed ? ((bw + 1) >> 1) : bw;
+
+        for (y = 0; y < bh; y++) {
+            psram_load(bg->psram_addr + (uint32_t)(y * rowbytes), s_compose_row,
+                       (size_t)rowbytes);
+            psram_store(addr + (uint32_t)(y * rowbytes), s_compose_row,
+                        (size_t)rowbytes);
+        }
     }
 
     /* Shallow mirror: pico_blit_indexed reads index dims, colors and psram_addr,
@@ -1085,6 +1113,37 @@ void pico_invalidate_static_region(struct _gfx_driver *drv, rect_t area)
     for (row = 0; row < area.yl; row++) {
         int by = area.y + row;
         if (by < 0 || by >= bh) continue;
+
+        if (bg->nibble_packed) {
+            /* Same shared-edge problem as the bake: at an odd x0 the first
+               byte's low nibble belongs to x0-1, and at an odd end the last
+               byte's high nibble belongs to x0+w. Copying those bytes whole
+               would revert a neighbour that is not being invalidated. */
+            int b0 = by * bw + x0, b1 = b0 + w;
+            uint8_t src_edge, dst_edge;
+
+            if (b0 & 1) {
+                psram_load(bg->psram_addr + (uint32_t)(b0 >> 1), &src_edge, 1);
+                psram_load(ps->composed_addr + (uint32_t)(b0 >> 1), &dst_edge, 1);
+                dst_edge = (uint8_t)((dst_edge & 0x0f) | (src_edge & 0xf0));
+                psram_store(ps->composed_addr + (uint32_t)(b0 >> 1), &dst_edge, 1);
+                b0++;
+            }
+            if (b1 & 1) {
+                b1--;
+                psram_load(bg->psram_addr + (uint32_t)(b1 >> 1), &src_edge, 1);
+                psram_load(ps->composed_addr + (uint32_t)(b1 >> 1), &dst_edge, 1);
+                dst_edge = (uint8_t)((dst_edge & 0xf0) | (src_edge & 0x0f));
+                psram_store(ps->composed_addr + (uint32_t)(b1 >> 1), &dst_edge, 1);
+            }
+            if (b1 > b0) {
+                size_t nb = (size_t)((b1 - b0) >> 1);
+                psram_load(bg->psram_addr + (uint32_t)(b0 >> 1), s_compose_row, nb);
+                psram_store(ps->composed_addr + (uint32_t)(b0 >> 1), s_compose_row, nb);
+            }
+            continue;
+        }
+
         psram_load(bg->psram_addr + (uint32_t)(by * bw + x0),
                    s_compose_row, (size_t)w);
         psram_store(ps->composed_addr + (uint32_t)(by * bw + x0),
@@ -1153,8 +1212,41 @@ static void pico_bake_static_region(struct _pico_state *ps, rect_t dest)
         for (int row = 0; row < dest.yl; row++) {
             int by = dest.y + row;
             if (by < 0 || by >= bh) continue;
+#ifdef PICO_PACK_VISUAL
+            {
+                /* Both surfaces are packed with the SAME pixel->byte mapping
+                   (index = y*320 + x, and bw == PICO_XSIZE), so the interior is
+                   a straight byte copy. Only the first and last bytes can be
+                   SHARED with pixels outside [x0, x0+w) -- at an odd x0 the low
+                   nibble belongs to x0-1, at an odd end the high nibble belongs
+                   to x0+w -- and those need read-modify-write or the copy would
+                   clobber a neighbour that is not being baked. */
+                int b0 = by * PICO_XSIZE + x0;      /* first pixel  */
+                int b1 = b0 + w;                    /* one past last */
+                const uint8_t *vis = ps->visual[0];
+                uint8_t edge;
+
+                if (b0 & 1) {                       /* leading shared byte */
+                    psram_load(base + (uint32_t)(b0 >> 1), &edge, 1);
+                    edge = (uint8_t)((edge & 0x0f)
+                                     | (uint8_t)(VIS_GET(vis, b0) << 4));
+                    psram_store(base + (uint32_t)(b0 >> 1), &edge, 1);
+                    b0++;
+                }
+                if (b1 & 1) {                       /* trailing shared byte */
+                    b1--;
+                    psram_load(base + (uint32_t)(b1 >> 1), &edge, 1);
+                    edge = (uint8_t)((edge & 0xf0) | (uint8_t)VIS_GET(vis, b1));
+                    psram_store(base + (uint32_t)(b1 >> 1), &edge, 1);
+                }
+                if (b1 > b0)                        /* aligned interior */
+                    psram_store(base + (uint32_t)(b0 >> 1),
+                                vis + (b0 >> 1), (size_t)((b1 - b0) >> 1));
+            }
+#else
             psram_store(base + (uint32_t)(by * bw + x0),
                         ps->visual[0] + by * PICO_XSIZE + x0, (size_t)w);
+#endif
         }
     }
 #else

@@ -37,6 +37,7 @@
 #include <gfx_driver.h>
 #include <gfx_tools.h>
 #include <gfx_resource.h>
+#include "psram_alloc.h"
 #include <sci_memory.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -126,6 +127,40 @@ main(int argc, char **argv)
 			 gfx_rect(0, 0, 60, 30), gfx_rect(40, 55, 60, 30),
 			 GFX_BUFFER_BACK);
 
+	/* A STATIC draw, so pico_bake_static_region runs. Needs a PSRAM-backed
+	   static_bg, because the bake bails without one -- and if it bails the
+	   capture proves nothing about it (see the grab/restore false pass). */
+	{
+		gfx_pixmap_t *bg = gfx_new_pixmap(W, H, GFX_RESID_NONE, 0, 0);
+		gfx_pixmap_t *sv = make_cel(47, 24);   /* odd width */
+
+		bg->index_xl = W; bg->index_yl = H;
+		bg->index_data = NULL;            /* PSRAM-resident, as on device */
+		bg->psram_addr = psram_alloc((size_t)W * H);
+		bg->psram_valid = 1;
+		/* MUST match the driver's format, or the bake stores nibbles while the
+		   BACK restore reads bytes. On device the pic decoder sets this when
+		   the visual map is packed; the harness has to model it or it tests a
+		   configuration that cannot exist. */
+#ifdef PICO_PACK_VISUAL
+		bg->nibble_packed = 1;
+#endif
+		drv->set_static_buffer(drv, bg, NULL);
+
+		/* odd x and odd width on purpose: that is where a packed bake has to
+		   read-modify-write the shared edge bytes. */
+		drv->draw_pixmap(drv, sv, GFX_NO_PRIORITY,
+				 gfx_rect(0, 0, 47, 24), gfx_rect(97, 40, 47, 24),
+				 GFX_BUFFER_STATIC);   /* src == dest: no scaling */
+	}
+
+	/* THE BAKE WRITES TO PSRAM, NOT THE PANEL -- so a static draw alone still
+	   proves nothing about it. A BACK restore reads the composed surface back
+	   into visual[0], which is what finally puts the baked bytes on the wire.
+	   (Third coverage gap in this harness; see the README.) */
+	drv->update(drv, gfx_rect(90, 38, 60, 28), gfx_point(90, 38), GFX_BUFFER_BACK);
+
+	if (!getenv("NOGRAB")) {
 	/* Grab a region and restore it elsewhere. Without this the capture would
 	   NOT cover grab/restore at all, and cmp passing would be a FALSE pass --
 	   the harness only proves the paths the scene actually walks. */
@@ -138,6 +173,7 @@ main(int argc, char **argv)
 		drv->draw_pixmap(drv, grab, GFX_NO_PRIORITY,
 				 gfx_rect(0, 0, 80, 40), gfx_rect(150, 100, 80, 40),
 				 GFX_BUFFER_BACK);
+	}
 	}
 
 	/* Push it to the "panel" -- this is what gets captured. */
