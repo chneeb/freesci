@@ -32,7 +32,6 @@
 
 #define CLIPMASK_HARD_BOUND 0x80 /* ensures that we don't re-fill filled stuff */
 
-
 static void
 AUXBUF_FILL_HELPER(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy,
 		   int clipmask, int control, int sci_titlebar_size)
@@ -56,11 +55,11 @@ AUXBUF_FILL_HELPER(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy,
 			return;
 
 		xl = old_xl;
-		if (!(AUX_TEST(pic, ytotal + xl, clipmask))) { /* go left */
-			while (xl && !(AUX_TEST(pic, ytotal + xl - 1, clipmask)))
+		if (!(pic->aux_map[ytotal + xl] & clipmask)) { /* go left */
+			while (xl && !(pic->aux_map[ytotal + xl - 1] & clipmask))
 				--xl;
 		} else /* go right and look for the first valid spot */
-			while ((xl <= old_xr) && (AUX_TEST(pic, ytotal + xl, clipmask)))
+			while ((xl <= old_xr) && (pic->aux_map[ytotal + xl] & clipmask))
 				++xl;
 
 		if (xl > old_xr) /* No fillable strip above the last one */
@@ -69,8 +68,8 @@ AUXBUF_FILL_HELPER(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy,
 		if ((ytotal + xl) < 0) { fprintf(stderr,"AARGH-%d\n", __LINE__); BREAKPOINT(); }
 
 		xr = xl;
-		while (xr < 320 && !(AUX_TEST(pic, ytotal + xr, clipmask))) {
-			AUX_OR(pic, ytotal + xr, fillmask);
+		while (xr < 320 && !(pic->aux_map[ytotal + xr] & clipmask)) {
+			pic->aux_map[ytotal + xr] |= fillmask;
 			++xr;
 		}
 
@@ -90,7 +89,7 @@ AUXBUF_FILL_HELPER(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy,
 			state = 0;
 			xcont = xr + 1;
 			while (xcont <= old_xr) {
-				if (AUX_TEST(pic, ytotal + xcont, clipmask))
+				if (pic->aux_map[ytotal + xcont] & clipmask)
 					state = 0;
 				else if (!state) { /* recurse */
 					state = 1;
@@ -106,7 +105,7 @@ AUXBUF_FILL_HELPER(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy,
 		if (xl < old_xl - 1) {
 			state = 0;
 			for (xcont = old_xl - 1; xcont >= xl; xcont--) {
-				if (AUX_TEST(pic, oldytotal + xcont, clipmask))
+				if (pic->aux_map[oldytotal + xcont] & clipmask)
 					state = xcont;
 				else if (state) { /* recurse */
 					AUXBUF_FILL_HELPER(pic, xcont, state,
@@ -120,7 +119,7 @@ AUXBUF_FILL_HELPER(gfxr_pic_t *pic, int old_xl, int old_xr, int y, int dy,
 		if (xr > old_xr + 1) {
 			state = 0;
 			for (xcont = old_xr + 1; xcont <= xr; xcont++) {
-				if (AUX_TEST(pic, oldytotal + xcont, clipmask))
+				if (pic->aux_map[oldytotal + xcont] & clipmask)
 					state = xcont;
 				else if (state) { /* recurse */
 					AUXBUF_FILL_HELPER(pic, state, xcont,
@@ -178,21 +177,21 @@ AUXBUF_FILL(gfxr_pic_t *pic, int x, int y, int clipmask, int control, int sci_ti
 	clipmask |= fillmask; /* Bits 3-5 */
 #endif
 
-	if (AUX_TEST(pic, ytotal + x, clipmask))
+	if (pic->aux_map[ytotal + x] & clipmask)
 		return;
 
-	AUX_OR(pic, ytotal + x, fillmask);
+	pic->aux_map[ytotal + x] |= fillmask;
 
 	xl = x;
-	while (xl && !(AUX_TEST(pic, ytotal + xl - 1, clipmask))) {
+	while (xl && !(pic->aux_map[ytotal + xl - 1] & clipmask)) {
 		--xl;
-		AUX_OR(pic, ytotal + xl, fillmask);
+		pic->aux_map[ytotal + xl] |= fillmask;
 	}
 
 	xr = x;
-	while ((xr < 319) && !(AUX_TEST(pic, ytotal + xr + 1, clipmask))) {
+	while ((xr < 319) && !(pic->aux_map[ytotal + xr + 1] & clipmask)) {
 		++xr;
-		AUX_OR(pic, ytotal + xr, fillmask);
+		pic->aux_map[ytotal + xr] |= fillmask;
 	}
 
 	clipmask |= CLIPMASK_HARD_BOUND; /* Guarantee clipping */

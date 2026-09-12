@@ -25,16 +25,6 @@
 
 ***************************************************************************/
 
-/* The STORE is pluggable so a second pixel format can reuse this traversal
-   VERBATIM. Only the store may vary -- never the walk. The Pico ctl_draw_line
-   was once hand-written as "a correct line" and picked different pixels from
-   this midpoint DDA on ~32% of segments, opening a one-pixel gap that a flood
-   fill leaked through (CLAUDE.md). Defaults to the original memcpy, so every
-   existing inclusion is byte-for-byte unchanged. */
-#ifndef PLOT
-#  define PLOT(X, Y) memcpy(buffer + linewidth * (Y) + (X), &color, PIXELWIDTH)
-#endif
-
 #define LINEMACRO(startx, starty, deltalinear, deltanonlinear, linearvar, nonlinearvar, \
                   linearend, nonlinearstart, linearmod, nonlinearmod) \
    x = (startx); y = (starty); \
@@ -44,14 +34,14 @@
    incrE = ((deltanonlinear) > 0) ? -(deltanonlinear) : (deltanonlinear);  \
    d = nonlinearstart-1;  \
    while (linearvar != (linearend)) { \
-     PLOT(x, y); \
+     memcpy(buffer + linewidth * y + x, &color, PIXELWIDTH); \
      linearvar += linearmod; \
      if ((d+=incrE) < 0) { \
        d += incrNE; \
        nonlinearvar += nonlinearmod; \
      }; \
    }; \
-   PLOT(x, y);
+   memcpy(buffer + linewidth * y + x, &color, PIXELWIDTH);
 
 
 static inline

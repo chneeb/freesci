@@ -61,26 +61,6 @@ int gfx_crossblit_alpha_threshold = 128;
 #undef PIXELWIDTH
 #undef DRAWLINE_FUNC
 
-/* Nibble-packed (2 px/byte) line, for the Pico 4bpp visual buffer. Same source,
-   same DDA, same pixels -- ONLY the store differs, which is the whole point:
-   a hand-written packed line would be free to disagree with the byte version
-   about which pixels a segment covers, and that is precisely the bug class this
-   avoids. `linewidth` stays in PIXELS; the byte offset is derived here. */
-#define DRAWLINE_FUNC _gfx_draw_line_buffer_packed
-#define PIXELWIDTH 1
-#define PLOT(X, Y)                                                        \
-	do {                                                              \
-		int _i = linewidth * (Y) + (X);                           \
-		byte *_b = buffer + (_i >> 1);                            \
-		byte _v = GFX_D16_SELECT(color, (X), (Y));                \
-		*_b = (_i & 1) ? ((*_b & 0x0f) | (byte)(_v << 4))         \
-			       : ((*_b & 0xf0) | _v);                     \
-	} while (0)
-#include "gfx_line.c"
-#undef PLOT
-#undef PIXELWIDTH
-#undef DRAWLINE_FUNC
-
 inline void
 gfx_draw_line_buffer(byte *buffer, int linewidth, int pixelwidth, point_t start, point_t end, unsigned int color)
 {
@@ -116,13 +96,7 @@ void
 gfx_draw_line_pixmap_i(gfx_pixmap_t *pxm, point_t start, point_t end, int color)
 {
 	if (!pxm->index_data) return;
-
-	/* Branch in the wrapper, on the pixmap: desktop pixmaps are never packed. */
-	if (pxm->nibble_packed)
-		_gfx_draw_line_buffer_packed(pxm->index_data, pxm->index_xl,
-					     start, end, color);
-	else
-		gfx_draw_line_buffer(pxm->index_data, pxm->index_xl, 1, start, end, color);
+	gfx_draw_line_buffer(pxm->index_data, pxm->index_xl, 1, start, end, color);
 }
 
 
@@ -144,78 +118,13 @@ gfx_draw_box_buffer(byte *buffer, int linewidth, rect_t zone, int color)
 }
 
 
-/* Fill `count` pixels of a nibble-packed D16 buffer starting at pixel index
-   `first`, whose coordinates are (x, y). ONE implementation of the parity rule,
-   shared by the packed box and the flood fill's span write -- the nibble a
-   pixel takes from the dither pair is GFX_D16_SELECT(color, x, y), and getting
-   that subtly wrong in two places is exactly the bug this centralises away.
-
-   Each packed byte holds pixels (even x, odd x) because linewidth is even, so
-   the fill byte is CONSTANT along a row but SWAPS between even and odd rows. */
-void
-gfx_d16_fill_span_packed(byte *buffer, int first, int count,
-			 unsigned int color, int x, int y)
-{
-  byte lo = (byte)(color & 0x0f);
-  byte hi = (byte)((color >> 4) & 0x0f);
-  byte pair = (y & 1) ? (byte)(hi | (lo << 4)) : (byte)(lo | (hi << 4));
-  int i = first, end = first + count;
-
-  if (count <= 0)
-    return;
-
-  /* leading odd pixel: shares a byte with its predecessor */
-  if (i & 1) {
-    byte *b = buffer + (i >> 1);
-    *b = (*b & 0x0f) | (byte)(GFX_D16_SELECT(color, x, y) << 4);
-    i++; x++;
-  }
-  /* whole bytes */
-  if (end - i >= 2) {
-    int nbytes = (end - i) >> 1;
-    memset(buffer + (i >> 1), pair, nbytes);
-    i += nbytes << 1; x += nbytes << 1;
-  }
-  /* trailing odd pixel */
-  if (i < end) {
-    byte *b = buffer + (i >> 1);
-    *b = (*b & 0xf0) | GFX_D16_SELECT(color, x, y);
-  }
-}
-
-static void
-gfx_draw_box_buffer_packed(byte *buffer, int linewidth, rect_t zone, int color)
-{
-  /* Nibble-packed (2 px/byte) twin of gfx_draw_box_buffer. Safe to write by
-     hand ONLY because a rectangle has no pixel-SELECTION ambiguity -- it covers
-     exactly the same pixels by definition. Traversals (lines, ellipses, fills)
-     must NOT be duplicated this way: the Pico ctl_draw_line was once
-     hand-written as "a correct line" and picked different pixels from the
-     desktop midpoint DDA on ~32% of segments, opening a one-pixel gap that a
-     flood fill leaked through (see CLAUDE.md). Parameterise the store, never
-     re-implement the walk. */
-  int i;
-
-  if (zone.xl <= 0 || zone.yl <= 0)
-    return;
-
-  for (i = 0; i < zone.yl; i++)
-    gfx_d16_fill_span_packed(buffer, (zone.y + i) * linewidth + zone.x,
-			     zone.xl, color, zone.x, zone.y + i);
-}
-
 void
 gfx_draw_box_pixmap_i(gfx_pixmap_t *pxm, rect_t box, int color)
 {
   if (!pxm->index_data) return;
   gfx_clip_box_basic(&box, pxm->index_xl - 1, pxm->index_yl - 1);
 
-  /* Branch in the WRAPPER, on the pixmap, so desktop pixmaps (nibble_packed
-     always 0) take the byte path untouched and there is one clipping rule. */
-  if (pxm->nibble_packed)
-    gfx_draw_box_buffer_packed(pxm->index_data, pxm->index_xl, box, color);
-  else
-    gfx_draw_box_buffer(pxm->index_data, pxm->index_xl, box, color);
+  gfx_draw_box_buffer(pxm->index_data, pxm->index_xl, box, color);
 }
 
 

@@ -347,21 +347,11 @@ void
 gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
 {
 	if (pic->visual_map->index_data) {
-		int bar = 320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact;
-		int rest = pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size);
-#ifdef HAVE_PICO
-		if (pic->visual_map->nibble_packed) {
-			/* 2 px/byte. The FILL VALUES are unchanged by packing and that is
-			   not luck: under D16 the 0xff below the titlebar is reduced to
-			   index 0x0f (white), and two 0x0f nibbles are again 0xff; 0x00
-			   likewise. Only the byte counts halve. xfact==yfact==1 on the
-			   packed (Pico) path, so the halving is exact. */
-			bar >>= 1;
-			rest >>= 1;
-		}
-#endif
-		memset(pic->visual_map->index_data, 0x00, bar);
-		memset(pic->visual_map->index_data + bar, 0xff, rest);
+		memset(pic->visual_map->index_data, 0x00,
+		       320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact);
+		memset(pic->visual_map->index_data
+		       + 320 * pic->mode->xfact * sci_titlebar_size * pic->mode->yfact,
+		       0xff, pic->mode->xfact * 320 * pic->mode->yfact * (200 - sci_titlebar_size));
 	}
 	if (pic->priority_map->index_data) {
 #ifdef HAVE_PICO
@@ -391,11 +381,7 @@ gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
 		memset(pic->control_map->index_data, 0, GFXR_AUX_MAP_SIZE);
 #endif
 	if (pic->aux_map)
-#ifdef PICO_PACK_VISUAL
-		memset(pic->aux_map, 0, (GFXR_AUX_MAP_SIZE + 1) >> 1);  /* 2 px/byte */
-#else
 		memset(pic->aux_map, 0, GFXR_AUX_MAP_SIZE);
-#endif
 }
 
 
@@ -413,7 +399,7 @@ gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
    incrE = ((deltanonlinear) > 0) ? -(deltanonlinear) : (deltanonlinear);  \
    d = nonlinearstart-1;  \
    while (linearvar != (linearend)) { \
-     AUX_LINE_STORE(buffer, linewidth * y + x, operation, color); \
+     buffer[linewidth * y + x] operation color; \
 /* color ^= color2; color2 ^= color; color ^= color2; */ /* Swap colors */ \
      linearvar += linearmod; \
      if ((d+=incrE) < 0) { \
@@ -828,16 +814,7 @@ _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
 
 			case ELLIPSE_SOLID:
 #ifdef HAVE_PICO
-				if (packed == PICO_PACK_D16) {
-					gfx_d16_fill_span_packed(buffer, offset0, (oldxx << 1) + 1,
-								 color, offset0 % linewidth,
-								 offset0 / linewidth);
-					if (offset1)   /* sentinel: 0 == skip (menu bar) */
-						gfx_d16_fill_span_packed(buffer, offset1,
-									 (oldxx << 1) + 1, color,
-									 offset1 % linewidth,
-									 offset1 / linewidth);
-				} else if (packed) {
+				if (packed) {
 					ctl_fill(buffer, offset0, (oldxx << 1) + 1, color);
 					if (offset1)
 						ctl_fill(buffer, offset1, (oldxx << 1) + 1, color);
@@ -853,17 +830,7 @@ _gfxr_fill_ellipse(gfxr_pic_t *pic, byte *buffer, int linewidth, int x, int y,
 			case ELLIPSE_OR:
 				for (j=0; j < (oldxx << 1) + 1; j++) {
 #ifdef HAVE_PICO
-					if (packed == PICO_PACK_D16) {
-						/* OR-ing a dither PAIR into a packed map still needs
-						   the per-pixel nibble selection; ctl_set below would
-						   OR the whole pair in and corrupt the value. */
-						int i0 = offset0 + j, i1 = offset1 + j;
-						ctl_set(buffer, i0, ctl_get(buffer, i0)
-							| GFX_D16_SELECT(color, i0 % linewidth, i0 / linewidth));
-						if (offset1)
-							ctl_set(buffer, i1, ctl_get(buffer, i1)
-								| GFX_D16_SELECT(color, i1 % linewidth, i1 / linewidth));
-					} else if (packed) {
+					if (packed) {
 						ctl_set(buffer, offset0 + j, ctl_get(buffer, offset0 + j) | color);
 						if (offset1)
 							ctl_set(buffer, offset1 + j, ctl_get(buffer, offset1 + j) | color);
@@ -906,12 +873,7 @@ _gfxr_auxplot_brush(gfxr_pic_t *pic, byte *buffer, int yoffset, int offset, int 
 		if (plot)
 			for (yc = 0; yc < pic->mode->yfact; yc++) {
 #ifdef HAVE_PICO
-				if (packed == PICO_PACK_D16)
-					gfx_d16_fill_span_packed(buffer, full_offset,
-								 pic->mode->xfact, color,
-								 full_offset % line_width,
-								 full_offset / line_width);
-				else if (packed)
+				if (packed)
 					ctl_fill(buffer, full_offset, pic->mode->xfact, color);
 				else
 #endif
@@ -1058,17 +1020,7 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 
 			if ((mask & map_nr) && map->index_data)
 #ifdef HAVE_PICO
-				/* `map` is chosen at RUNTIME and can be the VISUAL map, in
-				   which case `control` is a dither PAIR and ctl_fill would
-				   write one constant nibble, losing half the dither. This is
-				   the same trap as the brush and ellipse, but easier to miss
-				   because the map is not named at the call site. */
-				if (map->nibble_packed && map_nr == GFX_MASK_VISUAL)
-					gfx_d16_fill_span_packed(map->index_data,
-								 yoffset + offset + x, width, control,
-								 (yoffset + offset + x) % map->index_xl,
-								 (yoffset + offset + x) / map->index_xl);
-				else if (map->nibble_packed)
+				if (map->nibble_packed)
 					ctl_fill(map->index_data, yoffset + offset + x, width, control);
 				else
 #endif
@@ -1076,7 +1028,7 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 
 			if (map_nr == GFX_MASK_CONTROL && pic->aux_map)
 				for (j = x; j < x + width; j++)
-					AUX_OR(pic, yoffset + offset + j, mask);
+					pic->aux_map[yoffset + offset + j] |= mask;
 
 		} else { /* Semi-Random! */
 			for (j = 0; j < height; j++) {
@@ -1090,14 +1042,12 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 #endif
 						pic->control_map->index_data[yoffset + x + offset + j] = control;
 
-					if (pic->aux_map) AUX_OR(pic, yoffset + x + offset + j, mask);
+					if (pic->aux_map) pic->aux_map[yoffset + x + offset + j] |= mask;
 
 					if (mask & GFX_MASK_VISUAL)
 						_gfxr_auxplot_brush(pic, pic->visual_map->index_data,
 								    yoffset, x + offset + j,
-								    1, color, brush_mode, random_index + x,
-								    pic->visual_map->nibble_packed
-								    ? PICO_PACK_D16 : 0);
+								    1, color, brush_mode, random_index + x, 0);
 
 					if (mask & GFX_MASK_PRIORITY)
 						_gfxr_auxplot_brush(pic, pic->priority_map->index_data,
@@ -1109,9 +1059,7 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 					if (mask & GFX_MASK_VISUAL)
 						_gfxr_auxplot_brush(pic, pic->visual_map->index_data,
 								    yoffset, x + offset + j,
-								    0, color, brush_mode, random_index + x,
-								    pic->visual_map->nibble_packed
-								    ? PICO_PACK_D16 : 0);
+								    0, color, brush_mode, random_index + x, 0);
 
 					if (mask & GFX_MASK_PRIORITY)
 						_gfxr_auxplot_brush(pic, pic->priority_map->index_data,
@@ -1238,9 +1186,7 @@ _gfxr_draw_pattern(gfxr_pic_t *pic, int x, int y, int color, int priority, int c
 				if (drawenable & GFX_MASK_VISUAL)
 					_gfxr_fill_ellipse(pic, pic->visual_map->index_data, 320 * pic->mode->xfact,
 							   scaled_x, scaled_y, xsize, ysize,
-							   color, ELLIPSE_SOLID,
-							   pic->visual_map->nibble_packed
-							   ? PICO_PACK_D16 : 0);
+							   color, ELLIPSE_SOLID, 0);
 
 				if (drawenable & GFX_MASK_PRIORITY)
 					_gfxr_fill_ellipse(pic, pic->priority_map->index_data, 320 * pic->mode->xfact,
@@ -2325,16 +2271,6 @@ gfxr_dither_pic0(gfxr_pic_t *pic, int dmode, int pattern)
 
 	if (dmode == GFXR_DITHER_MODE_F256)
 		return; /* Nothing to do */
-
-#ifdef HAVE_PICO
-	/* A packed visual map was ALREADY dithered, one pixel at a time, by the
-	   writers (GFX_D16_SELECT at store time) -- a 4bpp buffer has no spare byte
-	   for a post-pass to collapse. Walking it again here would treat each byte
-	   as a dither pair and re-select from two unrelated pixels, destroying it.
-	   This skip is the other half of "dithering moves into the store". */
-	if (pic->visual_map->nibble_packed)
-		return;
-#endif
 
 	if (dmode == GFXR_DITHER_MODE_D16) { /* Limit to 16 colors */
 		pic->visual_map->colors = gfx_sci0_image_colors[sci0_palette];

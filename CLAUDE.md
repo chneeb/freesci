@@ -18,6 +18,9 @@ FreeSCI is a Sierra SCI game interpreter (circa 2007), ported to SDL2 with a CMa
 > Both targets are supported. The PIO build is byte-identical (`.bss` 17,280) — every mapped change is behind
 > `PICO_PSRAM_MAPPED`, and that is a standing requirement, not a nicety.
 
+> **Branch `pico-4bpp-packing`** (pushed to `fork`) holds the abandoned 4bpp/nibble-packed visual-buffer
+> experiment. Master keeps `PICO_DITHER_D16` and the harnesses; see "4bpp visual buffer" near the end.
+
 ### PicoCalc / PIO branch status (2026-06-23)
 
 All Pico work lives on **`pico-wip-render-debug`**, currently **54 commits ahead of `master`, 0 behind** → a
@@ -3432,6 +3435,42 @@ non-blocking USB stdout they are DROPPED rather than waited on -- so that work w
 **PIO `.bss` baseline is now 17,284** (was quoted as 17,280 for most of this session -- that figure was a
 `FSCI_PROBE_GFX=ON` build). Probes off took it to 17,276; the always-on timing above adds 8. Use 17,284 as
 the "PicoCalc build unchanged" check after shared-file edits.
+
+#### 4bpp visual buffer (D16 dithering) -- ATTEMPTED, REVERTED to a branch (2026-09-12)
+
+> **OUTCOME: packing is REVERTED from master and preserved on branch `pico-4bpp-packing` (pushed to
+> `fork`). KEPT on master: `PICO_DITHER_D16` (free, device-confirmed indistinguishable) and all three
+> harnesses -- `tests/picodiff` (control), `tests/picodiff/visdiff` (visual), `tests/drvdiff` (driver +
+> panel), plus `tests/d16check.c` and `tests/ditherpreview.c`. All three verified working against the
+> reverted tree: 0/64000, 115 pics 0 differ, driver output identical.**
+>
+> **Why it was abandoned.** Not because packing is hard -- the decode half reached 111/115 pics byte-exact
+> and the driver half produced byte-identical panel output, with the PQ2 pic rendering correctly on real
+> hardware. It failed on two things:
+> 1. **The 8bpp visual buffer was load-bearing TWICE.** It is the display buffer AND the control pass's
+>    flood-fill aux, for free, precisely because it is 8bpp. Halving it does not halve the requirement -- the
+>    aux still needs its own 64,000 bytes, a large contiguous transient of exactly the kind B-1/B-1.2/B-1.3
+>    existed to remove. Net at the decode PEAK: worse, not better.
+> 2. **Packing the aux to recover that did not converge.** The bit analysis says four bits suffice and the
+>    accessors unit-test correct, but packed control maps stay wrong (SQ3 pic 3: 51,917/64,000) and each
+>    conversion moved the number negligibly -- meaning the model of what the aux holds is wrong somewhere,
+>    not merely incomplete. Best lead: `sci_pic_0.c:1912` reads `aux & 0xf` as a COLOUR, which the bit remap
+>    would collide with.
+>
+> **Cost: three device cycles, two of them on faults I introduced** (an aux-overrun from a half-size buffer,
+> and a use-after-free from omitting a `priority_is_scratch` guard the two existing free sites both had).
+>
+> **Techniques worth keeping regardless** -- these are the real return from the exercise:
+> - **POISON THE FIELD** to enumerate every use: renaming a struct member so the compiler lists every access
+>   found the aux line tracer, which aliases through a local (`buffer = pic->aux_map`) and never matched a
+>   grep for `aux_map[`.
+> - **CLASSIFY mismatches, don't just count them.** Asking "does this pixel equal its NEIGHBOUR i^1?" and
+>   checking x/y parity is what found the fourth packed writer; counting diffs only says how much is wrong.
+> - **A harness only proves the paths its scene walks.** `drvdiff` gave three false passes in a row and one
+>   false failure (its `static_bg` had no palette), each from harness fidelity rather than the code.
+> - **When the plumbing traces identical and the content still differs, suspect the harness's model first.**
+
+*Historical (the original assessment that led here):*
 
 #### 4bpp visual buffer (D16 dithering) -- ASSESSED, not built. PIO-only value.
 

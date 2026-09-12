@@ -290,28 +290,4 @@ alpha_mvi_crossblit_32_P(byte *dest, byte *src, int bytes_per_dest_line, int byt
 #endif /* __alpha__ */
 
 
-/* D16 dither selection, extracted from gfxr_dither_pic0's toggle so every packed
-   writer applies the IDENTICAL rule. With GFXR_DITHER_PATTERN_1 the `selection`
-   flag flips on every pixel AND at the end of every row, i.e. it is (x+y)&1:
-   even takes the low nibble of the dither pair, odd the high one.
-
-   This is the structural consequence of packing: a 4bpp buffer has no spare byte
-   to dither afterwards, so DITHERING MOVES FROM A POST-PASS INTO EVERY STORE.
-   Any writer that packs must use this; the post-pass must then skip the map. */
-/* `packed` is THREE-state wherever a writer serves both map kinds, because the
-   two packed formats are not interchangeable:
-     0                 unpacked bytes (desktop, and today's shipping PIO visual)
-     1                 packed, CONSTANT nibble  -- priority/control, one value
-     PICO_PACK_D16 (2) packed, DITHER PAIR      -- visual, nibble varies by (x+y)&1
-   Passing 1 for a visual map would write the low nibble everywhere and silently
-   lose half the dither. */
-#define PICO_PACK_D16 2
-
-void
-gfx_d16_fill_span_packed(byte *buffer, int first, int count,
-			 unsigned int color, int x, int y);
-
-#define GFX_D16_SELECT(color, x, y) \
-	((byte)((((x) + (y)) & 1) ? (((color) >> 4) & 0x0f) : ((color) & 0x0f)))
-
 #endif /* !_GFX_TOOLS_H_ */

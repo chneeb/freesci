@@ -2502,13 +2502,7 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		   priority comes from the permanent scratch (always resident).  Pin the
 		   visual from the freshly re-coalesced room-change region and retry the
 		   decode once. */
-		/* Must match the decode buffer's format (see GFXR_VIS_BYTES in
-		   sci_resmgr.c): half the bytes when the visual map is nibble-packed. */
-#ifdef PICO_PACK_VISUAL
-		g_pico_decode_visual_buf = malloc((GFXR_AUX_MAP_SIZE + 1) >> 1);
-#else
 		g_pico_decode_visual_buf = malloc(GFXR_AUX_MAP_SIZE);
-#endif
 		PICO_ARENA_PROBE_RAW(GFXR_AUX_MAP_SIZE);
 		if (g_pico_decode_visual_buf) {
 			GFXWARN("decode buffers: deferred visual alloc failed for pic %d — "
