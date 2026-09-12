@@ -367,7 +367,30 @@ int decompress0(resource_t *result, int resh, int sci_version)
 		return SCI_ERROR_EMPTY_OBJECT;
 	}
 
+#ifdef HAVE_PICO
+	/* The INPUT buffer gets the same graceful treatment the OUTPUT already had,
+	   for the same reason. Previously this was a bare sci_malloc_sram, which
+	   halts via pico_oom_report -- so a song too big to DECOMPRESS INTO skipped
+	   silently, while one too big to READ IN killed the machine. Measured on
+	   device: PQ2 + sound died here on a 59,153-byte song (free=48,760), an
+	   inconsistency rather than a real limit.
+
+	   pico_sram_alloc_soft keeps sci_malloc's reclaim-and-retry (allocations
+	   that only succeed AFTER a reclaim are exactly the near-the-ceiling ones
+	   this targets) but returns NULL instead of halting. Sound only: every other
+	   resource type MUST still fit, so they keep the halting path and stay
+	   legible. */
+	if (result->type == sci_sound)
+		buffer = (guint8*)pico_sram_alloc_soft(compressedLength);
+	else
+		buffer = (guint8*)sci_malloc_sram(compressedLength);
+	if (!buffer) {
+		result->status = SCI_STATUS_NOMALLOC;
+		return SCI_ERROR_DECOMPRESSION_INSANE;
+	}
+#else
 	buffer = (guint8*)sci_malloc_sram(compressedLength);
+#endif
 	result->data = DECOMPRESS_ALLOC_DATA(result->type, result->size);
 
 #ifdef HAVE_PICO
