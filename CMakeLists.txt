@@ -379,7 +379,10 @@ if(PLATFORM STREQUAL "pico")
             message(FATAL_ERROR "PICO_PACK_VISUAL is PIO-only: the mapped target has SRAM to spare and a different render model")
         endif()
         add_compile_definitions(PICO_PACK_VISUAL=1 PICO_DITHER_D16=1)
-        message(STATUS "PICO_PACK_VISUAL: visual buffer 64000 -> 32000 B; D16 forced on")
+        message(WARNING
+            "PICO_PACK_VISUAL is KNOWN BROKEN and must not be flashed: the packed "
+            "flood-fill aux produces wrong control maps (tests/picodiff: SQ3 pic 3 "
+            "51917/64000 differ), so collision detection is wrong. See CLAUDE.md.")
     endif()
 
     option(PICO_VOCAB_PROBE "Measure text-parser vocab SRAM cost on Pico" OFF)

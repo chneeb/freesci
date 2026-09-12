@@ -48,6 +48,44 @@
 #define DRAWPIC01_FLAG_OVERLAID_PIC 2
 
 #define GFXR_AUX_MAP_SIZE (320*200)
+/* ---- nibble-packed aux (PICO_PACK_VISUAL) --------------------------------
+   On the UNSCALED path the aux uses at most four distinct bits: the clipmask
+   (1 vis / 2 pri / 4 ctl, only one live at a time) and CLIPMASK_HARD_BOUND.
+   Everything else that touches it -- FRESH_PAINT, the 0x10 test, the |= 0x2 --
+   is inside DRAW_SCALED or FILL_RECURSIVE_DEBUG and is not even linked (checked
+   with nm). Four bits fit a nibble, so the aux can go back to sharing the
+   visual buffer, which is the whole point: a packed visual[0] is 32,000 bytes
+   and the aux needs no more.
+
+   AUX_NIB folds bit 7 (HARD_BOUND) down to bit 3 so the masks stay in range. */
+#ifdef PICO_PACK_VISUAL
+#  define AUX_NIB(m)   ((byte)(((m) & 0x07) | (((m) & 0x80) >> 4)))
+#  define AUX_GET(p, i) (((i) & 1) ? ((p)->aux_map[(i) >> 1] >> 4)          \
+			           : ((p)->aux_map[(i) >> 1] & 0x0f))
+#  define AUX_TEST(p, i, m) (AUX_GET(p, i) & AUX_NIB(m))
+   /* Read-modify-write for the aux LINE tracer, which applies |= or &= through
+      a macro parameter. AUX_NIB works for the complement too: for mask 4,
+      AUX_NIB(~4) == 0x0B == ~AUX_NIB(4) & 0x0f. */
+#  define AUX_LINE_STORE(buf, i, op, v)                                     \
+	do {                                                                \
+		byte *_a = (buf) + ((i) >> 1);                               \
+		byte _c = (byte)(((i) & 1) ? (*_a >> 4) : (*_a & 0x0f));     \
+		byte _r = (byte)((_c op AUX_NIB(v)) & 0x0f);                 \
+		*_a = (byte)(((i) & 1) ? ((*_a & 0x0f) | (_r << 4))          \
+				       : ((*_a & 0xf0) | _r));               \
+	} while (0)
+#  define AUX_OR(p, i, m)                                                   \
+	do {                                                                \
+		byte *_a = (p)->aux_map + ((i) >> 1);                       \
+		byte _n = AUX_NIB(m);                                       \
+		*_a = (byte)(((i) & 1) ? (*_a | (_n << 4)) : (*_a | _n));    \
+	} while (0)
+#else
+#  define AUX_TEST(p, i, m) ((p)->aux_map[(i)] & (m))
+#  define AUX_OR(p, i, m)   do { (p)->aux_map[(i)] |= (m); } while (0)
+#  define AUX_LINE_STORE(buf, i, op, v) do { (buf)[(i)] op (v); } while (0)
+#endif
+
 
 
 #define GFX_SCI0_IMAGE_COLORS_NR 16

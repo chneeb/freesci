@@ -3711,6 +3711,37 @@ overran it. Hence a fault late, on leaving the car, rather than at boot. Both si
 decode + background blit + flush are all correct at 4bpp on real hardware. That is the core of the scheme
 working.
 
+**AUX PACKING ATTEMPTED AND NOT CONVERGING (2026-09-12) -- `PICO_PACK_VISUAL` is KNOWN BROKEN, do not
+flash it.** The bit analysis was right as far as it went: on the unscaled path the aux's live bits are the
+clipmask (1/2/4) plus `CLIPMASK_HARD_BOUND`, four bits, so a nibble should suffice. Accessors
+(`AUX_NIB`/`AUX_GET`/`AUX_TEST`/`AUX_OR`/`AUX_LINE_STORE`, now in `gfx_resource.h`) were unit-tested
+correct in isolation, and every live site was converted:
+
+- all 14 accesses in `sci_picfill_aux.c`
+- the two live writes in `_gfxr_plot_aux_pattern` (`sci_pic_0.c`)
+- the aux LINE tracer's store -- found only by POISONING the struct field, because
+  `_gfxr_auxbuf_line_draw`/`_clear` alias the buffer through a local (`buffer = pic->aux_map`) and so never
+  matched a grep for `aux_map[`
+- the aux clear in `gfxr_clear_pic0`
+
+Confirmed genuinely dead (not linked, `nm`): `_gfxr_auxbuf_tag_line`, `_gfxr_auxbuf_spread` (hence
+FRESH_PAINT and the `0x10` test); the `SCALED_CHECK` block is inside `#ifdef DRAW_SCALED`; `TEST_POINT` is
+`WITH_PIC_SCALING`-only.
+
+**And it still fails**: `tests/picodiff` shows SQ3 pic 3 at 51,917/64,000 control diffs packed vs 0 unpacked,
+pic 2 at 18,666, pic 4 at 36,879 (pics 9 and 25 are clean). **The diagnostic signal is that each conversion
+moved the number NEGLIGIBLY** -- 51,526 -> 51,917 after the line tracer. If the dominant site had been
+found, the number would collapse. So the model of what the aux holds is probably wrong somewhere, not merely
+incomplete. A candidate worth checking next: the dead debug at `sci_pic_0.c:1912` reads `aux & 0xf` as a
+COLOUR, which would mean the low nibble carries data that the bit-remap collides with.
+
+**Everything remains inert with the option OFF** -- unpacked picodiff is 0/64,000 on every pic tested and all
+five real configs build clean. The CMake option now emits a loud WARNING.
+
+*Time spent vs returned: the 4bpp line has now cost three device cycles (two on faults I introduced) and has
+not yet produced a working build. The aux insight may still be correct, but it needs a fresh look rather than
+more incremental conversion.*
+
 **SECOND DEVICE TEST: a NEW fault, and it was MY bug in the aux fallback.** Dump decoded to
 `PC = free_int_hash_map_node_t_recursive` (`int_hashmap.c:33`), `LR = sm_free_script`
 (`seg_manager.c:490`), `CFSR = 0x8200` (precise bus fault), `BFAR = 0x35fe159b` (wild) -- a script hashmap

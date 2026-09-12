@@ -391,7 +391,11 @@ gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
 		memset(pic->control_map->index_data, 0, GFXR_AUX_MAP_SIZE);
 #endif
 	if (pic->aux_map)
+#ifdef PICO_PACK_VISUAL
+		memset(pic->aux_map, 0, (GFXR_AUX_MAP_SIZE + 1) >> 1);  /* 2 px/byte */
+#else
 		memset(pic->aux_map, 0, GFXR_AUX_MAP_SIZE);
+#endif
 }
 
 
@@ -409,7 +413,7 @@ gfxr_clear_pic0(gfxr_pic_t *pic, int sci_titlebar_size)
    incrE = ((deltanonlinear) > 0) ? -(deltanonlinear) : (deltanonlinear);  \
    d = nonlinearstart-1;  \
    while (linearvar != (linearend)) { \
-     buffer[linewidth * y + x] operation color; \
+     AUX_LINE_STORE(buffer, linewidth * y + x, operation, color); \
 /* color ^= color2; color2 ^= color; color ^= color2; */ /* Swap colors */ \
      linearvar += linearmod; \
      if ((d+=incrE) < 0) { \
@@ -1072,7 +1076,7 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 
 			if (map_nr == GFX_MASK_CONTROL && pic->aux_map)
 				for (j = x; j < x + width; j++)
-					pic->aux_map[yoffset + offset + j] |= mask;
+					AUX_OR(pic, yoffset + offset + j, mask);
 
 		} else { /* Semi-Random! */
 			for (j = 0; j < height; j++) {
@@ -1086,7 +1090,7 @@ _gfxr_plot_aux_pattern(gfxr_pic_t *pic, int x, int y, int size, int circle, int 
 #endif
 						pic->control_map->index_data[yoffset + x + offset + j] = control;
 
-					if (pic->aux_map) pic->aux_map[yoffset + x + offset + j] |= mask;
+					if (pic->aux_map) AUX_OR(pic, yoffset + x + offset + j, mask);
 
 					if (mask & GFX_MASK_VISUAL)
 						_gfxr_auxplot_brush(pic, pic->visual_map->index_data,
