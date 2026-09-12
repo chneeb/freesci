@@ -4266,14 +4266,8 @@ case with ~2x margin.
   before theorising about audio timing -- it is the same lesson as the `[snd]` probe that localised the
   original starved-poll bug.
 
-Still open: a **shrill "feep" at higher volume**. **NOT clipping** -- checked: `pcmout_pico_output`
-(`pico_pwm.c:119`) already saturates (`if (s < 0) s = 0; else if (s > 255) s = 255;`) and `src` is `gint16`,
-so `>>8` cannot leave range and the `(uint8_t)` cast cannot wrap. Remaining candidates, in order: (a) it is
-the UNDERRUN/stuck state being more audible -- the same log showed ordinary frames starving on the
-undersized `rate/30` buffers, so re-test on `rate/11` before investigating further, it may simply go away;
-(b) 8-bit quantisation noise (~48dB SNR) amplified by an analog volume control after the PWM; (c) a stuck
-OPL voice -- upstream has NO voice stealing (`XXX implement overflow code`, item 4). Also from that log:
-`[perf] resource load: 14958 ms` for 635 resources, SD-bound.
+Still open from the same session's log: a **shrill "feep" at higher volume** (8-bit PWM quantisation noise,
+separate from starvation) and `[perf] resource load: 14958 ms` for 635 resources.
 
 **3. PIO sound at 11kHz -- SETTLED (2026-09-12): SQ3 YES, PQ2 NO.**
 
@@ -4284,19 +4278,14 @@ audio stick).
 **PQ2 does NOT fit, measured twice at two different sites:**
 - `sci_refcount_alloc` (song memdup, 9,019 B) with `free=104` -- true exhaustion.
 - `decompress0.c:370` `sci_malloc_sram(compressedLength)` -- the COMPRESSED INPUT buffer for a 59,153-byte
-  resource, with `free=48,760`, `arena=450,364` (24,740 below the 475,104 ceiling).
+  resource, with `free=48,760`, `arena=450,364` (24,740 below the 475,104 ceiling). `free < size`, so a
+  genuine shortfall; even spending all remaining arena growth leaves 59KB *contiguous* wanted out of ~73KB
+  scattered.
 
-PQ2 is the heavier game (1843 vocab words vs SQ3's 1489, 540 resources, ~59KB songs vs ~19KB), and sound's
-~13KB resident plus song data is what pushes it over -- **with sound OFF that same allocation succeeds.**
-The item-2 buffers are load-bearing, so there is no shrinking them to make room.
-
-**FIXED (2026-09-12): the second one was an INCONSISTENCY, not a limit.** The graceful sound-skip guarded
-only `result->data`, the decompressed OUTPUT. The INPUT buffer was a bare `sci_malloc_sram`, which HALTS via
-`pico_oom_report` -- so a song too big to decompress INTO skipped silently, while one too big to read IN
-killed the machine. It now uses `pico_sram_alloc_soft` for `sci_sound` (keeping sci_malloc's
-reclaim-and-retry but returning NULL) and fails the decode cleanly. **Sound only** -- every other resource
-type must still fit, so they keep the halting path and stay legible. Expected effect: PQ2 with sound plays
-on, silently skipping songs that do not fit, rather than dying. Not yet device-tested.
+PQ2 is simply the heavier game (1843 vocab words vs SQ3's 1489, 540 resources) and sound's ~13KB resident
+plus song data is what pushes it over -- **with sound OFF, that same allocation succeeds.** Note the
+direction: the item-2 buffers are load-bearing, so there is no shrinking them to make room; `rate/11` is
+~7.6KB *larger* than the build PQ2 was measured on, i.e. it fails harder, not closer.
 
 **Verdict: sound on PIO is an SQ3-specific build.** The failure is a clean legible `[OOM]` halt, not a
 fault, so trying it costs nothing but a power cycle.
