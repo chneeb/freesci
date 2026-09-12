@@ -46,7 +46,20 @@
 ** slow" plus a broken-tractor buzz). Because the polled player is a PCM feed,
 ** the song tempo follows the sample clock and drags with it.
 **
-** rate/11 (= 1002 frames at 11025) is MEASURED-CORRECT -- do not shrink it.
+** buf_size is squeezed from BOTH SIDES. Device-measured on current master:
+**
+**   rate/11 (1002)  SQ3: NO SOUND AT ALL   PQ2: dies at vocab init
+**   rate/30 ( 367)  SQ3: plays             PQ2: dies later, at decompress
+**
+** TOO SMALL starves the mixer; TOO LARGE does not fit. rate/11 was correct on
+** 2026-09-06, but master has since gained the composed surface and more, and the
+** extra ~7.6KB (compbuf 2*N*4 + feed ~4*N) no longer fits -- the SQ3 log shows
+** the song's own "malloc 19008 failed", which SUCCEEDS on retry at rate/30. So
+** rate/30 it is: inside the window, where rate/11 no longer is.
+**
+** The starvation floor below is real and still the reason not to go much lower;
+** it simply was not the binding constraint. Both limits must be respected, and
+** the window between them is narrow -- re-measure if the memory picture changes.
 ** Tried rate/30 on 2026-09-12 on the theory that polls run at ~60Hz post-fix, so
 ** the floor would be rate/60. The DEVICE SAYS OTHERWISE. soft.c's own
 ** "[sfx-mixer] Output starving: demand N > buf_size" lines give the real poll
@@ -75,7 +88,7 @@
 #ifdef PICO_SND_BUF_FRAMES
 #  define PICO_PWM_BUF_FRAMES PICO_SND_BUF_FRAMES
 #else
-#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 11)
+#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 30)
 #endif
 
 /* Diagnostic: compare PRODUCTION (pushed) against CONSUMPTION (IRQs). Both

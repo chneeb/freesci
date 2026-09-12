@@ -4238,36 +4238,38 @@ move only 27/31 bytes per transaction). Once per room, on top of a ~100ms decode
 `FSCI_PROBE_PERF` before assuming it is free, and keep the rule that invalidation copies a RECT, never the
 screen.
 
-**2. Right-sizing the audio buffers is RULED OUT (tried and reverted, 2026-09-12). The ~24KB is NOT
-reclaimable -- `PICO_PWM_BUF_FRAMES` is load-bearing.** The parked note used to call this "the cheapest
-large saving available"; that was wrong, and the device settled it in one flash.
+**2. `PICO_PWM_BUF_FRAMES` is squeezed from BOTH SIDES; `rate/30` is the value that works TODAY.**
+Device-measured on current master, 11025Hz:
 
-`rate/11` was reduced to `rate/30` on the theory that polls run at ~60Hz since the `pico_sfx_poll` fix, so
-the floor would be `rate/60`. **soft.c's own pre-existing diagnostic measures the poll rate directly** --
-`[sfx-mixer] Output starving: demand N > buf_size` -- and on SQ3 at 11025 it read:
-
-| demand | implied frame | poll rate |
+| buf_size | SQ3 | PQ2 |
 |---|---|---|
-| 402 | 36 ms | **28 Hz** <- ORDINARY frames |
-| 496 | 44 ms | **23 Hz** |
-| 2400 | 217 ms | 4.6 Hz |
-| 8027 / 9339 | 728 / 847 ms | ~1.2 Hz <- song load / room decode |
+| `rate/11` (1002) | **NO SOUND AT ALL** | dies at vocab init |
+| `rate/30` (367) | **plays** (occasional sticking) | dies later, at decompress |
 
-**Steady-state polling is 22-28Hz, not 60Hz**, so the real floor is ~`rate/22` = 500 and `rate/30` = 367
-sits BELOW it. Ordinary frames then starve, the PWM IRQ holds `last_sample`, and the audio sticks -- heard
-on device as "Adlib plays well but gets stuck sometimes". Reverted to `rate/11`, which clears the ordinary
-case with ~2x margin.
+**TOO SMALL starves the mixer, TOO LARGE does not fit.** Both limits are real and the window between them is
+narrow.
 
-**Two things worth keeping from this:**
-- **The multi-hundred-ms stalls cannot be covered by ANY sane `buf_size`** (9339 frames would be 112KB of
-  compbuf). Those are the ring's job, and starvation lines for them are EXPECTED, not a fault. Only the
-  ordinary-frame lines (demand a few hundred) indicate a mis-sized buffer.
-- **`[sfx-mixer] Output starving` is a free poll-rate meter.** `demand / rate` is the frame time. Read it
-  before theorising about audio timing -- it is the same lesson as the `[snd]` probe that localised the
-  original starved-poll bug.
+- *Lower limit (starvation).* `soft.c`'s pre-existing `[sfx-mixer] Output starving: demand N > buf_size` is
+  a **free poll-rate meter** -- `demand / rate` is the frame time. SQ3 reads demand 402/496 on ORDINARY
+  frames = 36/44ms = **23-28Hz**, not the 60Hz that was assumed, so the floor is ~`rate/22` = 500. At
+  `rate/30` = 367 ordinary frames do starve: the PWM IRQ holds `last_sample` and the audio sticks.
+- *Upper limit (memory).* `rate/11` was correct on 2026-09-06 but master has since gained the composed
+  surface and more; the extra ~7.6KB (compbuf `2*N*4` + feed `~4*N`) no longer fits. The SQ3 log shows the
+  song's own `malloc 19008 failed`, which SUCCEEDS on retry at `rate/30`.
 
-Still open from the same session's log: a **shrill "feep" at higher volume** (8-bit PWM quantisation noise,
-separate from starvation) and `[perf] resource load: 14958 ms` for 635 resources.
+So `rate/30` is chosen with eyes open: occasional sticking beats no sound. **Re-measure if the memory
+picture changes** -- this is not a constant, it is a value pinned between two moving limits.
+
+**The multi-hundred-ms starving lines (demand 2400-9339) are EXPECTED, not a fault.** No sane buf_size
+covers them (9339 frames = 112KB of compbuf); they are the ring's job. Only ordinary-frame lines (demand a
+few hundred) indicate mis-sizing.
+
+**ALSO TRIED AND REVERTED (2026-09-12): making the decompress INPUT buffer fail softly for sound.** The
+graceful skip guards only the decompressed OUTPUT, so a song too big to read IN halts via
+`pico_oom_report`. Routing `sci_sound` through `pico_sram_alloc_soft` looked like a clean symmetry fix, but
+on device it correlated with SQ3 losing sound entirely and PQ2 dying EARLIER (vocab init, `realloc 4192`
+with `free=264,400` -- itself unexplained). Reverted to get back to a known-good baseline. The asymmetry is
+real and still worth fixing, but **one change at a time, from a state that is known to play**.
 
 **3. PIO sound at 11kHz -- SETTLED (2026-09-12): SQ3 YES, PQ2 NO.**
 
