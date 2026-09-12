@@ -1189,6 +1189,39 @@ contiguous block for it (the `decompress0.c:324` OOM, the wall the prior several
   7506 + view 10797 both went through the scratch, NO `decompress0.c:324` OOM). The decode-output OOM lever is
   closed — it got the game *further* than any prior restore session.
 
+### OPEN (2026-09-12) — cross-game switch STILL leaves PQ2 short, despite the chooser reset
+
+**Confirmed cross-game, by the cheapest possible A/B: PQ2 cold-boots fine, but OOMs after a KQ4 session.**
+Quit KQ4 -> start PQ2 -> leave the car:
+
+```
+[OOM] malloc  size=0x1c76 (7,286)  free=0x14238 (82,488)  arena=0x73e90 (474,768)
+decompress0.c line=370   <- the compressed INPUT buffer
+```
+
+**Fragmentation, not exhaustion**: free is 11x the request, and the arena sits 336 bytes below the 475,104
+ceiling. The same build cold-boots PQ2 through that scene, so this is inherited state, not an in-game wall.
+
+**The chooser reset is intact and correctly ordered** (`pico_main.c`): `pico_reset_resident_vocab()` ->
+`pico_reset_decode_scratches()` -> `malloc_trim(0)` -> `MEMPRINT("post-trim")`. The vocab blob IS released
+before the trim, so that hypothesis is dead. `malloc_trim` can only release the TOP free chunk, so the
+working theory is that something long-lived still sits high in the heap and blocks it -- but that is
+UNVERIFIED.
+
+**Next step is measurement, not more guessing: read `[mem] post-trim`** (build with `-DFSCI_PROBE_MEM=ON`;
+`build-pico-mem` exists). It prints `free`/`arena`/`used` right after the trim and separates three cases:
+`arena` still ~474k = the trim released nothing; `arena` low but `used` large = genuine leftover
+allocations; `arena` low AND `used` small = the reset is clean and PQ2 merely sits close enough to the edge
+that any change in starting conditions tips it. Also worth diffing PQ2's first-room `[mem]` line cold-boot
+vs post-KQ4, which quantifies what is actually inherited.
+
+**Workaround meanwhile: power-cycle between games.** Cold boot works reliably.
+
+**Ruled out along the way:** `GC_INTERVAL` (the cold-boot test exonerates it for this failure -- but note it
+remains an UNTESTED speculative change whose own target, PQ2's clone-table OOM at copy protection, has not
+recurred to confirm it helps; the code comment records that it trades clone-table growth against GC-churn
+fragmentation).
+
 ### RESOLVED (device-confirmed 2026-06-21) — the two arena-ratchet OOMs are closed: restore keeps visual[0] resident + the chooser resets the arena between games
 
 The arena ratchet manifested as **two distinct OOMs**, both now fixed and device-confirmed (multiple
@@ -3951,9 +3984,7 @@ both Pico targets build clean; PIO `.text` +32 B, `.bss` unchanged.
 this fix does not touch at all -- a different cause, possibly the same class with another trigger. Both are
 `picodiff`-visible, so they can be chased entirely offline.
 
-**NOT yet device-tested** -- the offline evidence is strong (the control map is what `kOnControl` reads) but
-Rosella walking on the lawn is the actual confirmation. Note KQ4 starts in room 701 = `copyProtect`, so
-reaching room 25 needs the manual lookup.
+**DEVICE-CONFIRMED (2026-09-12): Rosella walks on the lawn.** Closed.
 
 **1b. PIO dialog bleed — mechanism identified (2026-09-06), fix not built.**
 
