@@ -437,12 +437,17 @@ static int pico_init_specific(struct _gfx_driver *drv,
     /* Allocate one 320×200 palette-indexed visual buffer (back/front combined).
        Priority buffer is not allocated here — after GFX init, pico_connect_engine_priority()
        wires the engine's state->priority_map directly, saving 64KB of heap. */
-    S->visual[0] = (uint8_t *)sci_malloc_sram(xsize * ysize);
+    /* PICO_VIS_BYTES, not xsize*ysize: this and pico_alloc_visual MUST agree, or
+       visual[0] starts full-size at boot and becomes half-size after the first
+       realloc (a restore, or the parse-time borrow) -- which is why the device
+       ran fine for a while and only faulted later, on leaving the PQ2 car. Two
+       allocation sites with different sizes is a trap, not an optimisation. */
+    S->visual[0] = (uint8_t *)sci_malloc_sram(PICO_VIS_BYTES);
     if (!S->visual[0]) {
         fprintf(stderr, "pico_driver: OOM allocating visual[0]\n");
         return GFX_FATAL;
     }
-    memset(S->visual[0], 0, xsize * ysize);
+    memset(S->visual[0], 0, PICO_VIS_BYTES);
 #ifdef PICO_USE_STATIC_VISUAL
     /* Static buffer (desktop visual[2] analogue). Best-effort: every use site
        falls back to the back buffer, so a failure degrades to the PIO

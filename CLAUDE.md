@@ -3693,14 +3693,32 @@ be WORSE, not better; it only wins in the valley between decodes. **Before any f
 peak arena with and without packing.** If the peak regresses, the honest options are to drop the control map
 (loses collision), find another 64KB donor, or abandon 4bpp.
 
-**The "2x-magnified fragments" are a SEPARATE, still-open bug** and the signature is diagnostic: writing one
-byte per pixel into a packed buffer makes each written byte display as TWO pixels, i.e. a 2x horizontal
-stretch. So a writer is still emitting unpacked bytes. The driver is clean (`VIS_SET`/`BLIT_PUT` everywhere,
-verified by drvdiff), and the pic decoder is clean (verified by visdiff), so the culprit is a path NEITHER
-harness covers -- most likely the kgraphics transition/animation code (`animate_do_animation`'s
-`old_screen`/`newscreen`) or text layout. **Note `pico_init_specific` still allocates `xsize * ysize`
-(64,000) rather than `PICO_VIS_BYTES`** -- harmless (over-allocation) but it means the saving is not even
-realised on the main path yet, and it should be fixed before measuring anything.
+**THE HARD FAULT IS EXPLAINED and matches a documented signature.** The dump decodes to
+`LR = _gfxwop_container_free` (`widgets.c:1630`), `PC = 0`, `CFSR = 0x00020000` (UFSR INVSTATE), BFAR/MMFAR
+holding the registers' OWN addresses (so no valid fault address) -- the branch-to-NULL family already in this
+file: a widget freed through a `widfree` pointer that had been overwritten with zero. That is heap
+corruption, which is exactly what a 32,000-byte `aux_map` overrun produces. Very likely fixed by the aux
+change; needs a retest to confirm.
+
+**TWO ALLOCATION SITES DISAGREED, which explains the TIMING.** `pico_init_specific` allocated
+`xsize * ysize` (64,000) while `pico_alloc_visual` used `PICO_VIS_BYTES` (32,000). So visual[0] started
+FULL-size at boot -- the aux reuse fitted, nothing overran, the game looked mostly fine -- and only became
+half-size after the first realloc (a restore, or the parse-time borrow), after which the control pass
+overran it. Hence a fault late, on leaving the car, rather than at boot. Both sites now use
+`PICO_VIS_BYTES`. **Two allocation sites with different sizes is a trap, not an optimisation.**
+
+**GENUINE MILESTONE in the PQ2 shots: the pic renders CORRECTLY** -- colours, dithering, the lot -- so
+decode + background blit + flush are all correct at 4bpp on real hardware. That is the core of the scheme
+working.
+
+**Do NOT chase the 2x-magnified artifacts yet.** The build that produced them had an active 32KB heap
+overrun, and heap corruption can produce arbitrary visual garbage; some or all of the artifacts may simply
+be it. Retest with the aux fix first, then re-characterise whatever survives. If they do survive, the
+signature is diagnostic -- writing one byte per pixel into a packed buffer makes each byte display as TWO
+pixels -- and the culprit is a path NEITHER harness covers (the driver is clean by drvdiff, the pic decoder
+by visdiff), most likely the kgraphics transition code (`old_screen`/`newscreen`) or text layout.
+
+
 
 
 
