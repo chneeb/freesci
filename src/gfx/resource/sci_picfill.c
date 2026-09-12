@@ -294,7 +294,13 @@ FILL_FUNCTION(gfxr_pic_t *pic, int x_320, int y_200, int color, int priority, in
 
 #ifdef HAVE_PICO
 	/* Strip masks for NULL index_data buffers to avoid crashes. */
-	if (!pic->visual_map->index_data)   { drawenable &= ~GFX_MASK_VISUAL;   original_drawenable &= ~GFX_MASK_VISUAL; }
+	/* Strip only the WRITE gate, not original_drawenable: the latter feeds
+	   AUXBUF_FILL's clipmask, and dropping VISUAL there makes the control fill
+	   bounded by control-marked pixels ALONE -- where desktop's combined pass is
+	   also bounded by the visual boundaries. That is the KQ4 pic 25 flood. The
+	   actual visual writers are already NULL-guarded (gfx_draw_line_pixmap_i,
+	   gfx_draw_box_pixmap_i), and the memsets below are gated on drawenable. */
+	if (!pic->visual_map->index_data)   { drawenable &= ~GFX_MASK_VISUAL; }
 	if (!pic->priority_map->index_data) { drawenable &= ~GFX_MASK_PRIORITY; original_drawenable &= ~GFX_MASK_PRIORITY; }
 	if (!pic->control_map->index_data)  { drawenable &= ~GFX_MASK_CONTROL;  original_drawenable &= ~GFX_MASK_CONTROL; }
 #endif

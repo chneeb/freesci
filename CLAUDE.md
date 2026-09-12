@@ -3921,56 +3921,39 @@ authentic) picture.
 
 Ordered roughly by value. Nothing here is in progress.
 
-**1. KQ4: Rosella "swims in the lawn" — ROOT CAUSE FOUND (2026-09-06), fix not yet built.**
+**1. KQ4: Rosella "swims in the lawn" -- FIXED (2026-09-12), one line, verified offline.**
 
-**The Pico control-map decode floods pic 25.** Reproduced entirely offline with `tests/picodiff` (decodes a
-pic's control map through BOTH the desktop byte path and the Pico nibble-packed path and diffs them):
+The two-pass Pico decode stripped `GFX_MASK_VISUAL` from **`original_drawenable`** as well as `drawenable`
+(`sci_picfill.c`, "Strip masks for NULL index_data buffers to avoid crashes"). Only `drawenable` gates the
+actual writes; **`original_drawenable` feeds AUXBUF_FILL's clipmask**, and dropping VISUAL there leaves the
+control fill bounded by control-marked pixels ALONE -- where desktop's combined pass is also bounded by the
+VISUAL boundaries. KQ4 pic 25 has a fill that relies on those, so it escaped and flooded the map with
+control 3; `smallBase::doit` then read "not land" under the ego and picked swimming.
 
-| game | pic | control diffs |
+**Fix: strip only `drawenable`.** The visual writers are already NULL-guarded (`gfx_draw_line_pixmap_i`,
+`gfx_draw_box_pixmap_i` both early-return on `!index_data`) and the fill's own memsets are gated on
+`drawenable`, so the visual map is still never written -- but the aux now receives its visual boundary marks
+(the marking `mask` in `_gfxr_draw_line` comes from `gfxr_draw_pic01`'s OWN `drawenable`, a different local
+that was never stripped) and the fill is bounded correctly.
+
+**Measured with `tests/picodiff` (control maps, desktop byte path vs Pico), before -> after:**
+
+| game | baseline | with fix |
 |---|---|---|
-| **KQ4** | **25** | **53,549 / 64,000** |
-| KQ4 | 1, 3, 30 | 0 |
-| SQ3 | 2, 3 | 0 |
-| PQ2 | 25, 1, 2 | 0 |
+| KQ4 | **8 pics** differ (7, 13, 15, 19, 23, 25, 32, 34), 24k-57k diffs each | **1 pic** (7), and only **53** diffs |
+| PQ2 | 2 pics (15: 56,180; 30: 8,709) | **unchanged -- pre-existing, NOT a regression** |
+| SQ3 | 0 | 0 |
 
-The Pico map is flooded with **control 3** from y≈12 down; desktop has control 3 only in small lower regions.
-Scripts then read the wrong terrain under the ego, and `smallBase::doit` (script 000, the GLOBAL swim/walk
-check — room 25's own script never calls `onControl`) picks swimming.
+`tests/picodiff/visdiff` confirms the VISUAL maps are untouched (115/78/150 pics, 0 differ). Desktop and
+both Pico targets build clean; PIO `.text` +32 B, `.bss` unchanged.
 
-**Mechanism — an architectural consequence of Pico's TWO-PASS pic decode.** A control fill is performed by
-`AUXBUF_FILL`, whose boundary test is `aux_map[i] & clipmask` (`sci_picfill_aux.c:58,71,180`), and `clipmask`
-comes from `original_drawenable`. `sci_resmgr.c` decodes control in a SEPARATE second pass with
-`visual_map->index_data = NULL` and `priority_map->index_data = NULL`, so the guard at `sci_picfill.c:296-299`
-strips VISUAL and PRIORITY out of `original_drawenable`. The control fill is therefore bounded ONLY by
-control-marked pixels, whereas desktop (single combined pass) also bounds it by the VISUAL boundaries.
-KQ4 pic 25 has a fill that relies on visual boundaries, so it escapes.
+**Still open, and now cleanly separated from this:** KQ4 pic 7's residual 53 diffs, and PQ2 pics 15/30 which
+this fix does not touch at all -- a different cause, possibly the same class with another trigger. Both are
+`picodiff`-visible, so they can be chased entirely offline.
 
-That is exactly why it is data-dependent, why it hits BOTH Pico targets (the two-pass decode is shared), and
-why almost every other pic decodes identically (their control fills are bounded by explicit control lines).
-
-**Fix direction (not built):** the control pass needs the same aux boundaries the combined pass produces.
-On the MAPPED target the honest fix is to stop splitting — decode all three maps in ONE pass like desktop,
-which is now affordable and would delete the two-pass special case entirely. For PIO (SRAM-bound, which is
-WHY the pass was split) it needs the visual boundaries marked into the aux map without keeping a 64KB visual
-buffer live. Verify any fix by re-running `tests/picodiff` until KQ4 pic 25 reports 0 diffs.
-
-**Confirmed along the way (keep — these were expensive to establish):**
-- **Desktop is CORRECT**, so this is Pico-only. It reproduces on **BOTH** Pico targets, which now have
-  different memory AND render paths — that is what pinned it to shared code.
-- **NOT the SCI version.** KQ4 is SCI0 **0.000.502**, between PQ2 (0.000.490) and SQ3 (0.000.685), both fine.
-- **NOT the kernel-table mismatch** ("114 believed vs 113 reported", fn 70 unmapped) — **PQ2 emits the
-  identical warning and plays fine**; it is a quirk of older SCI0 versions.
-- **NOT room-local logic.** `025.script` never calls `onControl`; the decision is global in `smallBase::doit`.
-- **NOT the control-map DATA.** `tests/ctldump.c` decodes pic 25 cleanly on desktop:
-  `c0:37572 c1:11016 c3:5324 c9:4611 c11:3763 c14:1170 c15:544`.
-- **NOT the aux-map reuse** (`gfxr_clear_pic0` does zero `aux_map`) and **NOT the nibble packing itself**
-  (every other pic tested diffs to 0).
-
-**Two traps recorded so they are not repeated:**
-- An early theory that "a blank control map would make her WALK" was **BACKWARDS** — control 0 is the
-  dominant colour and terrain lives in the non-zero regions, so a bad control read reads as "not land".
-- Headless desktop runs **cannot** reach room 25: KQ4 starts in **room 701 = `copyProtect`**, which needs a
-  manual lookup, so desktop verification needs a human at a display.
+**NOT yet device-tested** -- the offline evidence is strong (the control map is what `kOnControl` reads) but
+Rosella walking on the lawn is the actual confirmation. Note KQ4 starts in room 701 = `copyProtect`, so
+reaching room 25 needs the manual lookup.
 
 **1b. PIO dialog bleed — mechanism identified (2026-09-06), fix not built.**
 

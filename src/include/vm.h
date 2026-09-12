@@ -460,8 +460,16 @@ extern char *g_pico_restore_pending_name;
    created in that window — on SQ3 that reached ~428 clone slots (~18KB), and the
    next realloc-grow couldn't find a contiguous block in the ~388KB heap (OOM in
    alloc_clone_entry). Collecting far more often keeps those tables tiny. The GC
-   path is the same one the desktop runs; only the cadence changes. */
-# define GC_INTERVAL 2048	/* kernel calls between gcs (Pico: keep heap tables small) */
+   path is the same one the desktop runs; only the cadence changes.
+
+   PQ2 still OOM'd in alloc_clone_entry at its copy-protection screen with 2048
+   (2026-07-18), which is the symptom this tunable exists for -- it is the
+   heavier game (1843 vocab words vs SQ3's 1489, 540 resources) and reaches the
+   ceiling sooner. Halved to 1024 on 2026-09-12: disposed clones are reclaimed
+   twice as often, so the table's high-water mark -- and thus its realloc-grow
+   size -- stays lower. Cost is CPU, not memory; if gameplay ever stutters from
+   collection, this is the knob. */
+# define GC_INTERVAL 1024	/* kernel calls between gcs (Pico: keep heap tables small) */
 #else
 #define GC_INTERVAL 32768	/* Number of kernel calls in between gcs; should be < 50000 */
 #endif
