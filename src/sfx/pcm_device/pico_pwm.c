@@ -46,16 +46,32 @@
 ** slow" plus a broken-tractor buzz). Because the polled player is a PCM feed,
 ** the song tempo follows the sample clock and drags with it.
 **
-** 2048 frames = 93ms per poll, so production keeps up even at a ~11Hz frame
-** rate. Raising this cannot be replaced by polling more often: the mixer sizes
-** each batch from elapsed WALL-CLOCK time, so back-to-back calls compute ~0
-** frames and produce nothing. Costs ~20KB (compbuf 2*2048*4, feed buf, writebuf,
-** and the ring below) -- affordable now that the engine lives in PSRAM.
-** NB going DOWN was tried before and rejected for the same starvation reason. */
+** RIGHT-SIZED 2026-09-12 from rate/11 to rate/30. The old value targeted a
+** ~11Hz worst-case poll rate, chosen BEFORE pico_sfx_poll had been fixed to run
+** from the front flush and usec_sleep -- back then polls really could be that
+** rare (measured 0.3-7/sec). They are now ~60Hz, so the steady-state floor is
+** buf_size >= rate/poll_rate = rate/60, and rate/30 keeps 2x margin on that,
+** tolerating polls sustained at 30Hz.
+**
+** STALLS ARE THE RING'S JOB, NOT THIS ONE. A ~250ms room decode is absorbed by
+** the ring (371ms, see PWM_SYNTH_RING_SIZE); buf_size only has to let
+** production OUTRUN consumption afterwards so the ring refills -- at 60Hz x
+** rate/30 that is 2x the consumption rate.
+**
+** Costs ~12 bytes per frame: compbuf 2*N*4 (mixer/soft.c) plus the feed buffer
+** ~4*N. At 11025 that is 12.0KB -> 4.4KB; at 22050, 24.0KB -> 8.8KB. On PIO,
+** where sound has ~26KB of margin, that ~7.6KB is what may decide whether it
+** fits at all.
+**
+** Raising this cannot be replaced by polling more often: the mixer sizes each
+** batch from elapsed WALL-CLOCK time, so back-to-back calls compute ~0 frames.
+** NB a reduction was tried and rejected ONCE BEFORE -- but that was pre-poll-fix,
+** when the premise above did not hold. Override with -DPICO_SND_BUF_FRAMES=N if
+** a device ever shows underruns ([snd] probe: underrun should be 0). */
 #ifdef PICO_SND_BUF_FRAMES
 #  define PICO_PWM_BUF_FRAMES PICO_SND_BUF_FRAMES
 #else
-#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 11)
+#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 30)
 #endif
 
 /* Diagnostic: compare PRODUCTION (pushed) against CONSUMPTION (IRQs). Both

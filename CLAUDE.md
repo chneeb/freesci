@@ -4238,11 +4238,26 @@ move only 27/31 bytes per transaction). Once per room, on top of a ~100ms decode
 `FSCI_PROBE_PERF` before assuming it is free, and keep the rule that invalidation copies a RECT, never the
 screen.
 
-**2. Right-size the audio buffers (~24KB reclaimable, both targets).** `PICO_PWM_BUF_FRAMES` (rate/11) and
-the 8192 ring were sized to survive RARE polls, before the poll fix existed. With polls now at 60Hz a batch
-only needs rate/60 frames (~367 at 22kHz, ~184 at 11kHz). Keep the ring generous enough to ride a ~250ms
-room-decode stall, but the mixer compbuf (2 * buf_size * 4) can shrink a lot. This is the cheapest large
-saving available and it is what would decide item 3.
+**2. Right-size the audio buffers -- DONE (2026-09-12), `rate/11` -> `rate/30`.** `PICO_PWM_BUF_FRAMES`
+targeted a ~11Hz worst-case poll rate, chosen BEFORE `pico_sfx_poll` was fixed to run from the front flush
+and `usec_sleep` -- back then polls really were that rare (measured 0.3-7/sec). They are ~60Hz now, so the
+steady-state floor is `buf_size >= rate/poll_rate = rate/60`, and `rate/30` keeps **2x margin**, tolerating
+polls sustained at 30Hz.
+
+**The key correction to the old sizing: STALLS ARE THE RING'S JOB, not buf_size's.** A ~250ms room decode is
+absorbed by the ring (371ms, `PWM_SYNTH_RING_SIZE`); `buf_size` only has to let production OUTRUN
+consumption afterwards so the ring refills -- at 60Hz x rate/30 that is 2x the consumption rate. The ring is
+deliberately left alone.
+
+Cost is ~12 bytes per frame: compbuf `2*N*4` (`mixer/soft.c:96-97`) plus the feed buffer ~`4*N`
+(`soft.c:171`). **At 11025: 12.0KB -> 4.4KB (~7.6KB saved); at 22050: 24.0KB -> 8.8KB (~15KB).** On PIO,
+where sound has ~26KB of margin, that ~7.6KB is roughly 29% more headroom -- which is what may decide
+whether PQ2 fits.
+
+**NB these are HEAP (`sci_malloc`) buffers, so the saving does NOT show in `.bss` or `arm-none-eabi-size`** --
+the sound build is 930,772/25,332 either way. Measure it at runtime with `FSCI_PROBE_MEM`, not statically.
+A reduction was tried and rejected once before, pre-poll-fix, when the premise did not hold; the escape
+hatch if a device ever shows underruns is `-DPICO_SND_BUF_FRAMES=N` (watch `[snd]`: `underrun` must be 0).
 
 **3. PIO sound at 11kHz.** Analysed, NOT device-tested. The quality blocker is inherited for free (the poll
 fix is shared code), so the only question is memory. With the oversized buffers it is ~27KB against a ~26KB
