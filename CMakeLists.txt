@@ -436,7 +436,19 @@ if(PLATFORM STREQUAL "pico")
     #                          drove the heap to 442,440 of a 475,104 ceiling
     #     KQ4  max 41,747   <- blocks 2 of 80
     # Median song is ~1-2 KB, so only the outliers are affected.
-    set(PICO_SONG_MAX_BYTES "32768" CACHE STRING "Largest decompressed song held in SRAM (PIO only)")
+    # With PICO_PSRAM_SONGS the cap must rise to the SLOT size, or it pre-empts
+    # the thing it is supposed to be superseded by: the cap runs during
+    # decompression, long before songit_new can park the song in PSRAM, so a
+    # 32 KB cap silently rejects exactly the 59 KB song the slots exist for.
+    # (Device-observed: "[snd] song 1 ... skipping" followed by "Decompression
+    # failed", with the PSRAM path never reached.) The cap then guards only what
+    # a slot cannot hold, and the resident SRAM cost it was protecting against
+    # no longer exists for these songs.
+    if(PICO_PSRAM_SONGS AND NOT PICO_PSRAM_MAPPED)
+        set(PICO_SONG_MAX_BYTES "65536" CACHE STRING "Largest decompressed song (PIO)")
+    else()
+        set(PICO_SONG_MAX_BYTES "32768" CACHE STRING "Largest decompressed song held in SRAM (PIO only)")
+    endif()
     if(PICO_PWM_AUDIO AND NOT PICO_PSRAM_MAPPED)
         add_compile_definitions(PICO_SONG_MAX_BYTES=${PICO_SONG_MAX_BYTES})
     endif()
@@ -459,6 +471,22 @@ if(PLATFORM STREQUAL "pico")
     if(PICO_PWM_AUDIO)
         add_compile_definitions(PICO_PWM_CARRIER_MULT=${PICO_PWM_CARRIER_MULT})
         add_compile_definitions(PICO_PWM_IDLE_LEVEL=${PICO_PWM_IDLE_LEVEL})
+    endif()
+
+    # Park large MIDI songs in PSRAM instead of duplicating them in SRAM, and
+    # play them through a small per-iterator window. PIO only -- the mapped
+    # target already puts song data in PSRAM via psram_hmalloc.
+    #
+    # Viable because SCI0 playback is a SINGLE forward cursor a few bytes per
+    # tick; embedded-PCM songs are excluded because _sci0_get_pcm_data needs a
+    # real address, and measurement says that costs nothing (every PCM song
+    # <= 9,774 B, every song too big to keep is MIDI).
+    #
+    # Default OFF until device-tested: it changes the song data path for every
+    # SCI0 game.
+    option(PICO_PSRAM_SONGS "Park large MIDI songs in PSRAM (PIO only)" OFF)
+    if(PICO_PSRAM_SONGS AND NOT PICO_PSRAM_MAPPED)
+        add_compile_definitions(PICO_PSRAM_SONGS=1)
     endif()
 
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)

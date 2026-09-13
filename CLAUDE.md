@@ -3643,6 +3643,79 @@ after any memory change rather than treating it as settled.**
 **Thin margin, stated plainly:** 848 vs SQ3's measured 831. PQ2's run does not exercise that. If an ordinary
 demand above 848 ever appears, go to `rate/11`.
 
+### RESOLVED (device-confirmed 2026-09-13) — PQ2 keeps ALL its music: large MIDI songs live in PSRAM (`PICO_PSRAM_SONGS`)
+
+**PQ2's 59,153-byte theme now PLAYS on PIO** instead of being skipped by the cap. Device run: no
+`[snd] song ... skipping`, no `Decompression failed`, no OOM, no fault, 8 rooms, and ONE starvation line in
+the whole session. This supersedes the cap as the *mechanism* for large songs -- the cap becomes a safety net
+for what a slot cannot hold.
+
+| | resident song data | outcome |
+|---|---|---|
+| original | 60,947 B | OOM, 12 bytes short |
+| `PICO_SONG_MAX_BYTES` cap | 1,794 B | runs, theme SILENT |
+| **`PICO_PSRAM_SONGS`** | **1,794 B** | **runs, theme PLAYS** |
+
+`refcnt` holding at 1,794 B -- the same as when the song was skipped entirely -- is the proof the 59 KB is
+genuinely off the SRAM books rather than moved around.
+
+**Why it works, and the measurements that made it cheap:**
+- **SCI0 playback is a SINGLE forward cursor.** `sci0_song_iterator_t` has ONE channel; `channels[MIDI_CHANNELS]`
+  is SCI1. That is what makes a 64-byte per-iterator window sufficient -- a few bytes per 60Hz tick, and
+  `psram_load` moves 31 bytes per transaction so a refill is 3 of them every 10-20 ticks. **Device-measured: no
+  new starvation from refills at all.**
+- **Embedded-PCM songs are EXCLUDED and it costs nothing.** `_sci0_get_pcm_data` hands `self->data` straight to
+  `sfx_iterator_make_feed`, which needs a real address, so PCM songs cannot stream. Measured: SQ3 has 23 of
+  them (PQ2 and KQ4 zero) but the largest is **9,774 B**, while every song too big to keep is MIDI. The
+  exclusion is free in practice.
+- **Slots sit ABOVE the bump arena** (`0x710000`, 8 x 64 KB): `psram_alloc` is rewound by `psram_reset()` on
+  every room change, and music plays across rooms.
+
+**FOUR TRAPS, all caught by grep or by the device, none by reading the code:**
+1. **`SONGDATA` was already taken** by the SCI1 path (`iterator.c:826`). Mine are `PSONG_*`.
+2. **Two sites deref `self->data[0]`** to test for embedded PCM -- and `data` is NULL for a PSRAM song, so they
+   would fault BEFORE the PCM check could protect anything. Routed through the accessor.
+3. **`songit_new` uses `sci_malloc` with NO memset**, so `psram_addr` is garbage until assigned -- the same
+   trap already recorded for `_gfxw_new_widget`. Initialised before any path can read it.
+4. **`_SIMSG_BASEMSG_CLONE` memcpy's the iterator then increfs `mem->data`** -- NULL for a PSRAM song, and the
+   two copies would share a slot with no ownership. Slots are refcounted; the clone takes a slot reference.
+
+**THE CONFIGURATION CONFLICT, which only the device found:** the cap runs during DECOMPRESSION, long before
+`songit_new` can park anything, so a 32 KB cap silently rejected the exact 59 KB song the slots exist for
+(`[snd] song 1 ... skipping` then `Decompression failed`, PSRAM path never reached). `PICO_SONG_MAX_BYTES` now
+follows the slot size automatically when `PICO_PSRAM_SONGS` is on. **Two mechanisms aimed at the same object
+must be ordered deliberately; building them in sequence and never configuring them together is how this hid.**
+
+**`PICO_STREAM_DECOMPRESS` is a PRECONDITION here**, which retires its own "worth ~nothing today" verdict:
+without it the 59 KB compressed INPUT buffer is a FATAL `sci_malloc_sram`, so raising the cap alone would have
+traded a silent skip for a hard halt. Banking it default-OFF rather than deleting it paid off for a reason not
+anticipated at the time.
+
+### MEASURED LIMIT (2026-09-13) — KQ4 does NOT fit with sound, and it is NOT song-related
+
+Both configurations fail identically on KQ4, second visit to the first room:
+
+| | failing alloc | free | arena |
+|---|---|---|---|
+| `PICO_PSRAM_SONGS=ON` | 12,532 | 27,672 | 458,500 |
+| `PICO_PSRAM_SONGS=OFF` | 12,532 | **20,512** | **466,696** |
+
+**The OFF build had LESS free and a HIGHER arena, so the PSRAM song work made KQ4 marginally BETTER.** The
+failing allocation is `decompress0.c` `pico_decompress_alloc` at the `sci_malloc` branch -- the NON-sound path
+(pic/view/script) -- and no KQ4 sound resource is 12,532 bytes. Decisively, the OFF build logged **zero**
+`[snd] song` skips, so KQ4's two 41 KB songs never loaded on that route and **the slots were never exercised
+in either run**.
+
+So this is the general fragmentation wall on the heaviest game (150 pics, arena within 8 KB of the 475,104
+ceiling). What sound costs KQ4 is the BASELINE stack (~7.7 KB `.bss` + ~10 KB mixer buffers), not song
+storage. KQ4 had never been tested with sound before, so this is a newly-measured limit, not a regression.
+
+**PIO sound scoreboard: SQ3 works, PQ2 works with ALL music, KQ4 does not fit.**
+
+One untried lever, judged a poor trade: `buf_size` at `rate/13` costs ~5.6 KB over `rate/30`, and KQ4 failed
+by 12,532 with 20,512 fragmented-free. A smaller buffer for KQ4 might squeeze it in at the cost of
+reintroducing the audio sticking.
+
 **Still open (unchanged by this):** the TRANSITION stalls, 150-250 ms and occasionally 1.5 s, caused by room
 loads blocking the poll. Poll hooks exist in the pic-decode loop (`sci_pic_0.c`) and `_read()` (`pico_io.c`);
 they help but are NOT sufficient, and no buffer size can cover a 1.5 s gap. Also unchanged: PQ2's theme is

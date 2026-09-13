@@ -1395,11 +1395,24 @@ pico_mem_breakdown(state_t *s, int nr)
 					snd_res_n++;
 				}
 			}
+#if defined(PICO_PSRAM_SONGS) && !defined(PICO_PSRAM_MAPPED)
+		{
+			extern int psram_song_slots_used(void);
+
+			sciprintf("[mem] SOUND nr=%d: sndres=%lu B (%d res) "
+				  "refcnt=%lu B (%lu blk) total=%lu B psramslots=%d\n",
+				  nr, snd_res_bytes, snd_res_n,
+				  pico_refcount_live_bytes, pico_refcount_live_blocks,
+				  snd_res_bytes + pico_refcount_live_bytes,
+				  psram_song_slots_used());
+		}
+#else
 		sciprintf("[mem] SOUND nr=%d: sndres=%lu B (%d res) "
 			  "refcnt=%lu B (%lu blk) total=%lu B\n",
 			  nr, snd_res_bytes, snd_res_n,
 			  pico_refcount_live_bytes, pico_refcount_live_blocks,
 			  snd_res_bytes + pico_refcount_live_bytes);
+#endif
 	}
 
 	mi = mallinfo();

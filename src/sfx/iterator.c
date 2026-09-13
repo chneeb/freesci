@@ -100,6 +100,89 @@ _common_init(base_song_iterator_t *self)
 	}
 
 
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_SONGS)
+#include "psram_alloc.h"
+
+/* ---- song data read through a PSRAM window ------------------------------
+   A large song lives in a PSRAM slot rather than an SRAM memdup; `data` is
+   NULL then and every read comes through here.  Viable because SCI0 playback
+   is a SINGLE forward cursor (sci0_song_iterator_t has one channel, not the
+   16 that SCI1 has) consuming a few bytes per 60Hz tick, with occasional
+   loop-point rewinds -- the one access pattern PIO PSRAM is good at.
+   psram_load moves 31 bytes per transaction, so a 64-byte refill is 3 of
+   them, roughly every 10-20 ticks.
+
+   NOT used for embedded-PCM songs (data[0] == 2): _sci0_get_pcm_data hands
+   self->data straight to sfx_iterator_make_feed, which needs a real address.
+   Measured across SQ3/PQ2/KQ4 every PCM song is <= 9,774 B while every song
+   too big to keep is MIDI, so PCM songs simply stay in SRAM. */
+static unsigned char
+song_byte(base_song_iterator_t *self, int i)
+{
+	if (self->psram_addr == PSRAM_SONG_NONE)
+		return self->data[i];
+
+	if (i < self->win_base || i >= self->win_base + self->win_fill) {
+		int base = i & ~(PICO_SONG_WIN - 1);
+		int len = PICO_SONG_WIN;
+
+		if (base < 0 || base >= (int) self->size)
+			return 0;
+		if (base + len > (int) self->size)
+			len = (int) self->size - base;
+		psram_load(self->psram_addr + base, self->win, len);
+		self->win_base = base;
+		self->win_fill = len;
+	}
+	return self->win[i - self->win_base];
+}
+
+static void
+song_read(base_song_iterator_t *self, int off, unsigned char *dst, int n)
+{
+	if (self->psram_addr == PSRAM_SONG_NONE) {
+		memcpy(dst, self->data + off, n);
+		return;
+	}
+	/* Straight from PSRAM: a bulk read must not disturb the window, and may
+	   be longer than it. */
+	if (off >= 0 && n > 0 && off + n <= (int) self->size)
+		psram_load(self->psram_addr + off, dst, n);
+}
+
+/* Mirror of _parse_ticks through the accessor.  Written out rather than
+   copying into a temp buffer first, because the loop length is data-driven
+   (it runs while it sees TIME_EXPANSION_PREFIX) and guessing a temp size
+   would be a correctness bet. */
+static int
+song_parse_ticks(base_song_iterator_t *self, int at, int *offset_p, int size)
+{
+	int ticks = 0;
+	int tempticks;
+	int offset = 0;
+
+	do {
+		tempticks = song_byte(self, at + offset);
+		offset++;
+		ticks += (tempticks == SCI_MIDI_TIME_EXPANSION_PREFIX)?
+			SCI_MIDI_TIME_EXPANSION_LENGTH : tempticks;
+	} while (tempticks == SCI_MIDI_TIME_EXPANSION_PREFIX && offset < size);
+
+	if (offset_p)
+		*offset_p = offset;
+	return ticks;
+}
+
+#  define PSONG_BYTE(s, i)      song_byte((base_song_iterator_t *)(s), (i))
+#  define PSONG_READ(s, o, d, n) song_read((base_song_iterator_t *)(s), (o), (d), (n))
+#  define PSONG_TICKS(s, at, op, sz) \
+	song_parse_ticks((base_song_iterator_t *)(s), (at), (op), (sz))
+#else
+#  define PSONG_BYTE(s, i)      ((s)->data[(i)])
+#  define PSONG_READ(s, o, d, n) memcpy((d), (s)->data + (o), (n))
+#  define PSONG_TICKS(s, at, op, sz) _parse_ticks((s)->data + (at), (op), (sz))
+#endif
+
 static inline int
 _parse_ticks(byte *data, int *offset_p, int size)
 {
@@ -169,7 +252,7 @@ _parse_sci_midi_command(base_song_iterator_t *self, unsigned char *buf,	int *res
 
 	channel->state = SI_STATE_DELTA_TIME;
 
-	cmd = self->data[channel->offset++];
+	cmd = PSONG_BYTE(self, channel->offset++);
 
 	if (!(cmd & 0x80)) {
 		/* 'Running status' mode */
@@ -206,7 +289,7 @@ if (1) {
 
 
 	CHECK_FOR_END(paramsleft);
-	memcpy(buf + 1, self->data + channel->offset, paramsleft);
+	PSONG_READ(self, channel->offset, buf + 1, paramsleft);
 	*result = 1 + paramsleft;
 
 	channel->offset += paramsleft;
@@ -383,8 +466,8 @@ _sci_midi_process_state(base_song_iterator_t *self, unsigned char *buf, int *res
 	switch (channel->state) {
 
 	case SI_STATE_PCM: {
-		if (*(self->data + channel->offset) == 0
-		    && *(self->data + channel->offset + 1) == SCI_MIDI_EOT)
+		if (PSONG_BYTE(self, channel->offset) == 0
+		    && PSONG_BYTE(self, channel->offset + 1) == SCI_MIDI_EOT)
 			/* Fake one extra tick to trick the interpreter into not killing the song iterator right away */
 			channel->state = SI_STATE_PCM_MAGIC_DELTA;
 		else
@@ -416,9 +499,8 @@ _sci_midi_process_state(base_song_iterator_t *self, unsigned char *buf, int *res
 
 	case SI_STATE_DELTA_TIME: {
 		int offset;
-		int ticks = _parse_ticks(self->data + channel->offset,
-					 &offset,
-					 self->size - channel->offset);
+		int ticks = PSONG_TICKS(self, channel->offset, &offset,
+				      self->size - channel->offset);
 
 		channel->offset += offset;
 		channel->delay += ticks;
@@ -515,7 +597,7 @@ _sci0_get_pcm_data(sci0_song_iterator_t *self,
 	int size;
 	unsigned int offset = SCI0_MIDI_OFFSET;
 
-	if (self->data[0] != 2)
+	if (PSONG_BYTE(self, 0) != 2)
 		return 1;
 	/* No such luck */
 
@@ -613,6 +695,16 @@ _sci0_handle_message(sci0_song_iterator_t *self, song_iterator_message_t msg)
 			int tsize = sizeof(sci0_song_iterator_t);
 			base_song_iterator_t *mem = (base_song_iterator_t*)sci_malloc(tsize);
 			memcpy(mem, self, tsize);
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_SONGS)
+			/* A PSRAM song has data == NULL, so the incref below would
+			   deref NULL.  The memcpy just gave the clone the same slot
+			   address, so take a reference on the SLOT instead -- without
+			   it, whichever iterator tears down first would release the
+			   slot out from under the other. */
+			if (mem->psram_addr != PSRAM_SONG_NONE)
+				psram_song_incref(mem->psram_addr);
+			else
+#endif
 			sci_refcount_incref(mem->data);
 #ifdef DEBUG_VERBOSE
 fprintf(stderr, "** CLONE INCREF for new %p from %p at %p\n", mem, self, mem->data);
@@ -636,7 +728,7 @@ fprintf(stderr, "** CLONE INCREF for new %p from %p at %p\n", mem, self, mem->da
 			self->channel.playmask &= ~(1 << MIDI_RHYTHM_CHANNEL);
 
 			for (i = 0; i < MIDI_CHANNELS; i++)
-				if (self->data[2 + (i << 1)] & self->device_id
+				if (PSONG_BYTE(self, 2 + (i << 1)) & self->device_id
 				    && i != MIDI_RHYTHM_CHANNEL)
 					self->channel.playmask |= (1 << i);
 		}
@@ -707,7 +799,7 @@ _sci0_init(sci0_song_iterator_t *self)
 			      &(self->channel));
 	self->delay_remaining = 0;
 
-	if (self->data[0] == 2) /* Do we have an embedded PCM? */
+	if (PSONG_BYTE(self, 0) == 2) /* Do we have an embedded PCM? */
 		self->channel.state = SI_STATE_PCM;
 }
 
@@ -717,6 +809,14 @@ _sci0_cleanup(sci0_song_iterator_t *self)
 {
 #ifdef DEBUG_VERBOSE
 fprintf(stderr, "** FREEING it %p: data at %p\n", self, self->data);
+#endif
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_SONGS)
+	/* A PSRAM song has no refcounted SRAM block -- release the slot instead,
+	   or the 8 slots leak away and later songs silently fall back to SRAM. */
+	if (self->psram_addr != PSRAM_SONG_NONE) {
+		psram_song_free(self->psram_addr);
+		self->psram_addr = PSRAM_SONG_NONE;
+	}
 #endif
 	if (self->data)
 		sci_refcount_decref(self->data);
@@ -1986,6 +2086,37 @@ songit_new(unsigned char *data, unsigned int size, int type, songit_id_t id)
 	it->ID = id;
 
 	it->death_listeners_nr = 0;
+
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_SONGS)
+	/* MUST be set before anything can read it: the allocations above are
+	   sci_malloc with no memset, so this field is garbage until assigned and
+	   the accessor would follow it to a random PSRAM address. */
+	it->psram_addr = PSRAM_SONG_NONE;
+	it->win_base = 0;
+	it->win_fill = 0;
+
+	/* Park a large MIDI song in PSRAM instead of duplicating it in SRAM.
+	   Embedded-PCM songs (data[0] == 2) are excluded: _sci0_get_pcm_data
+	   hands the buffer straight to sfx_iterator_make_feed, which needs a real
+	   address.  Measured, every PCM song is small and every song big enough
+	   to matter is MIDI, so the exclusion costs nothing in practice.
+	   SCI0 only -- SCI1 reads self->data directly all over. */
+	if (type == SCI_SONG_ITERATOR_TYPE_SCI0
+	    && size > PICO_PSRAM_SONG_MIN
+	    && data[0] != 2) {
+		unsigned int slot = psram_song_alloc(size);
+
+		if (slot != PSRAM_SONG_NONE) {
+			psram_store(slot, data, size);
+			it->psram_addr = slot;
+			it->data = NULL;
+			it->size = size;
+			it->init((song_iterator_t *) it);
+			return (song_iterator_t *) it;
+		}
+		/* No free slot: fall through to the SRAM copy. */
+	}
+#endif
 
 	it->data = (unsigned char*)sci_refcount_memdup(data, size);
 	if (!it->data) {

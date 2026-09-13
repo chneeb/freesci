@@ -175,7 +175,9 @@ run_game(const char *dir, int *checked_out, int *skipped_out)
 		if (getenv("SNDSIZE") && res->type == sci_sound) {
 			unsigned char *t=NULL; unsigned int ts=0;
 			if (load_via(res, resmgr->sci_version, 0, &t, &ts) == 0)
-				printf("    sound.%03d decompressed=%u\n", res->number, ts);
+				printf("    sound.%03d decompressed=%u byte0=%d%s\n",
+				       res->number, ts, t ? t[0] : -1,
+				       (t && t[0] == 2) ? "  <-- EMBEDDED PCM" : "");
 			if (t) free(t);
 		}
 		if (getenv("METHODS"))

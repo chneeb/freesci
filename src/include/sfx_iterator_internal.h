@@ -76,6 +76,34 @@ typedef struct {
 	byte last_cmd;	/* Last operation executed, for running status */
 } song_iterator_channel_t;
 
+/* PIO only: a large song lives in a PSRAM slot instead of an SRAM memdup, and
+   `data` is then NULL.  Reads go through song_byte()/song_read() in iterator.c,
+   backed by this small per-iterator window -- per-iterator, not shared, because
+   several songs can be live at once and one window would thrash between them.
+   SCI0 has a SINGLE channel (see sci0_song_iterator_t), so each iterator reads
+   one forward cursor; that is what makes a 64-byte window sufficient.
+
+   psram_addr MUST be initialised explicitly: songit_new uses sci_malloc with no
+   memset, so an uninitialised value here would send the accessor at a random
+   PSRAM address. */
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_SONGS)
+#  define PICO_SONG_WIN 64
+/* Only songs above this go to PSRAM.  Small songs are the common case (median
+   ~1-2 KB across SQ3/PQ2/KQ4) and an SRAM copy is both faster and simpler for
+   them; there are also only 8 slots, so spending one on a 500-byte cue would
+   starve the large song the slots exist for.  8 KB sits above every embedded
+   PCM song measured (largest 9,774 -- see the PCM note in iterator.c) but well
+   below the songs that actually hurt (30-59 KB). */
+#  define PICO_PSRAM_SONG_MIN 8192
+#  define PICO_SONG_PSRAM_FIELDS							\
+	unsigned int psram_addr;   /* PSRAM_SONG_NONE => data is a real pointer */ \
+	int win_base;								\
+	int win_fill;								\
+	unsigned char win[PICO_SONG_WIN];
+#else
+#  define PICO_SONG_PSRAM_FIELDS
+#endif
+
 #define INHERITS_BASE_SONG_ITERATOR								\
 	INHERITS_SONG_ITERATOR; /* aka "extends song iterator" */				\
 												\
@@ -89,6 +117,7 @@ typedef struct {
 	int active_channels; /* Number of active channels */					\
 	unsigned int size; /* Song size */							\
 	unsigned char *data;									\
+	PICO_SONG_PSRAM_FIELDS									\
 												\
 	int loops; /* Number of loops remaining */						\
 	int recover_delay

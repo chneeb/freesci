@@ -23,6 +23,67 @@ psram_reset(void)
     s_psram_offset = 0;
 }
 
+/* Song slots (see psram_alloc.h).  Deliberately NOT touched by psram_reset:
+   music plays across room changes, which is exactly when the bump arena is
+   rewound. */
+/* Refcounted, not a plain in-use flag: _SIMSG_BASEMSG_CLONE memcpy's a whole
+   iterator, so two iterators end up naming the same slot.  With a bare flag the
+   first teardown would release it while the clone was still reading. */
+static uint8_t s_song_slot_refs[PSRAM_SONG_SLOTS];
+
+uint32_t
+psram_song_alloc(size_t bytes)
+{
+    int i;
+
+    if (bytes > PSRAM_SONG_SLOT_SIZE)
+        return PSRAM_SONG_NONE;
+    for (i = 0; i < PSRAM_SONG_SLOTS; i++)
+        if (!s_song_slot_refs[i]) {
+            s_song_slot_refs[i] = 1;
+            return PSRAM_SONG_BASE + (uint32_t)i * PSRAM_SONG_SLOT_SIZE;
+        }
+    return PSRAM_SONG_NONE;   /* caller falls back to SRAM */
+}
+
+/* Slots in use, for the [mem] SOUND probe.  Without this a slot LEAK is
+   invisible: leaked slots do not show up in refcnt (that counts SRAM copies
+   only), they just silently push later large songs back into SRAM. */
+int
+psram_song_slots_used(void)
+{
+    int i, n = 0;
+
+    for (i = 0; i < PSRAM_SONG_SLOTS; i++)
+        if (s_song_slot_refs[i])
+            n++;
+    return n;
+}
+
+void
+psram_song_incref(uint32_t addr)
+{
+    uint32_t i;
+
+    if (addr == PSRAM_SONG_NONE || addr < PSRAM_SONG_BASE)
+        return;
+    i = (addr - PSRAM_SONG_BASE) / PSRAM_SONG_SLOT_SIZE;
+    if (i < PSRAM_SONG_SLOTS && s_song_slot_refs[i] < 255)
+        s_song_slot_refs[i]++;
+}
+
+void
+psram_song_free(uint32_t addr)
+{
+    uint32_t i;
+
+    if (addr == PSRAM_SONG_NONE || addr < PSRAM_SONG_BASE)
+        return;
+    i = (addr - PSRAM_SONG_BASE) / PSRAM_SONG_SLOT_SIZE;
+    if (i < PSRAM_SONG_SLOTS && s_song_slot_refs[i])
+        s_song_slot_refs[i]--;
+}
+
 /*
  * The PIO command protocol encodes "bits to write" and "bits to read" as
  * single uint8_t fields.  For a write: bits = (4 + data_bytes) * 8 must fit
