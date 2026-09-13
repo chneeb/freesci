@@ -1371,6 +1371,37 @@ pico_mem_breakdown(state_t *s, int nr)
 				  rp->pico_reg_next);
 	}
 
+	/* --- Is the +70 KB that sound costs PQ2 actually SONG DATA? ---
+	   Measured, not inferred, because the answer decides whether moving song
+	   data to PSRAM is worth a multi-session spike. Two exact numbers:
+	     sndres  = sci_sound resource data still resident in the resmgr
+	     refcnt  = live sci_refcount_alloc bytes, which IS the iterators' copy
+	               (songit_new's memdup is its only caller)
+	   Known non-song sound cost is only ~12 KB (OPL chip, compbufs, feed,
+	   writebuf), so if sndres+refcnt is ~50 KB the spike has a real target;
+	   if it is ~15 KB the spike is pointless. */
+	{
+		unsigned long snd_res_bytes = 0;
+		int snd_res_n = 0, ri;
+		extern unsigned long pico_refcount_live_bytes;
+		extern unsigned long pico_refcount_live_blocks;
+
+		if (s->resmgr)
+			for (ri = 0; ri < s->resmgr->resources_nr; ri++) {
+				resource_t *r = s->resmgr->resources + ri;
+
+				if (r->type == sci_sound && r->data) {
+					snd_res_bytes += r->size;
+					snd_res_n++;
+				}
+			}
+		sciprintf("[mem] SOUND nr=%d: sndres=%lu B (%d res) "
+			  "refcnt=%lu B (%lu blk) total=%lu B\n",
+			  nr, snd_res_bytes, snd_res_n,
+			  pico_refcount_live_bytes, pico_refcount_live_blocks,
+			  snd_res_bytes + pico_refcount_live_bytes);
+	}
+
 	mi = mallinfo();
 
 	/* Sum of every byte category the breakdown can itemize. uord MINUS this is

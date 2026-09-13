@@ -3534,7 +3534,88 @@ cmake -B build-pico-snd -DPLATFORM=pico -DPICO_SDK_PATH=~/Source/pico-sdk -DPICO
 - ❌ **PQ2 does not fit.** OOM at `sci_refcount_alloc` (the song-data memdup, 9,019 B) with
   **`free=104 bytes` and `arena` at its exact maximum** — TRUE EXHAUSTION, not the contiguity failure that
   was predicted. PQ2 is simply the heavier game (1843 vocab words vs 1489, ~59 KB songs vs ~19 KB).
-- ⚠️ **OPEN: after a failed game, no further game starts** ("Please wait" then exit) until a power cycle.
+- ### RESOLVED (device-confirmed 2026-09-13) — the "shrill feep" is the PWM IDLE DUTY CYCLE, not starvation, not the carrier
+
+**One value: `PICO_PWM_IDLE_LEVEL` 127 -> 0** (`pwm_synth.c` + CMake knob). A sustained 50% duty cycle is
+AUDIBLE on this hardware. `last_sample` was initialised to the 127 midpoint, so an idle device sat at 50%
+duty forever and sang. Device-confirmed both ways: tone gone at the chooser, music unaffected.
+
+**Safe because it is only the INITIAL/reset value.** During an underrun the IRQ holds the last REAL sample,
+so the anti-click behaviour 127 was chosen for is untouched; during playback every sample comes from the
+ring. Cost is one DC step at the first sample.
+
+**THE DIAGNOSTIC PATH MATTERS MORE THAN THE FIX — five theories died, and the two that mattered were killed
+by USER OBSERVATIONS, not by reading code:**
+
+| theory | killed by |
+|---|---|
+| underrun / 8-bit quantisation / stuck OPL voice (the three previously recorded here) | never tested; all wrong |
+| room-load poll starvation | **"the feep starts at the chooser"** — no game, no song, no underrun |
+| PWM carrier frequency | **"no feep on Pimoroni at 22 kHz"** sent me here; then 11,025 -> 44,100 Hz changed NOTHING |
+| idle duty cycle | duty 0 silent, duty 127 feeps — confirmed by a one-line bisect |
+
+**The lesson: when a symptom appears BEFORE the subsystem you suspect can possibly run, that fact alone
+eliminates the whole subsystem.** "It is there at the chooser" was worth more than any amount of code
+reading, and it was available from the start. A one-line bisect (`PICO_PWM_IDLE_LEVEL=0`) then settled in
+one flash what two rounds of reasoning got wrong.
+
+**STILL UNEXPLAINED, deliberately not papered over:** why the mapped target at idle 127 reportedly did NOT
+feep. The frequency explanation that would have covered it is disproved. The fix is correct for both targets
+regardless, since duty 0 is silent on any hardware.
+
+**`PICO_PWM_CARRIER_MULT` (default 4) is KEPT but is NOT the fix** — it was built for the disproved carrier
+theory. It runs the carrier 4x the sample rate (11,025 -> 44,100 Hz) and pops a sample every 4th IRQ, costing
+~3% CPU. Kept as cheap insurance now that the output stage is known to be duty-sensitive; set to 1 to undo.
+
+### RESOLVED (device-confirmed 2026-09-13) — PQ2 WITH SOUND RUNS on PIO, via a song size cap
+
+**`PICO_SONG_MAX_BYTES` (default 32768, PIO + `PICO_PWM_AUDIO` only).** PQ2 with sound now plays: **8 rooms
+traversed, ZERO OOMs**, peak `used` 398,464 vs the 442,440 that previously died 12 bytes short of a GC alloc.
+This supersedes the long-standing "sound on PIO is an SQ3-specific build" verdict for the OOM specifically.
+
+**Measured, not guessed.** A `[mem] SOUND` probe (`kgraphics.c` + refcount counters in `sci_memory.c`, both
+`FSCI_PROBE_MEM`-gated) reported at room 46: `sndres=0 B refcnt=60947 B (3 blk)`. Two facts fell out:
+`sndres=0` proves the resource side is already optimal (the evict-after-`songit_new` fix works, no cheap win
+left there), and the 60,947 was **ONE song** — 59,153 B = PQ2's `sound.001`, its theme. One song was the
+entire problem.
+
+**Threshold chosen from measured DECOMPRESSED song sizes, not taste** (median ~1-2 KB; only outliers hurt):
+
+| game | max | 2nd | 3rd | effect of a 32 KB cap |
+|---|---|---|---|---|
+| SQ3 (the config that WORKS) | 30,324 | 18,996 | 13,548 | **nothing skipped — not regressed** |
+| PQ2 | 59,153 | 26,197 | 22,287 | 1 of 47 skipped |
+| KQ4 | 41,747 | 41,490 | 24,031 | 2 of 80 skipped |
+
+**TWO PLACEMENT BUGS, both mine, both device-caught — this is the part to read:**
+
+1. **The cap must precede EVERY allocation, not sit in the allocator.** First version lived in
+   `pico_decompress_alloc` (the `result->data` path). But `sci_malloc_sram(compressedLength)` for the INPUT
+   buffer is allocated FIRST and is FATAL, so the cap was never reached: PQ2 halted at `decompress0` with the
+   cap compiled in. It now runs as soon as type and size are known, which also skips the decompress work and
+   makes it independent of `PICO_STREAM_DECOMPRESS`.
+2. **A skipped song must NOT return a NULL iterator — that opens the SCI CONSOLE.** `build_iterator` returning
+   NULL makes `sfx_add_song` print `[SFX] Attempt to add empty song` and return -1, which `SCRIPT_ASSERT_ZERO`
+   turns into `script_debug_flag`: the debugger opens and the game stops. Fixed in `ksound.c` by treating a
+   missing song exactly like NOSOUND at INIT (skip `sfx_add_song`, set `signal=-1`), and guarding the PLAY
+   path with `song_lib_find` so a never-added song cannot leave `state=PLAYING` with `signal` unset (which
+   would hang a script waiting for it). **Shared engine code, not `HAVE_PICO`-gated** — the NULL is
+   mishandled identically on desktop, it just cannot occur there.
+
+   **I had diagnosed hazard 2 correctly EARLIER in the session and then talked myself out of it**, because a
+   log showed play continuing after `malloc 59169 failed`. I read "the game kept going" as proof the path was
+   graceful without grepping for the console line, which was almost certainly present. Cheap check, skipped.
+
+**Verified not a regression:** SQ3 on the same build prints no `[snd] song` line and plays its sounds.
+PQ2 is quiet mainly because the ONE skipped song is its theme — that is the designed trade.
+
+**Still open:** mixer starvation persists (`demand 443` on ordinary frames ~= a 25 Hz poll rate) even with
+poll hooks added to the pic-decode loop (`sci_pic_0.c`) and to `_read()` (`pico_io.c`). Those hooks were built
+for the feep and did not fix it; they are kept because the starvation they target is real (it causes chopping,
+not a tone) but they are NOT sufficient. The path to keeping ALL music rather than capping it is still the
+PSRAM song spike, now with a measured target: ~59 KB in a single block.
+
+⚠️ **OPEN: after a failed game, no further game starts** ("Please wait" then exit) until a power cycle.
   Not diagnosed. The obvious leaks were checked and are clean (`opl2_exit` does `OPLDestroy`, `mix_exit`
   frees the compbufs, `main.c:1481` calls `game_exit`→`sfx_exit`), so it is NOT a simple "sound never
   frees". Decisive next data: the chooser's `[mem] post-trim` line after the failed game (high arena =>

@@ -172,6 +172,12 @@ run_game(const char *dir, int *checked_out, int *skipped_out)
 			}
 		}
 
+		if (getenv("SNDSIZE") && res->type == sci_sound) {
+			unsigned char *t=NULL; unsigned int ts=0;
+			if (load_via(res, resmgr->sci_version, 0, &t, &ts) == 0)
+				printf("    sound.%03d decompressed=%u\n", res->number, ts);
+			if (t) free(t);
+		}
 		if (getenv("METHODS"))
 			printf("    %s.%03d method=%d clen=%u\n",
 			       sci_resource_types[res->type], res->number,

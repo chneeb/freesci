@@ -425,6 +425,42 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_STREAM_METHODS=${PICO_STREAM_METHODS})
     endif()
 
+    # Largest song (DECOMPRESSED bytes) the PIO target will hold in SRAM.
+    # Songs live in SRAM here because PIO PSRAM is not addressable; on the mapped
+    # target they go to PSRAM and this does nothing.
+    #
+    # 32768 is chosen from measured decompressed song sizes, not taste:
+    #     SQ3  max 30,324   <- under the cap, so the one config where PIO sound
+    #                          WORKS today is not regressed
+    #     PQ2  max 59,153   <- blocked (1 of 47 songs); this is the song that
+    #                          drove the heap to 442,440 of a 475,104 ceiling
+    #     KQ4  max 41,747   <- blocks 2 of 80
+    # Median song is ~1-2 KB, so only the outliers are affected.
+    set(PICO_SONG_MAX_BYTES "32768" CACHE STRING "Largest decompressed song held in SRAM (PIO only)")
+    if(PICO_PWM_AUDIO AND NOT PICO_PSRAM_MAPPED)
+        add_compile_definitions(PICO_SONG_MAX_BYTES=${PICO_SONG_MAX_BYTES})
+    endif()
+
+    # How many times faster than the sample rate the PWM carrier runs.
+    #
+    # 1 makes the carrier EQUAL the sample rate, which at PICO_SND_RATE=11025
+    # puts it at 11,025 Hz -- audible, and with an empty ring the held 50% duty
+    # cycle is a clean square wave. That is the "shrill feep", audible from the
+    # chooser with no game running. It was inaudible on the mapped target only
+    # because 22050 puts the carrier above hearing.
+    # 4 moves 11,025 -> 44,100 Hz. wrap is unchanged so resolution is unchanged;
+    # the IRQ fires 4x as often, and it was measured at ~1% CPU.
+    set(PICO_PWM_CARRIER_MULT "4" CACHE STRING "PWM carrier as a multiple of the sample rate")
+    # 0, not the 127 midpoint: a sustained 50% duty is AUDIBLE on this hardware
+    # and was the "shrill feep", present from the chooser with no game running.
+    # Device-confirmed. Only the initial/reset level -- underruns still hold the
+    # last real sample. See the long comment in pwm_synth.c.
+    set(PICO_PWM_IDLE_LEVEL "0" CACHE STRING "PWM level before any audio exists")
+    if(PICO_PWM_AUDIO)
+        add_compile_definitions(PICO_PWM_CARRIER_MULT=${PICO_PWM_CARRIER_MULT})
+        add_compile_definitions(PICO_PWM_IDLE_LEVEL=${PICO_PWM_IDLE_LEVEL})
+    endif()
+
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)

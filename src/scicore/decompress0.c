@@ -592,6 +592,38 @@ int decompress0(resource_t *result, int resh, int sci_version)
 		return SCI_ERROR_EMPTY_OBJECT;
 	}
 
+#if defined(PICO_SONG_MAX_BYTES) && !defined(PICO_PSRAM_MAPPED)
+	/* PIO only: refuse an oversized song BEFORE ANY ALLOCATION.
+	   This has to sit ahead of the sci_malloc_sram(compressedLength) below,
+	   not inside the result->data allocator: the INPUT buffer is allocated
+	   first and sci_malloc_sram is FATAL, so a cap downstream of it never runs
+	   (device-observed -- PQ2 halted at decompress0 with the cap in place but
+	   never reached).  Bailing here also skips the decompress work entirely.
+
+	   Measured justification ([mem] SOUND probe, PQ2): song data resident in
+	   the iterators reached 60,947 B, of which 59,153 was ONE song, and that
+	   song is what drove the heap to 442,440 of a 475,104 ceiling where a
+	   12-byte GC alloc then failed.  Without a cap the graceful skip fires only
+	   when the heap HAPPENS to be full at that instant, so the same game either
+	   plays or dies on timing.  Returning the same error the graceful path uses
+	   leaves res->data NULL, which the caller already handles by playing on
+	   silently. */
+	if (result->type == sci_sound && result_size > PICO_SONG_MAX_BYTES) {
+		static int warned_once = 0;
+
+		if (!warned_once) {
+			warned_once = 1;
+			sciprintf("[snd] song %d is %u B, over the %u B SRAM cap:"
+				  " skipping it (further skips silent)\n",
+				  result->number, (unsigned) result_size,
+				  (unsigned) PICO_SONG_MAX_BYTES);
+		}
+		result->data = NULL;
+		result->status = SCI_STATUS_NOMALLOC;
+		return SCI_ERROR_DECOMPRESSION_INSANE;
+	}
+#endif
+
 #ifdef PICO_STREAM_DECOMPRESS
 	/* Phase 1: only method 1 (LZW) streams.  Methods 0 and 2 still take the
 	   flat buffer, so they must still allocate it.  Method 1 is the dominant

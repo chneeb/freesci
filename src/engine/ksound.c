@@ -223,34 +223,61 @@ kDoSound_SCI0(state_t *s, int funct_nr, int argc, reg_t *argv)
 #ifndef HAVE_PICO
 			sciprintf("Initializing song number %d\n", GET_SEL32V(obj, number));
 #endif
-			if (!(s->sound.flags & SFX_STATE_FLAG_NOSOUND)) {
-				SCRIPT_ASSERT_ZERO(sfx_add_song(&s->sound,
-								build_iterator(s, number,
-									       SCI_SONG_ITERATOR_TYPE_SCI0,
-									       handle),
-								0, handle, number));
+		{
+			int song_absent = (s->sound.flags & SFX_STATE_FLAG_NOSOUND) != 0;
+
+			if (!song_absent) {
+				song_iterator_t *it =
+					build_iterator(s, number,
+						       SCI_SONG_ITERATOR_TYPE_SCI0,
+						       handle);
+
+				/* A NULL iterator means the song could not be loaded --
+				   on Pico, typically because it exceeded
+				   PICO_SONG_MAX_BYTES and was deliberately skipped.
+				   Passing NULL to sfx_add_song makes it print
+				   "Attempt to add empty song" and return -1, which
+				   SCRIPT_ASSERT_ZERO turns into script_debug_flag: the
+				   SCI CONSOLE opens and the game stops.  That is not a
+				   graceful skip, it is a different failure -- so treat a
+				   missing song exactly like NOSOUND, which the engine
+				   already handles cleanly. */
+				if (!it)
+					song_absent = 1;
+				else
+					SCRIPT_ASSERT_ZERO(sfx_add_song(&s->sound, it,
+									0, handle,
+									number));
 			}
 			/* Always set state=INITIALIZED so scripts that gate PLAY behind
-			   "init succeeded" still proceed. On NOSOUND, also set signal=-1
-			   so any "is it finished" poll terminates the wait. */
+			   "init succeeded" still proceed. With no song, also set
+			   signal=-1 so any "is it finished" poll terminates the wait. */
 			PUT_SEL32V(obj, state, _K_SOUND_STATUS_INITIALIZED);
-			if (s->sound.flags & SFX_STATE_FLAG_NOSOUND) {
+			if (song_absent) {
 				PUT_SEL32V(obj, signal, -1);
 			}
+		}
 			PUT_SEL32(obj, handle, obj); /* ``sound handle'': we use the object address */
 		}
 		break;
 
 	case _K_SCI0_SOUND_PLAY_HANDLE:
 		if (obj.segment) {
-			if (!(s->sound.flags & SFX_STATE_FLAG_NOSOUND)) {
+			/* A song that was never added (skipped for size, or NOSOUND)
+			   has no songlib entry.  Driving sfx_song_set_status at it only
+			   logs "Looking up song handle failed" and leaves state=PLAYING
+			   with signal unset, so a script waiting for the song to finish
+			   waits forever.  Route it down the same path as NOSOUND. */
+			if (!(s->sound.flags & SFX_STATE_FLAG_NOSOUND)
+			    && song_lib_find(s->sound.songlib, handle)) {
 				sfx_song_set_status(&s->sound,
 						    handle, SOUND_STATUS_PLAYING);
 				sfx_song_set_loops(&s->sound,
 						   handle, GET_SEL32V(obj, loop));
 				PUT_SEL32V(obj, state, _K_SOUND_STATUS_PLAYING);
 			} else {
-				/* NOSOUND: keep the song "finished" so wait loops exit. */
+				/* No song (NOSOUND, or skipped): keep it "finished" so
+				   wait loops exit. */
 				PUT_SEL32V(obj, state, _K_SOUND_STATUS_STOPPED);
 				PUT_SEL32V(obj, signal, -1);
 			}

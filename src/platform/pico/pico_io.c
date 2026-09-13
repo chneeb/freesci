@@ -16,6 +16,9 @@
 #include <string.h>
 #include <stdio.h>
 #include "ff.h"
+#ifdef PICO_PWM_AUDIO
+#include "audio/pwm_synth.h"
+#endif
 
 #define MAX_FDS 8
 
@@ -67,6 +70,14 @@ _READ_WRITE_RETURN_TYPE _read(int fd, void *buf, size_t len)
     UINT br = 0;
     FRESULT r = f_read(&fat_files[idx], buf, (UINT)len, &br);
     if (r != FR_OK) { errno = EIO; return -1; }
+#ifdef PICO_PWM_AUDIO
+    /* Feed the sound pipeline across SD I/O.  The measured 243 ms starvation
+       gap sat BEFORE "room ready", i.e. it spans resource loading and not just
+       the decode, so hooking the pic decode alone would leave half the hole.
+       After the read, so the poll never delays the I/O it is riding on.
+       pico_sfx_poll self-limits on elapsed time. */
+    pico_sfx_poll();
+#endif
     return (int)br;
 }
 

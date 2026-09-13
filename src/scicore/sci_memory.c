@@ -475,7 +475,15 @@ debug_win32_memory(int dbg_setting)
 
 /*-------- Refcounting ----------*/
 
-#define REFCOUNT_OVERHEAD (sizeof(guint32)*3)
+#if defined(FSCI_PROBE_MEM) && defined(HAVE_PICO)
+/* One EXTRA header word purely for the probe, holding the allocation length so
+   decref can subtract exactly what alloc added.  It cannot reuse data[-1..-3]:
+   those are MAGIC_LIVE_1, REFCOUNT(p) and MAGIC_LIVE_2 respectively. */
+#  define REFCOUNT_WORDS 4
+#else
+#  define REFCOUNT_WORDS 3
+#endif
+#define REFCOUNT_OVERHEAD (sizeof(guint32)*REFCOUNT_WORDS)
 #define REFCOUNT_MAGIC_LIVE_1 0xebdc1741
 #define REFCOUNT_MAGIC_LIVE_2 0x17015ac9
 #define REFCOUNT_MAGIC_DEAD_1 0x11dead11
@@ -488,6 +496,17 @@ debug_win32_memory(int dbg_setting)
 
 #undef TRACE_REFCOUNT
 
+
+#if defined(FSCI_PROBE_MEM) && defined(HAVE_PICO)
+/* Live bytes held by sci_refcount_alloc.  It has exactly ONE caller --
+   songit_new's memdup of song data -- so this IS "song data resident in the
+   iterators", measured rather than inferred.  Paired with the sci_sound
+   resource walk in pico_mem_breakdown, it answers whether the +70 KB that
+   sound costs PQ2 is really song data (and therefore whether moving songs to
+   PSRAM is worth the spike) or something else entirely. */
+unsigned long pico_refcount_live_bytes = 0;
+unsigned long pico_refcount_live_blocks = 0;
+#endif
 
 extern void *
 sci_refcount_alloc(size_t length)
@@ -511,8 +530,15 @@ sci_refcount_alloc(size_t length)
 #ifdef TRACE_REFCOUNT
 fprintf(stderr, "[] REF: Real-alloc at %p\n", data);
 #endif
-	data += 3;
+	data += REFCOUNT_WORDS;
 
+#if defined(FSCI_PROBE_MEM) && defined(HAVE_PICO)
+	/* Length goes in the EXTRA 4th header word the probe adds -- NOT in
+	   data[-2], which is REFCOUNT(p) itself. */
+	data[-4] = (guint32) length;
+	pico_refcount_live_bytes += length;
+	pico_refcount_live_blocks++;
+#endif
 	data[-1] = REFCOUNT_MAGIC_LIVE_1;
 	data[-3] = REFCOUNT_MAGIC_LIVE_2;
 	REFCOUNT(data) = 1;
@@ -549,13 +575,17 @@ fprintf(stderr, "[] REF: Dec'ing %p (prev ref=%d) OK=%d\n", data, REFCOUNT(data)
 	} else if (--REFCOUNT(data) == 0) {
 		guint32 *fdata = (guint32*)data;
 
+#if defined(FSCI_PROBE_MEM) && defined(HAVE_PICO)
+		pico_refcount_live_bytes -= (unsigned long) fdata[-4];
+		pico_refcount_live_blocks--;
+#endif
 		fdata[-1] = REFCOUNT_MAGIC_DEAD_1;
 		fdata[-3] = REFCOUNT_MAGIC_DEAD_2;
 
 #ifdef TRACE_REFCOUNT
-fprintf(stderr, "[] REF: Freeing (%p)...\n", fdata - 3);
+fprintf(stderr, "[] REF: Freeing (%p)...\n", fdata - REFCOUNT_WORDS);
 #endif
-		sci_free(fdata - 3);
+		sci_free(fdata - REFCOUNT_WORDS);
 #ifdef TRACE_REFCOUNT
 fprintf(stderr, "[] REF: Done.\n");
 #endif

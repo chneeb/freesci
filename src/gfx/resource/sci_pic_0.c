@@ -1702,6 +1702,20 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 	/* Main loop */
 	while (pos < size) {
+#if defined(HAVE_PICO) && defined(PICO_PWM_AUDIO)
+		/* Feed the sound pipeline DURING the decode.  Device-measured: the
+		   only two mixer-starvation events in a whole PQ2 session were both
+		   adjacent to room loads, at 147 ms and 243 ms -- which matches the
+		   82-170 ms pic decode.  The poll otherwise runs only from the front
+		   flush and usec_sleep, and a decode does neither, so the ring drains
+		   and the PWM IRQ holds last_sample (heard as the shrill feep).
+		   Raising buf_size to cover 243 ms would need ~2,675 frames (~32 KB of
+		   compbuf) -- absurd, and it fights the memory constraint for no
+		   reason.  pico_sfx_poll self-limits on elapsed time, so the vast
+		   majority of these calls are a gettime and a compare. */
+		extern void pico_sfx_poll(void);
+		pico_sfx_poll();
+#endif
 		op = _RB(pos++);
 
 		switch (op) {
