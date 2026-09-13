@@ -936,6 +936,7 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 #if defined(FSCI_SIM_PICO_STATIC) \
     || (defined(HAVE_PICO) && !defined(PICO_WORKING_PRIORITY) \
         && (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)))
+	extern int pico_static_view_priority_enabled;
 	/* A settled stopUpd view (NO_UPDATE) is conceptually part of the background.
 	   Desktop keeps it via a persistent back buffer; Pico has a single visual[0].
 	   Route the view through the static path (GFX_BUFFER_STATIC) so the driver
@@ -979,7 +980,10 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 	}
 #endif
 
-	if (view->signal & 0x0004) {
+	/* Runtime gate (chooser [V]), so the static-view A/B needs no rebuild.
+	   Falling through leaves the plain gfxop_draw_cel below, which IS the
+	   pre-feature behaviour -- not an approximation of it. */
+	if ((view->signal & 0x0004) && pico_static_view_priority_enabled) {
 #if defined(PICO_STATIC_VIEW_PRIORITY) && !defined(PICO_STATIC_VIEW_BAKE)
 		extern int pico_priority_only_static;
 		pico_priority_only_static = 1;

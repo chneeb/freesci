@@ -585,6 +585,14 @@ nearest_pal(struct _pico_state *ps, int r, int g, int b)
     return (uint8_t)best;
 }
 
+/* Runtime switch for PICO_STATIC_VIEW_PRIORITY, toggled in the chooser.
+   Default ON: it is what occludes actors behind SQ3's door and motivator and
+   PQ2's parking-lot cars. OFF is the next suspect for Colonel's Bequest's
+   missing copy-protection fingerprints, now that the composed surface has been
+   ruled out on device -- the record already shows this flag deciding whether
+   views appear at all (PQ2's glovebox items were MISSING with it off). */
+int pico_static_view_priority_enabled = 1;
+
 static void
 pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                   rect_t src, rect_t dest,
@@ -666,7 +674,12 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
        Only for GFX_BUFFER_STATIC, and only for the SCI0 0..15 range the packed
        nibble map can represent. */
 #if defined(PICO_STATIC_VIEW_BAKE) || defined(PICO_STATIC_VIEW_PRIORITY)
-    int bake_pri = (bake_static_pri && psram_pri && priority <= 15);
+    /* Gated at runtime too: the toggle must disable BOTH halves of the feature
+       -- the dynview routing in widgets.c AND this priority bake, which is what
+       makes kAddToPic picviews (PQ2's cars) occlude actors. Gating only one
+       would make the A/B mean something other than "feature off". */
+    int bake_pri = (pico_static_view_priority_enabled
+                    && bake_static_pri && psram_pri && priority <= 15);
 #else
     int bake_pri = 0;      /* feature off -> priority map stays the clean background */
     (void)bake_static_pri;
@@ -925,6 +938,7 @@ int pico_static_fullscreen = 0;
    fingerprints and composed is the suspect -- unproven, and this makes it a
    chooser toggle instead of a rebuild. */
 int pico_composed_enabled = 1;
+
 
 static int pico_compose_ensure(struct _pico_state *ps)
 {

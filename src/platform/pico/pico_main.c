@@ -391,6 +391,13 @@ int main(void)
                    pico_composed_enabled ? "ON" : "OFF");
         }
 #endif
+#if defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)
+        {
+            extern int pico_static_view_priority_enabled;
+            printf("[gfx] static view priority %s\n",
+                   pico_static_view_priority_enabled ? "ON" : "OFF");
+        }
+#endif
         printf("Launching freesci_main\n");
         freesci_main(argc, argv);
         printf("freesci_main returned\n");

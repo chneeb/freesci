@@ -3773,6 +3773,35 @@ pre-composed path, not an approximation.
 Both choices are logged at launch (`[snd] launching with sound ...`, `[gfx] composed surface ...`) so any log
 records the combination that produced it.
 
+### RESOLVED-BY-TOGGLE (device-confirmed 2026-09-13) — Colonel's Bequest fingerprints need `[V]` OFF, i.e. `PICO_STATIC_VIEW_PRIORITY`
+
+**Cause identified: `PICO_STATIC_VIEW_PRIORITY`, not the composed surface.** With `[V]` off the
+copy-protection fingerprints render and the game can be entered. Composed was the original suspect and is
+**EXONERATED** -- device-tested with `[C]` off and the fingerprints were still missing.
+
+Consistent with what the record already said about this flag: it decides whether views APPEAR, not merely how
+they are occluded (PQ2's glovebox items were MISSING with it off -- here the polarity is reversed, and the
+fingerprints are missing with it ON). It routes settled `stopUpd` dynviews through the fullscreen static draw,
+so a view that settles immediately -- exactly what a copy-protection screen does -- lands in its blast radius.
+
+**Per-game toggles make this a launch-time choice rather than a rebuild**, which is what turned a parked
+mystery into a two-boot answer: `[C]` first (eliminated composed), then `[V]` (found it).
+
+**Evidence note:** the captured log shows `[gfx] composed surface OFF` but NO
+`[gfx] static view priority` line, so it predates the `[V]` toggle -- the finding rests on the device
+observation, not on that log.
+
+**Colonel's still hits its OWN memory wall**, unchanged by any of this and documented before today:
+`calloc 2060 failed, free=304, arena=466,672` at `reg_t_hashmap.c` `new_reg_t_hash_map` -- 304 bytes free is
+TRUE EXHAUSTION, not fragmentation. The same signature is already on record for Colonel's with sound OFF; with
+sound ON it simply arrives sooner. Toggle `[S]` off to get further.
+
+### SUPERSEDED — the original suspicion (kept for the reasoning)
+
+*The composed surface was suspected purely by symptom; the one-flash A/B disproved it. Attributing a rendering
+bug to the most recently changed subsystem is a reasonable first guess and was wrong here.*
+
+*Historical framing:*
 ### OPEN, PARKED (2026-09-13) — Colonel's Bequest: copy-protection fingerprints do not render
 
 **Blocks entry to the game** (the fingerprints must be compared to proceed). **Suspected `PICO_STATIC_COMPOSED`**
