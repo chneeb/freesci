@@ -384,6 +384,13 @@ int main(void)
                (clock_get_hz(clk_sys) / 1000000u) == (unsigned)PICO_SYS_CLOCK_MHZ
                  ? "" : "  <-- FELL BACK, requested clock not achieved");
         printf("[clk] SD SPI = %d kHz\n", PICO_SD_SPI_KHZ);
+#ifdef PICO_STATIC_COMPOSED
+        {
+            extern int pico_composed_enabled;
+            printf("[gfx] composed surface %s\n",
+                   pico_composed_enabled ? "ON" : "OFF");
+        }
+#endif
         printf("Launching freesci_main\n");
         freesci_main(argc, argv);
         printf("freesci_main returned\n");

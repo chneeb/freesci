@@ -913,8 +913,23 @@ int pico_static_fullscreen = 0;
    every room change (gfxr_free_all_pics), which silently invalidates the old
    offset; composed_valid is cleared in pico_set_static_buffer to force that.
    Returns 0 if there is no PSRAM-backed background to compose from. */
+/* Runtime switch for the whole composed-surface path, toggled in the chooser.
+   Gating it HERE is sufficient and is why this is one line rather than a sweep:
+   every composed reader is downstream of either this function or composed_valid
+   (the bake at ~1062, pico_invalidate_static_region, the static draw at ~1151,
+   and the BACK restore's srcmap choice at ~1376). With this returning 0,
+   composed_valid never becomes true and all four fall back to static_bg -- the
+   exact pre-composed behaviour.
+   Default ON: it is what makes PQ2's dialogs, glovebox and card pickup correct.
+   OFF exists because Colonel's Bequest does not render its copy-protection
+   fingerprints and composed is the suspect -- unproven, and this makes it a
+   chooser toggle instead of a rebuild. */
+int pico_composed_enabled = 1;
+
 static int pico_compose_ensure(struct _pico_state *ps)
 {
+    if (!pico_composed_enabled) return 0;
+
     gfx_pixmap_t *bg = ps->static_bg;
     int bw, bh, y;
     uint32_t addr;

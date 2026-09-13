@@ -31,6 +31,12 @@ bool pico_sd_card_init(void)
 /* Read by pico_main.c when it builds argv: off means pass -q. */
 int pico_sound_enabled = 1;
 #endif
+#ifdef PICO_STATIC_COMPOSED
+/* Defined in pico_driver.c; toggled here so the composed-surface A/B does not
+   need a rebuild. Default ON -- it is what makes PQ2's dialogs and glovebox
+   correct; OFF is for the Colonel's Bequest fingerprint regression. */
+extern int pico_composed_enabled;
+#endif
 
 bool pico_show_dir_chooser(char *out_path, size_t len)
 {
@@ -70,11 +76,15 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
             lcd_print_string("Select SCI game:\n");
 #ifdef PICO_PWM_AUDIO
             lcd_print_string(pico_sound_enabled
-                             ? "  [S] sound: ON\n\n"
-                             : "  [S] sound: off\n\n");
-#else
-            lcd_print_string("\n");
+                             ? "  [S] sound: ON\n"
+                             : "  [S] sound: off\n");
 #endif
+#ifdef PICO_STATIC_COMPOSED
+            lcd_print_string(pico_composed_enabled
+                             ? "  [C] composed: ON\n"
+                             : "  [C] composed: off\n");
+#endif
+            lcd_print_string("\n");
             for (int i = 0; i < count; i++) {
                 char line[NAME_LEN + 4];
                 snprintf(line, sizeof(line), "%s%s\n",
@@ -94,6 +104,11 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
         } else if (key == 0x0A) {   /* ENTER */
             snprintf(out_path, len, "0:/freesci/%s", names[sel]);
             return true;
+#ifdef PICO_STATIC_COMPOSED
+        } else if (key == 'c' || key == 'C') {
+            pico_composed_enabled = !pico_composed_enabled;
+            redraw = true;
+#endif
 #ifdef PICO_PWM_AUDIO
         } else if (key == 's' || key == 'S') {
             /* Per-game sound toggle, so ONE uf2 covers every game: SQ3 and PQ2

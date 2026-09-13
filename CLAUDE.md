@@ -3728,6 +3728,51 @@ SQ3 with sound ON, KQ4 with sound OFF, 0 OOMs, 0 faults, 0 spurious sheds, 1 sta
 6 entries, so appending `-q` wrote `argv[6]` -- one past the end, into whatever followed on the stack. It is
 `char *argv[7]` now. That would have presented as a random fault far from the cause.
 
+### PARKED PLAN (2026-09-13) — build-flag cleanup: ~40 knobs, about 22 are worth keeping
+
+Not urgent, but the count is now a hazard in itself: getting a working PIO sound build currently means setting
+FOUR flags consistently, and getting one wrong fails non-obviously (the cap pre-empting the PSRAM song path
+cost a device cycle for exactly this reason).
+
+**Delete outright -- dead or superseded:**
+
+| flag | why |
+|---|---|
+| `PICO_SOUND_SHED_FLOOR` + the shed code | disabled; the chooser toggle is strictly better (no floor to mis-calibrate, no mid-game teardown, no restart hazard) |
+| `PICO_PWM_CARRIER_MULT` | built for a theory the device DISPROVED; ~3% CPU for no demonstrated benefit |
+| `PICO_PWM_IDLE_LEVEL` | 0 is proven correct -- a constant, not a choice |
+| `FSCI_PROBE_DIRTY` + `FSCI_SIM_PICO_STATIC` | built for the dirty-rect theory, which was ruled out |
+| `PICO_VOCAB_PROBE` | already labelled throwaway; measurement done |
+| `PICO_STATIC_VIEW_BAKE` | OFF, device-confirmed to cause four regressions |
+| `PICO_LCD_16BIT` | documented INCOMPLETE (sheared display) -- finish or drop |
+
+**Collapse the sound cluster (7 flags, ~2 real decisions).** `PICO_PSRAM_SONGS` REQUIRES
+`PICO_STREAM_DECOMPRESS`; `PICO_SONG_MAX_BYTES` already auto-follows `PICO_PSRAM_SONGS`;
+`PICO_STREAM_METHODS` has one sensible value. `PICO_PWM_AUDIO=ON` should imply all of it.
+
+**Promote to always-on:** `PICO_REBOOT_BETWEEN_GAMES`, `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB` (PIO);
+`PICO_PSRAM_SCRIPTS`, `PICO_STATIC_VISUAL`, `PICO_WORKING_PRIORITY` (mapped). All ON, all settled.
+
+**Keep:** target selection, the tuning constants (clock, SD/LCD kHz, `PICO_SND_RATE`, `PICO_SND_BUF_FRAMES`),
+`PICO_STATIC_COMPOSED` (the Colonel's A/B needs it), and the probes that earn their keep -- `MEM`, `GFX`,
+`SND`, `PERF`, `MEM_CENSUS`.
+
+**THE TRADE-OFF TO WEIGH FIRST: a flag is also a RECORD OF A DECISION.** `PICO_STATIC_VIEW_BAKE` being OFF
+documents four measured regressions, and deleting it removes the ability to re-run that A/B. This file keeps
+the reasoning but not the switch. So delete only where the experiment is genuinely closed, and keep what is
+still usefully A/B-able -- which is exactly why `PICO_STATIC_COMPOSED` stays while it is a live suspect.
+
+### DONE (2026-09-13) — chooser toggles: `[S]` sound and `[C]` composed, both no-rebuild A/Bs
+
+`[C]` gates the whole composed-surface path at runtime, default ON. **One line in `pico_compose_ensure`
+suffices**, because every composed reader is downstream of it or of `composed_valid` -- the bake,
+`pico_invalidate_static_region`, the fullscreen static draw, and the BACK restore's `srcmap` choice. With it
+returning 0, `composed_valid` never becomes true and all four fall back to `static_bg`: the exact
+pre-composed path, not an approximation.
+
+Both choices are logged at launch (`[snd] launching with sound ...`, `[gfx] composed surface ...`) so any log
+records the combination that produced it.
+
 ### OPEN, PARKED (2026-09-13) — Colonel's Bequest: copy-protection fingerprints do not render
 
 **Blocks entry to the game** (the fingerprints must be compared to proceed). **Suspected `PICO_STATIC_COMPOSED`**
@@ -3736,7 +3781,7 @@ SQ3 with sound ON, KQ4 with sound OFF, 0 OOMs, 0 faults, 0 spurious sheds, 1 sta
 The log says nothing useful, which is itself consistent with a compositing problem: no OOM, no fault, no GFX
 error near the copy-protection screen, peak `used` 424,000 with headroom. So this is NOT memory.
 
-**The cheap A/B when picked up: `-DPICO_STATIC_COMPOSED=OFF`, one flash.** If the fingerprints come back, the
+**The cheap A/B when picked up: press `[C]` in the chooser -- no rebuild, no flash.** If the fingerprints come back, the
 composed surface is confirmed and the question becomes which of its paths (the bake, the invalidation rules,
 or the `pico_static_fullscreen` routing) drops them. Note the record already lists two OTHER unfixed Colonel's
 rendering bugs (transparent dialog fill, sticky ornate corners), so this may share a cause with them.
