@@ -1498,6 +1498,15 @@ kDrawPic(state_t *s, int funct_nr, int argc, reg_t *argv)
 	int palette = SKPV_OR_ALT(3, 0);
 	gfx_color_t transparent = s->wm_port->bgcolor;
 
+#if defined(HAVE_PICO) && defined(PICO_SOUND_SHED)
+	/* Before the room's decode, not after: this is the allocation that fails
+	   on a heavy game, so the memory has to be back before it runs. */
+	{
+		extern void pico_sound_shed_check(state_t *s);
+		pico_sound_shed_check(s);
+	}
+#endif
+
 	CHECK_THIS_KERNEL_FUNCTION;
 
 	if (s->version < SCI_VERSION_FTU_NEWER_DRAWPIC_PARAMETERS) {

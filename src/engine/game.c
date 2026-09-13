@@ -48,8 +48,12 @@
 #include "gc.h"
 #endif
 #ifdef PICO_VOCAB_PROBE
-#include <malloc.h>
 #include <string.h>
+#endif
+/* mallinfo: needed by PICO_VOCAB_PROBE and by pico_sound_shed_check, so it
+   cannot hang off the probe's guard alone (same condition kgraphics.c uses). */
+#if defined(PICO_VOCAB_PROBE) || defined(HAVE_PICO) || defined(__linux__)
+#include <malloc.h>
 #endif
 
 /* Structures and data from vm.c: */
@@ -477,6 +481,25 @@ _free_graphics_input(state_t *s)
 int
 game_init_sound(state_t *s, int sound_flags)
 {
+#ifdef PICO_SOUND_SHED
+	extern int pico_sound_was_shed;
+#endif
+#ifdef PICO_SOUND_SHED
+	/* Once sound has been shed for lack of heap, it stays shed -- including
+	   across a RESTART, which builds a fresh state_t and would otherwise reset
+	   s->sound.flags and bring the whole stack back on a heap that just proved
+	   it is short.
+	   That is not hypothetical: a KQ4 run shed 22,416 bytes, kept playing, then
+	   restarted and HardFaulted with PC=0xd85a429e and CFSR=1 (IACCVIOL) --
+	   a branch through a stale function pointer, LR in OPL_STATUS_RESET.
+	   The exact dangling pointer was never identified; this fix works by never
+	   re-entering the sound stack rather than by repairing its teardown, which
+	   is the safer of the two given the heap is already exhausted at that
+	   point. */
+	if (pico_sound_was_shed)
+		sound_flags |= SFX_STATE_FLAG_NOSOUND;
+#endif
+
 	if (s->resmgr->sci_version >= SCI_VERSION_01)
 		sound_flags |= SFX_STATE_FLAG_MULTIPLAY;
 
@@ -874,6 +897,64 @@ pico_reclaim_heap(void)
 
 	//run_gc(s);
 }
+
+#ifdef PICO_SOUND_SHED
+/* Set once sound has been shed; survives the state_t teardown a restart does,
+   which is the whole point (see game_init_sound). */
+int pico_sound_was_shed = 0;
+
+/* Shed the whole sound stack when the heap gets tight, so a heavy game keeps
+   PLAYING instead of dying for want of a decode buffer.
+ 
+   WHY NOT FROM pico_reclaim_heap (the on-OOM retry hook just above): that runs
+   from inside a FAILED ALLOCATION, an arbitrary point where engine state may be
+   half-built.  run_gc was called from exactly there and HardFaulted, which is
+   why it sits commented out.  This runs from kDrawPic instead -- a kernel-call
+   boundary, VM between operations, and the same room-transition point where the
+   heaviest allocations happen.
+ 
+   Frees roughly 14 KB at rate/13, and crucially the mixer compbufs are two
+   ~6.8 KB CONTIGUOUS blocks, which is the shape a fragmented heap cannot
+   otherwise produce.
+ 
+   ONE-WAY for the session: restarting would mean re-initialising the mixer and
+   OPL on a heap that just proved it is short.
+ 
+   Safe only because kDoSound now handles a missing song: with NOSOUND set, INIT
+   skips sfx_add_song and sets signal=-1, and PLAY takes the STOPPED branch.
+   Without those this would drop straight into the SCI console. */
+void
+pico_sound_shed_check(state_t *s)
+{
+	struct mallinfo mi;
+	int before;
+
+	if (!s || (s->sound.flags & SFX_STATE_FLAG_NOSOUND))
+		return;                    /* already silent */
+
+	if (PICO_SOUND_SHED_FLOOR <= 0)
+		return;                    /* disabled -- see the calibration note */
+
+	mi = mallinfo();
+	if (mi.fordblks >= PICO_SOUND_SHED_FLOOR)
+		return;
+	before = mi.fordblks;
+
+	sfx_all_stop(&s->sound);
+	sfx_exit(&s->sound);
+	/* sfx_exit frees the song library but does NOT clear the active-song
+	   pointer, and sfx_poll dereferences it (self->song->handle).  Leaving it
+	   dangling would turn a memory shortage into a wild read. */
+	s->sound.song = NULL;
+	s->sound.flags |= SFX_STATE_FLAG_NOSOUND;
+	pico_sound_was_shed = 1;
+
+	mi = mallinfo();
+	sciprintf("[snd] free heap %d below %d: sound shut down for this session,"
+		  " recovered %d bytes\n",
+		  before, (int) PICO_SOUND_SHED_FLOOR, mi.fordblks - before);
+}
+#endif /* PICO_SOUND_SHED */
 #endif
 
 int

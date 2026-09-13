@@ -489,6 +489,30 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_PSRAM_SONGS=1)
     endif()
 
+    # Shed the sound stack if the heap gets tight, so a heavy game (KQ4) keeps
+    # playing instead of dying for a decode buffer. ON whenever sound is on: it
+    # does nothing until the floor is crossed, so a game that fits is unaffected.
+    # Checked at kDrawPic -- a kernel-call boundary -- NOT from the on-OOM retry
+    # hook, which runs inside a failed allocation where run_gc already HardFaulted.
+    # Frees ~14 KB, including two ~6.8 KB CONTIGUOUS mixer compbufs.
+    # DEFAULT 0 = DISABLED. The mechanism works (device: shed 22,416 bytes and
+    # KQ4 kept playing) but no usable floor was found:
+    #   * 40960 was calibrated against "room ready" (post-decode) figures, while
+    #     the check runs at kDrawPic entry = "room enter", where free heap is at
+    #     its MINIMUM. Every game is below 40960 there, so it fired on ALL of
+    #     them -- SQ3 went silent, and PQ2 would have lost its music too.
+    #   * Lowering it does not obviously help: KQ4 FAILED at 20,512 free while
+    #     PQ2 runs fine at 16,952, so free-heap-at-room-enter does not separate
+    #     "about to die" from "normal tight operation". The real failure was
+    #     FRAGMENTATION (20,512 free, 12,532 request), which this does not
+    #     measure.
+    # Set non-zero only with room-enter figures for all three games in hand.
+    set(PICO_SOUND_SHED_FLOOR "0" CACHE STRING "Free-heap floor below which sound is shed (0 = disabled)")
+    if(PICO_PWM_AUDIO)
+        add_compile_definitions(PICO_SOUND_SHED=1)
+        add_compile_definitions(PICO_SOUND_SHED_FLOOR=${PICO_SOUND_SHED_FLOOR})
+    endif()
+
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)

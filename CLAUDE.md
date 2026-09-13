@@ -3712,6 +3712,47 @@ storage. KQ4 had never been tested with sound before, so this is a newly-measure
 
 **PIO sound scoreboard: SQ3 works, PQ2 works with ALL music, KQ4 does not fit.**
 
+### BUILT, DISABLED BY DEFAULT (2026-09-13) — graceful sound shedding: the mechanism works, the TRIGGER does not
+
+`PICO_SOUND_SHED` tears the whole sound stack down at a `kDrawPic` boundary when free heap is low, so a heavy
+game keeps PLAYING instead of dying for a decode buffer. **`PICO_SOUND_SHED_FLOOR` now defaults to 0 =
+DISABLED**, because no usable floor was found.
+
+**The mechanism is proven:** device run on KQ4 shed **22,416 bytes** (more than the ~14 KB predicted) and the
+game kept playing. It is deliberately NOT hooked into `pico_reclaim_heap` — that runs inside a FAILED
+allocation, the arbitrary point where `run_gc` already HardFaulted. It also explicitly NULLs `s->sound.song`,
+because `sfx_exit` frees the song library but leaves the active-song pointer dangling and `sfx_poll`
+dereferences it (`self->song->handle`). And it only works at all because the same day's `ksound.c` fix made a
+missing song graceful; before that, shedding mid-game would have opened the SCI console.
+
+**THE TRIGGER IS THE PROBLEM -- an off-by-a-PHASE calibration error.** The floor of 40960 was picked from
+`room ready` (POST-decode) figures, but the check runs at `kDrawPic` entry = `room enter`, where free heap is
+at its MINIMUM:
+
+| game | `room ready` (used to calibrate) | `room enter` (what the check sees) |
+|---|---|---|
+| PQ2 | 20,376 - 75,120 | **16,952**, 32,408 |
+| KQ4 | 35,632 - 62,280 | fired at **23,816** |
+
+Every game is below 40960 at room-enter, so it fired on ALL of them: **SQ3 went silent and PQ2 would have
+lost its music.** Right metric, wrong point in the cycle.
+
+**Lowering the floor does not obviously rescue the idea:** KQ4 FAILED at 20,512 free while PQ2 runs FINE at
+16,952 -- free-heap-at-room-enter does not separate "about to die" from "normal tight operation". The actual
+failure was FRAGMENTATION (20,512 free vs a 12,532 request), which this metric does not measure at all.
+
+**Second device finding, fixed: a shed must survive a RESTART.** A restart builds a fresh `state_t`, resetting
+`s->sound.flags`, so sound re-initialised on a heap that had just proved it was short and HardFaulted --
+`PC=0xd85a429e`, `CFSR=1` (IACCVIOL, i.e. a branch through a stale function pointer), `LR` in
+`OPL_STATUS_RESET`. `pico_sound_was_shed` is now a global consulted by `game_init_sound`. **The exact dangling
+pointer was never identified** (`opl2_exit` does null its own globals, so the obvious suspect is innocent);
+the fix works by never re-entering the sound stack rather than by repairing the teardown.
+
+**To revive this, measure first:** log `room enter` free across SQ3/PQ2/KQ4 on one build and check whether ANY
+threshold separates KQ4-before-failure from the other two operating normally. If none does, shedding has to
+trigger on a real failed allocation rather than a heuristic -- and that lands back on the unsafe hook, so it
+would need a "shed requested" flag executed at the next safe point.
+
 One untried lever, judged a poor trade: `buf_size` at `rate/13` costs ~5.6 KB over `rate/30`, and KQ4 failed
 by 12,532 with 20,512 fragmented-free. A smaller buffer for KQ4 might squeeze it in at the cost of
 reintroducing the audio sticking.
