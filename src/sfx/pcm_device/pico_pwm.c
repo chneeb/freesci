@@ -72,8 +72,20 @@
 **
 ** So the steady-state poll rate is 22-28Hz, NOT 60Hz: the real floor is about
 ** rate/22 ~ 500, and rate/30 = 367 sits BELOW it -- ordinary frames starve, the
-** PWM IRQ holds last_sample, and the audio sticks (heard on device). rate/11
-** clears the ordinary case with ~2x margin.
+** PWM IRQ holds last_sample, and the audio sticks (heard on device).
+**
+** MEASURED ORDINARY-FRAME DEMANDS, which is what the value must clear
+** (2026-09-13, cap + poll-hook build): PQ2 443, 437; SQ3 477, 632, 705, 831.
+** SQ3 is the higher bar AND it is the config where PIO sound actually works,
+** so it is the one that must not regress -- rate/22 = 501 would have fixed PQ2
+** and left SQ3 sticking.  rate/13 = 848 clears the measured worst case (831)
+** with little margin; rate/11 = 1002 clears it with more, at ~1.7KB more heap
+** and 91ms of latency instead of 77ms.  rate/13 chosen as the balance.
+**
+** THIS ONLY BECAME AFFORDABLE once PICO_SONG_MAX_BYTES freed ~59KB: raising
+** buf_size used to push the song allocation over (rate/11 previously produced
+** NO SOUND AT ALL on PIO for exactly that reason).  The two limits that used to
+** strangle each other no longer do -- PQ2 peaks at 398,464 of 475,104.
 **
 ** The multi-hundred-ms stalls cannot be covered by ANY sane buf_size (9339
 ** frames would be 112KB of compbuf); those are the ring's job, and starvation
@@ -88,7 +100,7 @@
 #ifdef PICO_SND_BUF_FRAMES
 #  define PICO_PWM_BUF_FRAMES PICO_SND_BUF_FRAMES
 #else
-#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 30)
+#  define PICO_PWM_BUF_FRAMES (PICO_SND_RATE / 13)
 #endif
 
 /* Diagnostic: compare PRODUCTION (pushed) against CONSUMPTION (IRQs). Both

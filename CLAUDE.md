@@ -3609,11 +3609,45 @@ entire problem.
 **Verified not a regression:** SQ3 on the same build prints no `[snd] song` line and plays its sounds.
 PQ2 is quiet mainly because the ONE skipped song is its theme — that is the designed trade.
 
-**Still open:** mixer starvation persists (`demand 443` on ordinary frames ~= a 25 Hz poll rate) even with
-poll hooks added to the pic-decode loop (`sci_pic_0.c`) and to `_read()` (`pico_io.c`). Those hooks were built
-for the feep and did not fix it; they are kept because the starvation they target is real (it causes chopping,
-not a tone) but they are NOT sufficient. The path to keeping ALL music rather than capping it is still the
-PSRAM song spike, now with a measured target: ~59 KB in a single block.
+### RESOLVED (device-confirmed 2026-09-13) — ordinary-frame mixer starvation: `PICO_PWM_BUF_FRAMES` rate/30 -> rate/13
+
+**Every ordinary-frame starvation is gone on PQ2.** Before: `demand 443`, `437` against `buf_size 367`.
+After: only 2 starving lines in an 11-room run, at 1,240 and 1,499 -- both TRANSITIONS, both the category no
+sane buffer covers. Run health: 0 OOMs, 0 console, peak `used` 407,776 of 475,104.
+
+**The value is set from measured ordinary-frame demands, not from a rule of thumb**
+(the old comment asserted "the real floor is about rate/22 ~ 500" -- the SQ3 data contradicts it):
+
+| game | ordinary-frame demands |
+|---|---|
+| PQ2 | 443, 437 |
+| **SQ3** | 477, 632, **831** |
+
+SQ3 sets the bar AND is the config where PIO sound actually works, so it must not regress -- `rate/22` = 501
+would have fixed PQ2 and left SQ3 sticking. `rate/13` = **848 frames = 77 ms**, clearing the measured worst
+case (831) by 17 frames. `rate/11` = 1002 is the fallback with real margin, +1.8 KB from here.
+
+| | frames | latency | heap total |
+|---|---|---|---|
+| rate/30 (old) | 367 | 33 ms | 4.3 KB |
+| rate/22 | 501 | 45 ms | 5.9 KB |
+| **rate/13 (now)** | **848** | **77 ms** | **9.9 KB** |
+| rate/11 | 1002 | 91 ms | 11.7 KB |
+
+**THIS ONLY BECAME AFFORDABLE BECAUSE OF THE SONG CAP.** Raising `buf_size` used to push the song allocation
+over -- `rate/11` on PIO previously produced NO SOUND AT ALL for exactly that reason, which is what "pinned
+between two moving limits" meant. Freeing ~59 KB moved one limit, and the two no longer strangle each other.
+**When a value is stuck between two constraints, fixing either one may unstick it -- re-test the pinned value
+after any memory change rather than treating it as settled.**
+
+**Thin margin, stated plainly:** 848 vs SQ3's measured 831. PQ2's run does not exercise that. If an ordinary
+demand above 848 ever appears, go to `rate/11`.
+
+**Still open (unchanged by this):** the TRANSITION stalls, 150-250 ms and occasionally 1.5 s, caused by room
+loads blocking the poll. Poll hooks exist in the pic-decode loop (`sci_pic_0.c`) and `_read()` (`pico_io.c`);
+they help but are NOT sufficient, and no buffer size can cover a 1.5 s gap. Also unchanged: PQ2's theme is
+still SKIPPED, which is the designed trade -- keeping ALL music needs the PSRAM song spike, now with a
+measured target of ~59 KB in a single block.
 
 ⚠️ **OPEN: after a failed game, no further game starts** ("Please wait" then exit) until a power cycle.
   Not diagnosed. The obvious leaks were checked and are clean (`opl2_exit` does `OPLDestroy`, `mix_exit`
