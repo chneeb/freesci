@@ -27,6 +27,11 @@ bool pico_sd_card_init(void)
 #define MAX_GAMES 32
 #define NAME_LEN  32
 
+#ifdef PICO_PWM_AUDIO
+/* Read by pico_main.c when it builds argv: off means pass -q. */
+int pico_sound_enabled = 1;
+#endif
+
 bool pico_show_dir_chooser(char *out_path, size_t len)
 {
     char names[MAX_GAMES][NAME_LEN];
@@ -62,7 +67,14 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
     while (1) {
         if (redraw) {
             lcd_clear();
-            lcd_print_string("Select SCI game:\n\n");
+            lcd_print_string("Select SCI game:\n");
+#ifdef PICO_PWM_AUDIO
+            lcd_print_string(pico_sound_enabled
+                             ? "  [S] sound: ON\n\n"
+                             : "  [S] sound: off\n\n");
+#else
+            lcd_print_string("\n");
+#endif
             for (int i = 0; i < count; i++) {
                 char line[NAME_LEN + 4];
                 snprintf(line, sizeof(line), "%s%s\n",
@@ -82,6 +94,16 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
         } else if (key == 0x0A) {   /* ENTER */
             snprintf(out_path, len, "0:/freesci/%s", names[sel]);
             return true;
+#ifdef PICO_PWM_AUDIO
+        } else if (key == 's' || key == 'S') {
+            /* Per-game sound toggle, so ONE uf2 covers every game: SQ3 and PQ2
+               play fine with sound, KQ4 does not fit and needs it off.  Reading
+               it at launch beats any in-engine heuristic -- an automatic shed
+               was tried and no free-heap threshold could separate "about to
+               die" from "normal tight operation". */
+            pico_sound_enabled = !pico_sound_enabled;
+            redraw = true;
+#endif
         } else if (key == 0xB1) {   /* ESC */
             return false;
         }

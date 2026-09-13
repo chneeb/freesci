@@ -3710,7 +3710,38 @@ So this is the general fragmentation wall on the heaviest game (150 pics, arena 
 ceiling). What sound costs KQ4 is the BASELINE stack (~7.7 KB `.bss` + ~10 KB mixer buffers), not song
 storage. KQ4 had never been tested with sound before, so this is a newly-measured limit, not a regression.
 
-**PIO sound scoreboard: SQ3 works, PQ2 works with ALL music, KQ4 does not fit.**
+**PIO sound scoreboard: SQ3 works, PQ2 works with ALL music, KQ4 does not fit** -- and the CHOOSER TOGGLE
+makes that a per-game choice at launch rather than a build-time one (below).
+
+### DONE (device-confirmed 2026-09-13) — per-game sound toggle in the chooser: ONE uf2 for every game
+
+`[S]` in the game chooser toggles sound; the header line shows `[S] sound: ON` / `off`, and OFF simply appends
+`-q` to the argv, i.e. the long-established silent path, not a new mechanism. A `[snd] launching with sound
+ON/OFF` line records the choice.
+
+**This is the answer the automatic shed was reaching for.** Read at LAUNCH it beats an in-engine heuristic on
+every axis: no floor to mis-calibrate, no mid-game teardown, no restart hazard. Device-confirmed in ONE boot:
+SQ3 with sound ON, KQ4 with sound OFF, 0 OOMs, 0 faults, 0 spurious sheds, 1 starvation line (a transition),
+2 chooser reboots, peak `used` 405,000 of 475,104.
+
+**TRAP caught before it shipped:** the sound build's `argv[]` was a bare initialiser list sized to EXACTLY its
+6 entries, so appending `-q` wrote `argv[6]` -- one past the end, into whatever followed on the stack. It is
+`char *argv[7]` now. That would have presented as a random fault far from the cause.
+
+### OPEN, PARKED (2026-09-13) — Colonel's Bequest: copy-protection fingerprints do not render
+
+**Blocks entry to the game** (the fingerprints must be compared to proceed). **Suspected `PICO_STATIC_COMPOSED`**
+(default ON for PIO) -- unproven, and attributed by symptom rather than evidence.
+
+The log says nothing useful, which is itself consistent with a compositing problem: no OOM, no fault, no GFX
+error near the copy-protection screen, peak `used` 424,000 with headroom. So this is NOT memory.
+
+**The cheap A/B when picked up: `-DPICO_STATIC_COMPOSED=OFF`, one flash.** If the fingerprints come back, the
+composed surface is confirmed and the question becomes which of its paths (the bake, the invalidation rules,
+or the `pico_static_fullscreen` routing) drops them. Note the record already lists two OTHER unfixed Colonel's
+rendering bugs (transparent dialog fill, sticky ornate corners), so this may share a cause with them.
+
+**GOOD NEWS from the same run: Colonel's Bequest intro sound WORKS** -- a third game playing music on PIO.
 
 ### BUILT, DISABLED BY DEFAULT (2026-09-13) — graceful sound shedding: the mechanism works, the TRIGGER does not
 

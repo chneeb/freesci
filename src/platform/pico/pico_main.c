@@ -336,7 +336,10 @@ int main(void)
            When PICO_PWM_AUDIO is ON, drop -q so the SCI sound pipeline
            runs and feeds the PWM PCM device. */
 #ifdef PICO_PWM_AUDIO
-        char *argv[] = {
+        /* One spare slot: the chooser's [S] toggle may append -q below, and a
+           bare initialiser list would size this exactly, making that append a
+           one-past-the-end write. */
+        char *argv[7] = {
             "freesci",
             "-d", game_dir,
             "-g", "pico",
@@ -352,6 +355,20 @@ int main(void)
             NULL
         };
         int argc = 6;
+#endif
+#ifdef PICO_PWM_AUDIO
+        /* Sound builds normally omit -q; the chooser's [S] toggle puts it back
+           so one uf2 serves games that fit with sound and games that do not. */
+        {
+            extern int pico_sound_enabled;
+
+            if (!pico_sound_enabled) {
+                argv[argc++] = "-q";
+                argv[argc] = NULL;
+            }
+            printf("[snd] launching with sound %s\n",
+                   pico_sound_enabled ? "ON" : "OFF");
+        }
 #endif
 
         {
