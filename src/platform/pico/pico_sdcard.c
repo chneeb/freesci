@@ -37,7 +37,8 @@ int pico_sound_enabled = 1;
    correct; OFF is for the Colonel's Bequest fingerprint regression. */
 extern int pico_composed_enabled;
 #endif
-#if defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)
+#if (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)) \
+    && !defined(PICO_WORKING_PRIORITY)
 extern int pico_static_view_priority_enabled;
 #endif
 
@@ -87,7 +88,8 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
                              ? "  [C] composed: ON\n"
                              : "  [C] composed: off\n");
 #endif
-#if defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)
+#if (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)) \
+    && !defined(PICO_WORKING_PRIORITY)
             lcd_print_string(pico_static_view_priority_enabled
                              ? "  [V] static view pri: ON\n"
                              : "  [V] static view pri: off\n");
@@ -112,7 +114,8 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
         } else if (key == 0x0A) {   /* ENTER */
             snprintf(out_path, len, "0:/freesci/%s", names[sel]);
             return true;
-#if defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)
+#if (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)) \
+    && !defined(PICO_WORKING_PRIORITY)
         } else if (key == 'v' || key == 'V') {
             pico_static_view_priority_enabled = !pico_static_view_priority_enabled;
             redraw = true;

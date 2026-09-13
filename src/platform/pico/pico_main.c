@@ -391,7 +391,8 @@ int main(void)
                    pico_composed_enabled ? "ON" : "OFF");
         }
 #endif
-#if defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)
+#if (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)) \
+    && !defined(PICO_WORKING_PRIORITY)
         {
             extern int pico_static_view_priority_enabled;
             printf("[gfx] static view priority %s\n",

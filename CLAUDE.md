@@ -3784,6 +3784,14 @@ they are occluded (PQ2's glovebox items were MISSING with it off -- here the pol
 fingerprints are missing with it ON). It routes settled `stopUpd` dynviews through the fullscreen static draw,
 so a view that settles immediately -- exactly what a copy-protection screen does -- lands in its blast radius.
 
+**Each target offers only the toggles that DO something** -- verified from the ELF strings:
+PIO+sound shows `[S] [C] [V]`, PIO silent shows `[C] [V]`, **mapped shows `[S]` only**. `[C]` was already
+excluded there (`PICO_STATIC_COMPOSED=OFF`); `[V]` had to be gated on `!PICO_WORKING_PRIORITY` because it is
+INERT on mapped -- that flag compiles the `widgets.c` routing out, and its real working priority map makes
+`row_pri` non-NULL, which forces `psram_pri` and therefore `bake_pri` to 0 whatever the toggle says.
+Harmless, but a toggle that silently does nothing invites a false A/B, which is the exact failure mode that
+cost time elsewhere in this session.
+
 **Per-game toggles make this a launch-time choice rather than a rebuild**, which is what turned a parked
 mystery into a two-boot answer: `[C]` first (eliminated composed), then `[V]` (found it).
 

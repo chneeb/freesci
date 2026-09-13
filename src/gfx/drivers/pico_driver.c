@@ -591,6 +591,12 @@ nearest_pal(struct _pico_state *ps, int r, int g, int b)
    missing copy-protection fingerprints, now that the composed surface has been
    ruled out on device -- the record already shows this flag deciding whether
    views appear at all (PQ2's glovebox items were MISSING with it off). */
+/* NB the chooser only OFFERS this toggle when PICO_WORKING_PRIORITY is absent
+   (i.e. the PIO target).  On the mapped target the feature is inert anyway --
+   the widgets.c routing is compiled out by that flag, and its real working
+   priority map makes row_pri non-NULL, which forces psram_pri (and therefore
+   bake_pri) to 0 regardless of this variable.  Showing a toggle that silently
+   does nothing is worse than not showing one. */
 int pico_static_view_priority_enabled = 1;
 
 static void
