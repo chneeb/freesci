@@ -40,6 +40,76 @@ BUILD
 RUN
     ./decompdiff ~/Downloads/quest/sq3 ~/Downloads/quest/pq2 ~/Downloads/quest/kq4
 
+NEGATIVE CONTROL -- RUN THIS, DO NOT SKIP IT
+    A green result here is worthless on its own: the harness reported 0 differ
+    for weeks before any streaming code existed. Prove the path under test is
+    actually live by mutating the COPY and confirming the differ catches it:
+
+        sed -i 's|return stream_win\[i - s->base\];|return stream_win[(i - s->base) ^ 1];|' \
+            stream_decomp.c
+        # rebuild, then:
+        ./decompdiff ~/Downloads/quest/sq3      -> expect 497 differ, not 0
+        cp ../../src/scicore/decompress0.c stream_decomp.c   # restore
+
+    497 is exactly SQ3's method-1 count, which is the point: the mutation hits
+    every streamed resource and nothing else. If a mutation produces 0 differ,
+    the path is not being exercised and the pass means nothing.
+
+    Mutate each method's path SEPARATELY, or one passing method hides another.
+    Expected counts on SQ3 (method0=32, method1=497, method2=106):
+
+        read(resh, result->data + done, ...)  -> 32   (method 0 only)
+        return stream_win[i - s->base]        -> 603  (= 497 + 106; method 0
+                                                       uses no window, so it
+                                                       must stay unaffected)
+        stream_nodes[k] = SRC(2 + k)          -> 106  (method 2 only)
+        restored                              -> 0
+
+MEASURING THE COST -- USE THE RIGHT TIMER
+    The obvious instrument is the WRONG one. [perf] pic N decode (FSCI_PROBE_PERF)
+    times a pic, and in SQ3 pics are method 2 (106) or method 0 (9) -- NEVER
+    method 1. So it is structurally blind to what phase 1 changed, and an A/B on
+    it came back +0.3% having exercised the streaming path zero times.
+
+    SQ3 resource type x compression method (METHODS=1 ./decompdiff <dir>):
+        method 0   pic 9, text 13, sound 8, script 1, cursor 1
+        method 1   view 186, script 122, text 83, sound 79, font 10, vocab 9,
+                   patch 6, cursor 2          <- what streaming covers
+        method 2   pic 106                    <- pics, and nothing else
+
+    So use [perf] decompress since last room, which times decompress0 itself
+    (decompress0.c + the print in operations.c, both under FSCI_PROBE_PERF).
+
+    Before trusting ANY A/B here, check that the path under test is reachable
+    from the thing being timed. That mistake has now been made twice in this
+    project: drvdiff passed three times on paths its scene never walked, and
+    the first streaming A/B timed pics that cannot use method 1.
+
+STATUS -- ALL THREE METHODS STREAM
+    method 0   reads straight into result->data, no window at all; also drops
+               the memcpy that used to follow. THIS IS THE ONE THAT MATTERS.
+    method 1   decrypt1 through the window.
+    method 2   decrypt2: Huffman node table copied to SRAM (stream_nodes[510]),
+               bitstream through the window.
+
+    decompress0 no longer allocates the compressed input buffer for any SCI0
+    method -- sci_malloc_sram(compressedLength) is gone from the common path.
+
+SIZING THE PRIZE -- AND THE SEQUENCING MISTAKE IT EXPOSED
+    The phases were originally ordered by RESOURCE COUNT (method 1 is 1747 of
+    2139), which is the wrong axis: the problem is CONTIGUITY, so what matters
+    is the largest BLOCK. Measured largest compressed input per method:
+
+        method 0   59,153 (pq2 sound.001)   41,747 (kq4 sound.200)
+        method 1   15,685 / 14,434 / 19,087
+        method 2   10,385 /  7,860 / 10,429
+
+    The 59,153-byte allocation that motivated this entire exercise is method 0
+    -- the case that is BOTH the biggest prize and the cheapest to implement
+    (no window, no accessor, no refill). It was scheduled last. Method 1, done
+    first, has a best case of 19 KB and measured +50% decompress time before
+    tuning. Order by the quantity that actually binds.
+
 BASELINE (before any streaming code exists -- the harness validating itself)
     sq3  635 resources, 0 differ    methods  0=32  1=497  2=106
     pq2  538 resources, 0 differ    methods  0=20  1=452  2=66

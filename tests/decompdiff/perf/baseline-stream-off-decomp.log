@@ -1,0 +1,54 @@
+[mem] after chooser: free=3696 arena=3696 used=0
+Selected: 0:/freesci/sq3
+[mem] pre-launch: free=3696 arena=3696 used=0
+[clk] sys_clk = 133000000 Hz (requested 133 MHz)
+[clk] SD SPI = 30000 kHz
+Launching freesci_main
+FreeSCI 0.6.5-devel Copyright (C) 1999-2007
+ Dmitry Jemerov, Christopher T. Lansdown, Sergey Lapin, Rickard Lind,
+ Carl Muckenhoupt, Christoph Reichenbach, Magnus Reftel, This program is free software. You can copy and/or modify it freReading configuration...
+Detecting interpreter and resource versions...
+Scanning 'SCIV.EXE' with decompressor 'raw'
+Interpreter version: 0.000.685 (by executable scan)
+Interpreter version: 0.000.685 (by hash code F8F4913F)
+Game identified as 'SQ3'
+Using interpreter version 0.000.685
+Loading resources...
+Resmgr: Detected SCI0
+[perf] resource load: 14991 ms (635 resources)
+FreeSCI, version 0.6.5-devel
+Warning: Kernel function [Unknown][71] unmapped
+Handled 113/114 kernel functions, mapping 108 and ignoring 5.
+Initializing vocabulary
+Pico: parser vocab loaded, 1489 words PACKED (GNF rebuilt per command).
+Engine initialized
+ "SQ3" at 0001:0dd4
+Initializing directories...
+Initializing graphics
+[SFX] Sound disabled.
+Emulating SCI version 0.000.685
+Graphics: Using the pico driver 0.1
+ Calling SQ3::play()
+[perf] pic 777 decode: 82108 us
+[perf] decompress since last room: 491203 us over 148 resources (274322 bytes in)
+b-moveCnt action based on checksum: increment
+[perf] pic 900 decode: 79285 us
+[perf] decompress since last room: 8742 us over 5 resources (3646 bytes in)
+[perf] pic 1 decode: 134513 us
+[perf] decompress since last room: 23345 us over 6 resources (12434 bytes in)
+malloc 64000 failed to allocate memory
+malloc 64000 failed to allocate memory
+[perf] pic 150 decode: 130303 us
+[perf] decompress since last room: 25037 us over 7 resources (13386 bytes in)
+FSCI: ERROR in kmem (/home/chneeb/Source/freesci-archive/src/engine/kernel.c L407): Error: kmem() with invalid handle
+[perf] pic 2 decode: 161509 us
+[perf] decompress since last room: 45993 us over 13 resources (26070 bytes in)
+ Game::play() finished.
+Freeing miscellaneous data...
+Freeing graphics
+Freeing VM memory
+Freeing state-dependant data
+Freeing vocabulary
+freesci_main returned
+[mem] post-trim: free=161432 arena=167536 used=6104
+[mem] rebooting into the chooser for a cold heap

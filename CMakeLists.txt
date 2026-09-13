@@ -407,8 +407,22 @@ if(PLATFORM STREQUAL "pico")
     # front. NOT tied to HAVE_PICO on purpose: the desktop differ
     # (tests/decompdiff) builds both paths to prove them byte-identical.
     option(PICO_STREAM_DECOMPRESS "Stream the compressed input buffer instead of reading it whole" OFF)
+    # Which compression methods stream. Bit 0 = method 0, 1 = method 1, 2 = method 2.
+    #
+    # Defaults to 1 (method 0 ONLY) on device evidence, not taste. The cost of
+    # streaming is paid per read() and so scales with RESOURCE COUNT; the benefit
+    # scales with the largest BLOCK -- and they point opposite ways:
+    #     method 0  largest 59,153 / 41,747      32 resources in SQ3
+    #     method 1  largest 15,685 / 19,087     497 resources
+    #     method 2  largest 10,385 / 10,429     106 resources
+    # Streaming all three measured 594 -> 819 ms of decompress over SQ3's first
+    # five rooms (+37.9%). Method 0 alone captures the 59 KB allocation this work
+    # was for, at a small fraction of that cost, and drops a 59 KB memcpy too.
+    # Set to 7 to stream everything.
+    set(PICO_STREAM_METHODS "1" CACHE STRING "Bitmask of compression methods to stream (1=m0, 2=m1, 4=m2)")
     if(PICO_STREAM_DECOMPRESS)
         add_compile_definitions(PICO_STREAM_DECOMPRESS=1)
+        add_compile_definitions(PICO_STREAM_METHODS=${PICO_STREAM_METHODS})
     endif()
 
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)

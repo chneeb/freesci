@@ -4370,8 +4370,39 @@ direction: the item-2 buffers are load-bearing, so there is no shrinking them to
 **Verdict: sound on PIO is an SQ3-specific build.** The failure is a clean legible `[OOM]` halt, not a
 fault, so trying it costs nothing but a power cycle.
 
-**STREAMING THE COMPRESSED INPUT -- flag + harness landed, implementation not written
-(`PICO_STREAM_DECOMPRESS`, default OFF).** That buffer (`decompress0.c` `sci_malloc_sram(compressedLength)`)
+**STREAMING THE COMPRESSED INPUT -- BUILT, VERIFIED, DEVICE-TESTED, and currently WORTH ~NOTHING
+(`PICO_STREAM_DECOMPRESS`, default OFF; `PICO_STREAM_METHODS` default 1). Read the verdict before
+spending any more time here.**
+
+**VERDICT (2026-09-13): it works exactly as designed and has no live failure to fix.** Kept default-OFF as
+banked insurance, NOT because it earns its place today.
+- **With sound OFF (the shipping config) `METHODS=1` is INERT.** Every large method-0 block is a SOUND
+  resource, and sound resources never load under `-q`: `ksound.c:228`'s `build_iterator` (the SCI0 path) sits
+  *inside* `if (!(s->sound.flags & SFX_STATE_FLAG_NOSOUND))`. Largest method-0 NON-sound block in any of the
+  three games is **327 bytes**.
+- **With sound ON it works, but rescues nothing that matters.** Device-confirmed on PQ2: the
+  `decompress0.c:370` fatal halt is GONE (`malloc 59165 failed` now lands on the *output* buffer, which
+  routes through `pico_decompress_alloc` -> raw malloc -> NULL -> the existing graceful skip, and the game
+  plays on). But PQ2+sound then dies anyway at `reg_t_hashmap.c:42` with **`chunks=24`** (unfragmented) and
+  **used=442,272 of a 475,104 ceiling** -- TRUE EXHAUSTION, which streaming cannot touch. And SQ3+sound,
+  which does work, has a largest method-0 sound block of only 9,774 bytes, so it was never failing.
+- **`METHODS=7` addresses a real class** (the 7-19 KB method-1 blocks; the recorded 7,286-byte OOM at that
+  same line was almost certainly one) **but costs 4.6 KB permanent `.bss` + 38% decompress time** -- and the
+  measured failure above is steady-state exhaustion, where more `.bss` is strictly worse. It helps
+  fragmentation-shaped failures and hurts exhaustion-shaped ones.
+- **Both recorded failures at that line are otherwise accounted for**: the cross-game one is fixed by the
+  chooser reboot, the sound one is on a config that does not fit regardless.
+
+**THE PROCESS LESSON, which is the real return here: ask "which resources actually load in the SHIPPING
+configuration?" BEFORE building anything.** That single question would have shown the method-0 prize is
+sound-only and sound is off by default, and the work would have been scoped differently or skipped. Phases
+were first sequenced by RESOURCE COUNT (wrong -- the problem is contiguity, so block SIZE binds), then
+corrected to block size -- but REACHABILITY was never checked at all until after phase 3.
+
+---
+
+*Implementation detail (all verified, kept for whenever this is needed):*
+ That buffer (`decompress0.c` `sci_malloc_sram(compressedLength)`)
 is the largest single contiguous transient left on the resource path and a recorded OOM site. NB this is NOT
 the thing that was tried and reverted before: that was a fixed permanently-resident 16KB *scratch* for the
 same site, both too small (59,153 here) and net-negative in arena. Streaming is a different shape.
@@ -4391,11 +4422,24 @@ from the file and a PSRAM round-trip would buy nothing.
 **Gated on `PICO_STREAM_DECOMPRESS`, deliberately NOT on `HAVE_PICO`**, so the desktop differ can build and
 prove both paths.
 
-**`tests/decompdiff` is built and baselined** -- decompresses every resource of a game twice (stock vs
-streaming) and compares return code, `result->size` and every output byte. Baseline with both copies still
-identical: **2,139 resources across SQ3/PQ2/KQ4, 0 differ**, and the `methods exercised` line confirms all
-three methods are covered in all three games (0: 32/20/21, 1: 497/452/798, 2: 106/66/147) -- that line exists
-because `drvdiff` passed three times on paths its scene never walked. See `tests/decompdiff/README`.
+**`tests/decompdiff` proves it byte-identical** -- decompresses every resource twice (stock vs streaming),
+comparing return code, `result->size` and every output byte. **2,139 resources across SQ3/PQ2/KQ4, 0 differ,
+at every one of `METHODS=0/1/2/3/4/7`.** Per-method negative controls confirm each path is actually live
+(mutate method 0's read -> exactly 32 diffs on SQ3; mutate the window -> 603 = 497+106, method 0 correctly
+unaffected since it uses no window; mutate the node table -> 106). That rigour exists because `drvdiff`
+passed three times on paths its scene never walked. See `tests/decompdiff/README`.
+
+**MEASURED COST (device, SQ3 first five rooms, `[perf] decompress since last room`):** streaming all three
+methods took decompress **594 -> 819 ms (+37.9%)**; method 1 alone with a 1 KB window and an unconditional
+seek was 889 ms. The tuning that closed that gap (sequential-aware refill + 1 KB -> 4 KB window) recovered
+only ~24% -- **the seek hypothesis was mostly WRONG; per-`read()` FatFS overhead dominates.** `METHODS=1`
+costs **0 bytes `.bss`** (with method 1/2 off, `stream_win` and `stream_nodes` are unreferenced and the
+compiler drops them) and +136 bytes of flash.
+
+**INSTRUMENT TRAP, cost a device cycle:** the obvious timer `[perf] pic N decode` is USELESS here -- pics are
+method 2 (or 0), NEVER method 1, so it is structurally blind to what streaming changed. An A/B on it came
+back +0.3% having exercised the streaming path zero times. `[perf] decompress since last room` (decompress0.c
++ operations.c, `FSCI_PROBE_PERF`) times `decompress0` itself and is the right one.
 
 **The one implementation subtlety already identified:** cap total reads at `compressedLength` so the file
 position on return matches the stock path -- a read-ahead window that over-reads past the compressed block

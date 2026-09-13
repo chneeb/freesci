@@ -1,0 +1,82 @@
+[mem] after chooser: free=3896 arena=3896 used=0
+Selected: 0:/freesci/pq2
+[mem] pre-launch: free=3896 arena=3896 used=0
+[clk] sys_clk = 133000000 Hz (requested 133 MHz)
+[clk] SD SPI = 30000 kHz
+Launching freesci_main
+FreeSCI 0.6.5-devel Copyright (C) 1999-2007
+ Dmitry Jemerov, Christopher T. Lansdown, Sergey Lapin, Rickard Lind,
+ Carl Muckenhoupt, Christoph Reichenbach, Magnus Reftel,  Walter van Niftrik, Rainer Canavan, Ruediger Hanke, Hugues ValoReading configuration...
+Detecting interpreter and resource versions...
+Scanning 'SCIV.EXE' with decompressor 'raw'
+Interpreter version: 0.000.490 (by executable scan)
+Interpreter version: 0.000.490 (by hash code 4BD66036)
+Game identified as 'PQ2'
+Using interpreter version 0.000.490
+Loading resources...
+Patching "PATCH.000": OK
+Patching "PATCH.101": OK
+Resmgr: Detected SCI0
+[perf] resource load: 14087 ms (540 resources)
+FreeSCI, version 0.6.5-devel
+Warning: SCI version believed to have 114 kernel functions, but only 113 reported-- filling up remaining 1
+Warning: Kernel function [Unknown][70] unmapped
+Warning: Flagging kernel function 71 as unknown
+Handled 112/113 kernel functions, mapping 107 and ignoring 5.
+Initializing vocabulary
+Pico: parser vocab loaded, 1843 words PACKED (GNF rebuilt per command).
+Engine initialized
+ "PQ" at 0001:0d26
+Initializing directories...
+Initializing graphics
+[SFX] Initialised timer 'pico-pwm-timer', v0.1
+[SND:pico-pwm] Initialised: 11025Hz mono 8-bit PWM
+ ---> 367/11025/11025/2 = 736
+ ---> --> 1472 for 0x20028cf8 at 0x20056630
+[SFX] Using song player 'polled', v0.1
+Emulating SCI version 0.000.490
+Graphics: Using the pico driver 0.1
+ Calling PQ::play()
+FIXME: Implement volume
+[sfx-mixer] Output starving: demand 2672 > buf_size 367 (~242 ms frame at 11025Hz)
+[mem] room enter nr=450: free=7744 arena=343864 used=336120
+[mem] room ready nr=450: free=42904 arena=397112 used=354208
+[mem] PXM id=0101c2 l=0 c=0 ixl=320 iyl=200 xl=320 yl=200 dsz=-1071804783 idx=00000000 data=00000000 alpha=00000000 col=2000B694/256 psram=1 nxt=2005F978
+[mem] PXM id=0101c2 l=1 c=0 ixl=320 iyl=200 xl=0 yl=0 dsz=327767 idx=00000000 data=00000000 alpha=00000000 col=200061C8/16 psram=1 nxt=2005F918
+[mem] PXM id=0101c2 l=2 c=0 ixl=320 iyl=200 xl=0 yl=0 dsz=1979992629 idx=00000000 data=00000000 alpha=00000000 col=200061C8/16 psram=1 nxt=2005FA60
+[mem] PXM id=ffffffff l=0 c=0 ixl=321 iyl=191 xl=320 yl=190 dsz=65536 idx=00000000 data=00000000 alpha=00000000 col=00000000/0 psram=0 nxt=2002AAC0
+[mem] PXM id=ffffffff l=0 c=0 ixl=17 iyl=17 xl=16 yl=16 dsz=1953653092 idx=00000000 data=20029418 alpha=00000000 col=00000000/0 psram=0 nxt=20028AD0
+[mem] PXM id=0303e5 l=0 c=0 ixl=16 iyl=16 xl=16 yl=16 dsz=537036600 idx=200275C0 data=20025AF8 alpha=2002A9B8 col=20006348/2 psram=0 nxt=20028988
+[mem] PXM id=ffffffff l=0 c=0 ixl=320 iyl=200 xl=0 yl=0 dsz=537036600 idx=00000000 data=00000000 alpha=00000000 col=20003E84/16 psram=1 nxt=00000000
+[mem] BREAKDOWN nr=450: scripts=13 (32612 B, 0 unlocked) objvar=10136 B (116 obj) clonevar=112 B (2) localblk=1328 B clones=2/16 lists=8/12 nodes=40/48 tablemem=1808 hunks=0/0 (0 B) dynmem=0 (0 B) locals=6 sysstr=1 gfxpxm=7 (2872 B, big=0101c2/0/0 2136 B, bad=2/7) widgets=5 grab=1/1 (256 B live) gfree=0 psgrab=1 reslru=0 reslock=603 | scilive=902640 rawgap=-548696 tracked=49124 untracked=304820 uord=353944 ford=43168 arena=397112 chunks=12
+b-moveCnt action based on checksum: increment
+[mem] room enter nr=0: free=20152 arena=397112 used=376960
+[mem] room ready nr=0: free=20400 arena=397112 used=376712
+[mem] BREAKDOWN nr=0: scripts=14 (43212 B, 1 unlocked) objvar=18216 B (170 obj) clonevar=112 B (2) localblk=1444 B clones=2/28 lists=8/12 nodes=40/48 tablemem=2336 hunks=0/0 (0 B) dynmem=0 (0 B) locals=7 sysstr=1 gfxpxm=7 (2784 B, big=010000/0/0 2136 B, bad=3/7) widgets=5 grab=1/1 (256 B live) gfree=0 psgrab=3 reslru=0 reslock=603 | scilive=964292 rawgap=-588044 tracked=68360 untracked=307888 uord=376248 ford=20864 arena=397112 chunks=16
+malloc 59165 failed to allocate memory
+[VM] Attempt to use invalid param variable 0002 (out of range [0..0]) in /home/chneeb/Source/freesci-archive/src/engine/vm.c, line 1463
+[VM]   -> READ at script 0010:040e (idx=2, valid [0..0])
+[VM] Access within stack boundaries; access granted.
+[VM] Attempt to use invalid param variable 0003 (out of range [0..0]) in /home/chneeb/Source/freesci-archive/src/engine/vm.c, line 1463
+[VM]   -> READ at script 0010:0410 (idx=3, valid [0..0])
+[VM] Access within stack boundaries; access granted.
+[VM] Attempt to use invalid param variable 0002 (out of range [0..0]) in /home/chneeb/Source/freesci-archive/src/engine/vm.c, line 1463
+[VM]   -> READ at script 0010:040e (idx=2, valid [0..0])
+[VM] Access within stack boundaries; access granted.
+[VM] Attempt to use invalid param variable 0003 (out of range [0..0]) in /home/chneeb/Source/freesci-archive/src/engine/vm.c, line 1463
+[VM]   -> READ at script 0010:0410 (idx=3, valid [0..0])
+[VM] Access within stack boundaries; access granted.
+[mem] room enter nr=46: free=16952 arena=462648 used=445696
+[mem] room ready nr=46: free=20376 arena=462648 used=442272
+[mem] BREAKDOWN nr=46: scripts=14 (44578 B, 0 unlocked) objvar=18532 B (174 obj) clonevar=2136 B (38) localblk=1444 B clones=38/40 lists=9/12 nodes=47/64 tablemem=3184 hunks=0/0 (0 B) dynmem=0 (0 B) locals=7 sysstr=1 gfxpxm=7 (2995 B, big=01002e/0/0 2136 B, bad=2/7) widgets=5 grab=1/1 (256 B live) gfree=0 psgrab=5 reslru=0 reslock=603 | scilive=1040328 rawgap=-599264 tracked=73125 untracked=367939 uord=441064 ford=21584 arena=462648 chunks=24
+[sfx-mixer] Output starving: demand 562 > buf_size 367 (~50 ms frame at 11025Hz)
+calloc 2060 failed to allocate memory
+calloc 2060 failed to allocate memory
+[OOM]
+calloc
+size=0x0000080c
+free=0x00001018
+arena=0x00071f38
+line=0x0000002a
+reg_t_hashmap.c
+new_reg_t_hash_map

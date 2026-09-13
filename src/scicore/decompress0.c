@@ -80,6 +80,146 @@ pico_decompress_alloc(int type, unsigned int size)
 #  define DECOMPRESS_FREE_DATA(p) free(p)
 #endif
 
+#ifdef PICO_STREAM_DECOMPRESS
+/* ---- sliding window over the compressed block ------------------------------
+   Replaces the one contiguous sci_malloc_sram(compressedLength) with a small
+   fixed window refilled from the fd.  That allocation is the largest single
+   contiguous transient left on the resource path -- 59,153 bytes for one PQ2
+   resource -- and a recorded OOM site; nothing about the decode actually needs
+   the whole block resident.
+
+   The window lives in .bss rather than on the stack ON PURPOSE: decompress0's
+   own frame is on the same 8 KB core0 stack that decrypt1's 16 KB of token
+   tables once overflowed into live heap (the 2026-06-08 HardFault).  Trading a
+   ~59 KB contiguous transient for ~1 KB of permanent .bss is the whole point,
+   and it also removes an allocation-failure path instead of adding one.  Costs
+   nothing when PICO_STREAM_DECOMPRESS is OFF, which is the default.
+
+   Refill seeks absolutely, so a BACKWARD read is merely slow rather than wrong.
+   That is deliberate: it makes the window correct by construction instead of
+   correct only while the "strictly forward" reading of decrypt1/decrypt2 holds.
+
+   NOT gated on HAVE_PICO -- tests/decompdiff builds this on the desktop to
+   prove it byte-identical to the stock path over every resource of every game. */
+/* 4 KB rather than 1 KB: the average method-1 block is ~1.9 KB, so a 1 KB
+   window cost ~2-3 refills per resource and measured +50% decompress time on
+   device (594 -> 889 ms over SQ3's first five rooms). */
+#define STREAM_WINDOW 4096
+
+typedef struct {
+	int fd;
+	unsigned int start;   /* file offset of logical byte 0 of the block */
+	unsigned int total;   /* compressedLength: never read past this */
+	unsigned int base;    /* logical offset of stream_win[0] */
+	unsigned int fill;    /* valid bytes currently in stream_win */
+	unsigned int pos;     /* where the fd actually is, to skip needless seeks */
+} decomp_stream_t;
+
+static guint8 stream_win[STREAM_WINDOW];
+/* decrypt2's Huffman node table, lifted out of the stream. numnodes is a byte,
+   so 255 nodes x 2 bytes is the hard maximum. */
+static guint8 stream_nodes[510];
+
+static void
+stream_init(decomp_stream_t *s, int fd, unsigned int total)
+{
+	s->fd = fd;
+	/* decompress0 has already consumed the 8-byte header, so the compressed
+	   data starts at the current position. */
+	s->start = (unsigned int) lseek(fd, 0, SEEK_CUR);
+	s->total = total;
+	s->base = 0;
+	s->fill = 0;
+	s->pos = 0;
+}
+
+/* Leave the fd exactly where a single read(resh, buffer, compressedLength)
+   would have left it.  The window reads ahead, so without this the caller's
+   position is desynced -- the one subtlety flagged before any of this was
+   written. */
+static void
+stream_finish(decomp_stream_t *s)
+{
+	lseek(s->fd, (long) (s->start + s->total), SEEK_SET);
+}
+
+static void
+stream_refill(decomp_stream_t *s, unsigned int i)
+{
+	unsigned int want;
+	int got;
+
+	if (i >= s->total) {
+		s->fill = 0;
+		return;
+	}
+	want = s->total - i;
+	if (want > STREAM_WINDOW)
+		want = STREAM_WINDOW;
+
+	/* Only seek when the fd is not already there. Refills are sequential in
+	   practice, and FatFS f_lseek can walk the FAT chain, so an unconditional
+	   seek per refill is the expensive part -- not the read. */
+	if (i != s->pos)
+		lseek(s->fd, (long) (s->start + i), SEEK_SET);
+	got = read(s->fd, stream_win, want);
+	s->base = i;
+	s->fill = (got > 0) ? (unsigned int) got : 0;
+	s->pos = i + s->fill;
+}
+
+static guint8
+stream_at(decomp_stream_t *s, unsigned int i)
+{
+	if (i < s->base || i >= s->base + s->fill) {
+		stream_refill(s, i);
+		if (i < s->base || i >= s->base + s->fill)
+			return 0;   /* past end of block, or a short read */
+	}
+	return stream_win[i - s->base];
+}
+
+/* Which methods stream is a per-method COMPILE-TIME choice, because the trade
+   is different for each one.  Device-measured over SQ3's first five rooms
+   (decompress time, streaming all three vs none): 594 -> 819 ms, +37.9%.  That
+   cost is paid per read() and is therefore proportional to RESOURCE COUNT,
+   while the benefit is proportional to the largest BLOCK -- and the two point
+   in opposite directions:
+
+     method 0   largest 59,153 / 41,747     32 resources in SQ3
+     method 1   largest 15,685 / 19,087    497 resources
+     method 2   largest 10,385 / 10,429    106 resources
+
+   So method 0 alone captures the whole prize (it is the 59 KB allocation that
+   motivated this work) for a small fraction of the cost, and additionally drops
+   a 59 KB memcpy rather than adding work.  Hence the default of 1.
+
+   Bit 0 = method 0, bit 1 = method 1, bit 2 = method 2.  7 streams everything. */
+#ifndef PICO_STREAM_METHODS
+#  define PICO_STREAM_METHODS 1
+#endif
+#  define STREAM_M0 (PICO_STREAM_METHODS & 1)
+#  define STREAM_M1 (PICO_STREAM_METHODS & 2)
+#  define STREAM_M2 (PICO_STREAM_METHODS & 4)
+#else
+#  define STREAM_M0 0
+#  define STREAM_M1 0
+#  define STREAM_M2 0
+#endif
+
+/* Separate accessors per decryptor so each method can be switched independently
+   -- one shared SRC() would force decrypt1 and decrypt2 to stream together. */
+#if STREAM_M1
+#  define SRC1(i) stream_at((decomp_stream_t *) src, (unsigned int) (i))
+#else
+#  define SRC1(i) src[(i)]
+#endif
+#if STREAM_M2
+#  define SRC2(i) stream_at((decomp_stream_t *) src, (unsigned int) (i))
+#else
+#  define SRC2(i) src[(i)]
+#endif
+
 #ifdef HAVE_PICO
 /* decrypt1's two LZW token tables, hoisted off its stack frame — see the long
    comment at the top of decrypt1.  File scope (rather than function-scope
@@ -169,11 +309,16 @@ decrypt1(guint8 *dest, guint8 *src, int length, int complength)
 
 	while (bytectr < complength) {
 
-		guint32 tokenmaker = src[bytectr++] >> bitctr;
+		/* The only three reads of the compressed stream in decrypt1, and
+		   all of them are at bytectr or bytectr+1 AFTER the increment --
+		   i.e. strictly forward with at most 2 bytes of lookahead, which is
+		   what makes a small sliding window sufficient here.  SRC1() is
+		   plain src[i] unless PICO_STREAM_DECOMPRESS is on. */
+		guint32 tokenmaker = SRC1(bytectr++) >> bitctr;
 		if (bytectr < complength)
-			tokenmaker |= (src[bytectr] << (8-bitctr));
+			tokenmaker |= (SRC1(bytectr) << (8-bitctr));
 		if (bytectr+1 < complength)
-			tokenmaker |= (src[bytectr+1] << (16-bitctr));
+			tokenmaker |= (SRC1(bytectr+1) << (16-bitctr));
 
 		token = tokenmaker & bitmask;
 
@@ -272,7 +417,11 @@ gint16 getc2(guint8 *node, guint8 *src,
 	guint16 next;
 
 	while (node[1] != 0) {
-		gint16 value = (src[*bytectr] << (*bitctr));
+		/* node[] is a genuine pointer either way -- under streaming it
+		   points at the SRAM copy of the Huffman table, which is what
+		   makes decrypt2 streamable at all. Only the bitstream reads
+		   below go through the window. */
+		gint16 value = (SRC2(*bytectr) << (*bitctr));
 		(*bitctr)++;
 		if (*bitctr == 8) {
 			(*bitctr) = 0;
@@ -282,12 +431,12 @@ gint16 getc2(guint8 *node, guint8 *src,
 		if (value & 0x80) {
 			next = node[1] & 0x0f; /* low 4 bits */
 			if (next == 0) {
-				guint16 result = (src[*bytectr] << (*bitctr));
+				guint16 result = (SRC2(*bytectr) << (*bitctr));
 
 				if (++(*bytectr) > complength)
 					return -1;
 				else if (*bytectr < complength)
-					result |= src[*bytectr] >> (8-(*bitctr));
+					result |= SRC2(*bytectr) >> (8-(*bitctr));
 
 				result &= 0x0ff;
 				return (result | 0x100);
@@ -310,10 +459,30 @@ int decrypt2(guint8* dest, guint8* src, int length, int complength)
 	gint16 c;
 	guint16 bitctr = 0, bytectr;
 
+#if STREAM_M2
+	/* The ONLY random access in decrypt2 is the Huffman node table, which
+	   getc2 walks by node += next<<1. It is bounded at 510 bytes because
+	   numnodes is src[0], a single byte -- so copy it to SRAM once and the
+	   remainder of the resource is a forward bitstream the window can serve.
+	   That bound is what makes method 2 streamable; without it the random
+	   walk would thrash the window. */
+	{
+		unsigned int k, tbytes;
+
+		numnodes = SRC2(0);
+		terminator = SRC2(1);
+		tbytes = (unsigned int) numnodes << 1;
+		for (k = 0; k < tbytes; k++)
+			stream_nodes[k] = SRC2(2 + k);
+		nodes = stream_nodes;
+	}
+	bytectr = 2 + (numnodes << 1);
+#else
 	numnodes = src[0];
 	terminator = src[1];
 	bytectr = 2+ (numnodes << 1);
 	nodes = src+2;
+#endif
 
 	while (((c = getc2(nodes, src, &bytectr, &bitctr, complength))
 		!= (0x0100 | terminator)) && (c >= 0)) {
@@ -353,12 +522,38 @@ int sci0_get_compression_method(int resh)
 }
 
 
+#if defined(FSCI_PROBE_PERF) && defined(HAVE_PICO)
+/* Time decompress0 itself, because the obvious instrument is the WRONG one for
+   the streaming work: [perf] pic N decode covers a pic, and pics are method 2
+   (or 0) -- never method 1 -- so it is structurally blind to what phase 1
+   changed. Method 1 is views/scripts/text/sound, which this counts directly.
+   Printed per room by the pic-decode probe in operations.c. */
+unsigned long long pico_decomp_us = 0;
+unsigned long pico_decomp_count = 0;
+unsigned long pico_decomp_bytes = 0;
+extern unsigned long long pico_perf_us(void);
+#endif
+
 int decompress0(resource_t *result, int resh, int sci_version)
 {
+#if defined(FSCI_PROBE_PERF) && defined(HAVE_PICO)
+	unsigned long long _dc_t0 = pico_perf_us();
+#  define DECOMP_ACCOUNT(nbytes) \
+	do { pico_decomp_us += pico_perf_us() - _dc_t0; \
+	     pico_decomp_count++; pico_decomp_bytes += (nbytes); } while (0)
+#else
+#  define DECOMP_ACCOUNT(nbytes) do { } while (0)
+#endif
 	guint16 compressedLength;
 	guint16 compressionMethod;
 	guint16 result_size;
 	guint8 *buffer;
+#ifdef PICO_STREAM_DECOMPRESS
+	/* Small (~20 byte) descriptor; the 1 KB window itself is file-scope .bss,
+	   so this does NOT grow decompress0's stack frame. */
+	decomp_stream_t stm;
+	int streaming = 0;
+#endif
 
 	if (read(resh, &(result->id),2) != 2)
 		return SCI_ERROR_IO_ERROR;
@@ -397,7 +592,23 @@ int decompress0(resource_t *result, int resh, int sci_version)
 		return SCI_ERROR_EMPTY_OBJECT;
 	}
 
+#ifdef PICO_STREAM_DECOMPRESS
+	/* Phase 1: only method 1 (LZW) streams.  Methods 0 and 2 still take the
+	   flat buffer, so they must still allocate it.  Method 1 is the dominant
+	   case by a wide margin -- measured over SQ3/PQ2/KQ4, 1747 of 2139
+	   resources -- so this already removes most of the large contiguous
+	   allocations. */
+	if ((compressionMethod == 0 && STREAM_M0) ||
+	    (compressionMethod == 1 && STREAM_M1) ||
+	    (compressionMethod == 2 && STREAM_M2)) {
+		buffer = NULL;
+		stream_init(&stm, resh, compressedLength);
+		streaming = 1;
+	} else
+		buffer = (guint8*)sci_malloc_sram(compressedLength);
+#else
 	buffer = (guint8*)sci_malloc_sram(compressedLength);
+#endif
 	result->data = DECOMPRESS_ALLOC_DATA(result->type, result->size);
 
 #ifdef HAVE_PICO
@@ -411,6 +622,9 @@ int decompress0(resource_t *result, int resh, int sci_version)
 	}
 #endif
 
+#ifdef PICO_STREAM_DECOMPRESS
+	if (!streaming)
+#endif
 	if (read(resh, buffer, compressedLength) != compressedLength) {
 		DECOMPRESS_FREE_DATA(result->data);
 		free(buffer);
@@ -438,29 +652,85 @@ int decompress0(resource_t *result, int resh, int sci_version)
 			free(buffer);
 			return SCI_ERROR_DECOMPRESSION_OVERFLOW;
 		}
+#if STREAM_M0
+		/* THE case this whole exercise was for: the largest compressed
+		   blocks in every game measured are method 0 (pq2 sound.001 at
+		   59,153 bytes, kq4 sound.200 at 41,747), and method 0 needs no
+		   window at all -- the bytes go straight to their destination.
+		   This removes the contiguous input allocation AND the 59 KB
+		   memcpy that used to follow it. */
+		{
+			unsigned int done = 0;
+
+			while (done < compressedLength) {
+				unsigned int want = compressedLength - done;
+				int got;
+
+				if (want > STREAM_WINDOW)
+					want = STREAM_WINDOW;
+				got = read(resh, result->data + done, want);
+				if (got <= 0)
+					break;
+				done += (unsigned int) got;
+			}
+			stream_finish(&stm);
+			if (done != compressedLength) {
+				DECOMPRESS_FREE_DATA(result->data);
+				result->data = NULL;
+				result->status = SCI_STATUS_NOMALLOC;
+				return SCI_ERROR_IO_ERROR;
+			}
+		}
+#else
 		memcpy(result->data, buffer, compressedLength);
+#endif
 		result->status = SCI_STATUS_ALLOCATED;
 		break;
 
 	case 1: /* LZW compression */
-		if (decrypt1(result->data, buffer, result->size, compressedLength)) {
+	{
+		int rc;
+
+		/* rc is computed first so stream_finish runs on the failure path
+		   too -- the fd position has to match the stock path's whether the
+		   decode succeeded or not. */
+#if STREAM_M1
+		rc = decrypt1(result->data, (guint8 *) &stm, result->size,
+			      compressedLength);
+		stream_finish(&stm);
+#else
+		rc = decrypt1(result->data, buffer, result->size, compressedLength);
+#endif
+		if (rc) {
 			DECOMPRESS_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
 			return SCI_ERROR_DECOMPRESSION_OVERFLOW;
 		}
+	}
 		result->status = SCI_STATUS_ALLOCATED;
 		break;
 
 	case 2: /* Some sort of Huffman encoding */
-		if (decrypt2(result->data, buffer, result->size, compressedLength)) {
+	{
+		int rc;
+
+#if STREAM_M2
+		rc = decrypt2(result->data, (guint8 *) &stm, result->size,
+			      compressedLength);
+		stream_finish(&stm);
+#else
+		rc = decrypt2(result->data, buffer, result->size, compressedLength);
+#endif
+		if (rc) {
 			DECOMPRESS_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
 			return SCI_ERROR_DECOMPRESSION_OVERFLOW;
 		}
+	}
 		result->status = SCI_STATUS_ALLOCATED;
 		break;
 
@@ -476,6 +746,7 @@ int decompress0(resource_t *result, int resh, int sci_version)
 	}
 
 	free(buffer);
+	DECOMP_ACCOUNT(compressedLength);
 	return 0;
 }
 

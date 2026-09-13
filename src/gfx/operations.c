@@ -2643,6 +2643,27 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 #ifdef FSCI_PROBE_PERF
 	sciprintf("[perf] pic %d decode: %lu us\n", nr,
 		  (unsigned long)(pico_perf_us() - _perf_t0));
+#ifdef HAVE_PICO
+	/* Cumulative decompress0 cost since the previous room. This -- not the
+	   line above -- is the number that moves when PICO_STREAM_DECOMPRESS is
+	   toggled: pics are method 2, while method 1 (what streaming covers) is
+	   views/scripts/text/sound, none of which the pic timer contains. */
+	{
+		extern unsigned long long pico_decomp_us;
+		extern unsigned long pico_decomp_count, pico_decomp_bytes;
+		static unsigned long long last_us;
+		static unsigned long last_count, last_bytes;
+
+		sciprintf("[perf] decompress since last room: %lu us over %lu resources"
+			  " (%lu bytes in)\n",
+			  (unsigned long)(pico_decomp_us - last_us),
+			  pico_decomp_count - last_count,
+			  pico_decomp_bytes - last_bytes);
+		last_us = pico_decomp_us;
+		last_count = pico_decomp_count;
+		last_bytes = pico_decomp_bytes;
+	}
+#endif
 #endif
 
 	/* Post-decode baseline: free heap once the new room is fully resident.

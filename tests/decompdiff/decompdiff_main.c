@@ -107,8 +107,14 @@ run_game(const char *dir, int *checked_out, int *skipped_out)
 	int i, bad = 0, checked = 0, skipped = 0;
 	long total_bytes = 0;
 	int method_seen[8];
+	int method_max[8], method_max_num[8], method_max_type[8];
+	int last_method = -1;
+	unsigned int last_clen = 0;
 
 	memset(method_seen, 0, sizeof method_seen);
+	memset(method_max, 0, sizeof method_max);
+	memset(method_max_num, 0, sizeof method_max_num);
+	memset(method_max_type, 0, sizeof method_max_type);
 
 	if (chdir(dir)) { fprintf(stderr, "  !! cannot chdir %s\n", dir); return -1; }
 	resmgr = scir_new_resource_manager(sci_getcwd(), SCI_VERSION_AUTODETECT,
@@ -150,12 +156,26 @@ run_game(const char *dir, int *checked_out, int *skipped_out)
 				lseek(hf, res->file_offset, SEEK_SET);
 				if (read(hf, hdr, 8) == 8) {
 					int m = hdr[6] | (hdr[7] << 8);
+					unsigned int clen = hdr[2] | (hdr[3] << 8);
+					last_method = m;
+					if (clen > 4) last_clen = clen - 4; else last_clen = 0;
+					if (clen > 4) clen -= 4;
+					if (m >= 0 && m < 8 && clen > (unsigned)method_max[m]) {
+						method_max[m] = clen;
+						method_max_num[m] = res->number;
+						method_max_type[m] = res->type;
+					}
 					if (m >= 0 && m < 8)
 						method_seen[m]++;
 				}
 				close(hf);
 			}
 		}
+
+		if (getenv("METHODS"))
+			printf("    %s.%03d method=%d clen=%u\n",
+			       sci_resource_types[res->type], res->number,
+			       last_method, last_clen);
 
 		ra = load_via(res, resmgr->sci_version, 0, &a, &sa);
 		rb = load_via(res, resmgr->sci_version, 1, &b, &sb);
@@ -206,6 +226,14 @@ run_game(const char *dir, int *checked_out, int *skipped_out)
 		if (method_seen[i])
 			printf("  %d=%d", i, method_seen[i]);
 	printf("\n");
+	/* The LARGEST compressed block per method is what decides whether
+	   streaming that method is worth anything: the point of the exercise is
+	   removing a big CONTIGUOUS allocation, not a small one. */
+	for (i = 0; i < 8; i++)
+		if (method_seen[i])
+			printf("  method %d: largest input %d bytes (%s.%03d)\n",
+			       i, method_max[i],
+			       sci_resource_types[method_max_type[i]], method_max_num[i]);
 	scir_free_resource_manager(resmgr);
 	*checked_out = checked;
 	*skipped_out = skipped;
