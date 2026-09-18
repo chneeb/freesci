@@ -3773,7 +3773,24 @@ SD rate, so the map parse has a real CPU component. The claim was never tested b
   `[psram] PIO clkdiv N from achieved N MHz -> SPI N MHz`. This is the trap the `[clk]` line already existed
   to expose ("trust this, not CMakeCache").
 
-**NOT the default (`PICO_SYS_CLOCK_MHZ` stays 133) pending a soak.** Tested on ONE board for one short
+**NOW THE PIO DEFAULT (2026-09-18, user decision after play-testing: "feels much snappier").** The soak
+caution below was raised and overruled on device evidence; recorded so the trade is explicit rather than
+forgotten.
+
+**`PICO_PSRAM_SM_MHZ` IS PAIRED TO THE CLOCK IN CMAKE, never defaulted independently** -- at 396 MHz a target
+of 133 gives clkdiv 3 -> SPI 66 MHz, which DEVICE-FAILED the smoke test. `-DPICO_SYS_CLOCK_MHZ=133` drags the
+SM target back to 133 by itself, so the fallback is one flag.
+
+**TWO CMAKE TRAPS HIT WHILE LANDING THIS, both nearly shipped:**
+1. **Ordering**: the `PICO_PSRAM_SM_MHZ` block sat EARLIER in CMakeLists.txt than `PICO_SYS_CLOCK_MHZ`, so
+   `if(PICO_SYS_CLOCK_MHZ GREATER_EQUAL 300)` tested an UNSET variable and silently produced 396/133 -- the
+   failing pair. A dependent default must come after what it depends on.
+2. **The stale cache** (the trap already documented at the top of this file): after changing the default, the
+   EXISTING `build-pico` still held 396/133 and BUILT CLEAN. Nothing in the compile output hinted at it; only
+   reading `CMakeCache.txt` caught it. `rm -rf` the dir after a default changes -- and check the options you
+   care about, not just that it compiled.
+
+*Historical caution, overruled:* **NOT the default (`PICO_SYS_CLOCK_MHZ` stays 133) pending a soak.** Tested on ONE board for one short
 session. The PSRAM sampling phase is board-specific -- that is why pico-286 ships a sweep rather than a
 constant -- and a MARGINAL phase fails as silent data corruption, not a clean halt. This file documents how
 expensive that class of bug is to chase. Soak it (an hour of play across games, watching for `[OOM]`, faults
@@ -3841,6 +3858,43 @@ with our 31-byte reads / 27-byte writes. The CPU clock is the win; PSRAM tuning 
 **Also to check before trusting it:** SD and LCD SPI rates are requested in Hz and derived from the system
 clock, so they should hold -- but verify on device. And 3x clock on a battery handheld costs power and heat.
 
+### IN PROGRESS (2026-09-18) — build-flag cleanup: 45 -> 41 declarations, first pass
+
+**Deleted:** `PICO_SOUND_SHED_FLOOR` (+ the whole shed: `pico_sound_shed_check`, `pico_sound_was_shed`, the
+`kDrawPic` call site), `FSCI_PROBE_DIRTY`, `FSCI_SIM_PICO_STATIC`, `PICO_VOCAB_PROBE`,
+`PICO_STATIC_VIEW_BAKE`, `PICO_LCD_16BIT`.
+
+**The shed went entirely, not just its knob.** The mechanism worked (device: recovered 22,416 bytes, KQ4 kept
+playing) but no usable trigger was ever found, and the `[S]` chooser toggle solves the same problem better --
+at launch, no heuristic, no mid-game teardown, no restart hazard. Its reasoning stays HERE; keeping
+dead-but-compiling code as the record is the clutter this pass removes.
+
+**A HALF-REMOVAL nearly shipped, and only the SOUND config caught it:** dropping `PICO_SOUND_SHED_FLOOR`
+while leaving `PICO_SOUND_SHED` defined left `if (PICO_SOUND_SHED_FLOOR <= 0)` as a syntax error reachable
+ONLY with `-DPICO_PWM_AUDIO=ON`. The default, desktop and mapped builds all passed. **Build the four-config
+matrix, not just the default.**
+
+**Two more remnants found by GREP, not by the compiler** -- an `add_compile_definitions` referencing a now-unset
+variable (expands to an empty define, silently) and a stale comment citing the deleted function. Neither
+breaks a build, which is exactly why they would have survived and misled.
+
+**REVISED from the original plan, on measurement:**
+- **`FSCI_PROBE_STR` is NOT worth deleting.** Measured: 808 bytes of FLASH and **zero SRAM** -- identical
+  `.bss` (17,608) and identical heap span (474,624) with it on and off. The plan listed it assuming it cost
+  ceiling. It does not; it is genuinely free insurance.
+- **`PICO_PWM_CARRIER_MULT` / `PICO_PWM_IDLE_LEVEL` kept for now.** Inlining them is behaviour-neutral only if
+  the current values are kept, and removing a knob without a device test on the sound path is not worth it
+  while the sound work is still settling.
+
+**Still to do:** collapse the sound cluster so `PICO_PWM_AUDIO=ON` implies `PICO_STREAM_DECOMPRESS`,
+`PICO_STREAM_METHODS` and `PICO_PSRAM_SONGS` (four flags, one decision -- the cap/PSRAM conflict that cost a
+device cycle came from exactly this); promote the settled always-on flags; and remove the dead C-side `#ifdef`
+blocks the deleted options leave behind. That last one is entangled in `widgets.c`
+(`#if defined(PICO_STATIC_VIEW_PRIORITY) && !defined(PICO_STATIC_VIEW_BAKE)` now reduces to its first term)
+and touches the routing the Colonel's `[V]` finding depends on, so it wants a focused pass with a device
+check, not a tidy-up commit.
+
+*Original plan:*
 ### PARKED PLAN (2026-09-13) — build-flag cleanup: ~40 knobs, about 22 are worth keeping
 
 Not urgent, but the count is now a hazard in itself: getting a working PIO sound build currently means setting

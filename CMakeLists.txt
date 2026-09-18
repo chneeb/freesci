@@ -193,8 +193,6 @@ option(FSCI_PROBE_MEM_CENSUS "Probe: live-alloc size histogram + call sites"    
 option(FSCI_PROBE_PARSER     "Probe: per-command GNF-rebuild transient size"    OFF)
 option(FSCI_PROBE_ARENA      "Probe: name the alloc that grows the heap arena"  OFF)
 option(FSCI_PROBE_PERF       "Probe: [perf] per-room pic-decode timing (us)"    OFF)
-option(FSCI_PROBE_DIRTY      "Probe: [dirty] cel-draw/dirty-rect/propagate trace" OFF)
-option(FSCI_SIM_PICO_STATIC  "Desktop: mirror the PIO stopUpd static routing"   OFF)
 if(FSCI_PROBE_MEM_CENSUS AND NOT FSCI_PROBE_MEM)
     message(STATUS "FSCI_PROBE_MEM_CENSUS implies FSCI_PROBE_MEM (census dumps in the breakdown) — enabling it")
     set(FSCI_PROBE_MEM ON)
@@ -219,12 +217,6 @@ if(FSCI_PROBE_ARENA)
 endif()
 if(FSCI_PROBE_PERF)
     add_compile_definitions(FSCI_PROBE_PERF=1)
-endif()
-if(FSCI_PROBE_DIRTY)
-    add_compile_definitions(FSCI_PROBE_DIRTY=1)
-endif()
-if(FSCI_SIM_PICO_STATIC)
-    add_compile_definitions(FSCI_SIM_PICO_STATIC=1)
 endif()
 
 if(PLATFORM STREQUAL "pico")
@@ -312,7 +304,6 @@ if(PLATFORM STREQUAL "pico")
     #     redraws over later dialog boxes. Needs save-unders we can't afford; kept as
     #     an opt-in experiment. Implies PRIORITY. See CLAUDE.md "Static-view occlusion".
     option(PICO_STATIC_VIEW_PRIORITY "Bake static-view priority on Pico (occlusion, no color)" ON)
-    option(PICO_STATIC_VIEW_BAKE "Also persist NO_UPDATE-view color into static_bg (regresses dynamic scenes)" OFF)
     # Route the FULLSCREEN-clipped static draw of a settled stopUpd dynview to
     # the composed PSRAM surface instead of the displayed visual[0] -- the
     # desktop two-destination model (visual[2] persistence + visual[1] display,
@@ -364,10 +355,6 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_DITHER_D16=1)
     endif()
 
-    option(PICO_VOCAB_PROBE "Measure text-parser vocab SRAM cost on Pico" OFF)
-    if(PICO_VOCAB_PROBE)
-        add_compile_definitions(PICO_VOCAB_PROBE=1)
-    endif()
 
     # Roadmap #1 Stage 2: pack the ~1489 per-word parser blocks into one
     # allocation (drops resident vocab ~53KB → ~33KB AND, more importantly, turns
@@ -489,43 +476,6 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_PSRAM_SONGS=1)
     endif()
 
-    # Shed the sound stack if the heap gets tight, so a heavy game (KQ4) keeps
-    # playing instead of dying for a decode buffer. ON whenever sound is on: it
-    # does nothing until the floor is crossed, so a game that fits is unaffected.
-    # Checked at kDrawPic -- a kernel-call boundary -- NOT from the on-OOM retry
-    # hook, which runs inside a failed allocation where run_gc already HardFaulted.
-    # Frees ~14 KB, including two ~6.8 KB CONTIGUOUS mixer compbufs.
-    # DEFAULT 0 = DISABLED. The mechanism works (device: shed 22,416 bytes and
-    # KQ4 kept playing) but no usable floor was found:
-    #   * 40960 was calibrated against "room ready" (post-decode) figures, while
-    #     the check runs at kDrawPic entry = "room enter", where free heap is at
-    #     its MINIMUM. Every game is below 40960 there, so it fired on ALL of
-    #     them -- SQ3 went silent, and PQ2 would have lost its music too.
-    #   * Lowering it does not obviously help: KQ4 FAILED at 20,512 free while
-    #     PQ2 runs fine at 16,952, so free-heap-at-room-enter does not separate
-    #     "about to die" from "normal tight operation". The real failure was
-    #     FRAGMENTATION (20,512 free, 12,532 request), which this does not
-    #     measure.
-    # Set non-zero only with room-enter figures for all three games in hand.
-    set(PICO_SOUND_SHED_FLOOR "0" CACHE STRING "Free-heap floor below which sound is shed (0 = disabled)")
-    if(PICO_PWM_AUDIO)
-        add_compile_definitions(PICO_SOUND_SHED=1)
-        add_compile_definitions(PICO_SOUND_SHED_FLOOR=${PICO_SOUND_SHED_FLOOR})
-    endif()
-
-    # Target PIO SM clock for the PSRAM SPI (SPI rate is half). Must be raised
-    # together with PICO_SYS_CLOCK_MHZ -- the sampling phase depends on BOTH,
-    # because the PIO input synchronizer is clocked by clk_sys, so holding the
-    # SPI rate constant does NOT hold the phase constant (device-observed: 396
-    # MHz with SPI held at 66 MHz still failed the smoke test).
-    # 133 -> clkdiv 1 at a 133 MHz core (our long-proven 66.5 MHz SPI).
-    # 198 -> clkdiv 2 at a 396 MHz core = pico-286's device-verified PicoCalc
-    #        point (SPI 99 MHz, soak-tested 0 errors, ~5 MB/s).
-    set(PICO_PSRAM_SM_MHZ "133" CACHE STRING "Target PIO SM clock for PSRAM (SPI is half)")
-    if(NOT PICO_PSRAM_MAPPED)
-        add_compile_definitions(PICO_PSRAM_SM_MHZ=${PICO_PSRAM_SM_MHZ})
-    endif()
-
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)
@@ -567,46 +517,51 @@ if(PLATFORM STREQUAL "pico")
     set(PICO_SD_SPI_KHZ "30000" CACHE STRING "SD SPI clock in kHz (30000; 12500 was the old default)")
     add_compile_definitions(PICO_SD_SPI_KHZ=${PICO_SD_SPI_KHZ})
 
-    # Core clock. 252 is device-confirmed on the MAPPED target (memory-mapped QMI
-    # PSRAM re-derives its own divisor from clk_sys, so it re-caps itself safely).
-    # PIO stays at 133: its bit-banged PIO-SPI PSRAM fails the boot smoke test at
-    # 252 even with the divisor scaled to hold the SPI at its proven rate, and
-    # again with an integer divisor to remove fractional-clock jitter. See
-    # CLAUDE.md "Overclocking". Overridable either way.
+    # Core clock. 252 on the MAPPED target; 396 on PIO, device-confirmed
+    # 2026-09-18 (decode 1.6-1.9x faster, resource load 1.29x, and noticeably
+    # snappier in play). The old "PIO stays at 133, 252 fails" verdict was wrong
+    # about the CAUSE: the blocker was FLASH timing, never adjusted on PIO, not
+    # the PSRAM divisor we tuned twice. See CLAUDE.md "PIO runs at 396 MHz".
+    #
+    # RESIDUAL RISK, accepted: validated on ONE board. The PSRAM sampling phase
+    # is board-specific (pico-286 ships a sweep rather than a constant) and a
+    # MARGINAL phase fails as silent data corruption, not a clean halt. If a
+    # board shows graphical garbage or unexplained faults, drop to 133 first:
+    #     -DPICO_SYS_CLOCK_MHZ=133
+    # which needs no other change -- PICO_PSRAM_SM_MHZ follows it below.
     if(PICO_PSRAM_MAPPED)
         set(PICO_SYS_CLOCK_MHZ "252" CACHE STRING "Core clock in MHz")
     else()
-        set(PICO_SYS_CLOCK_MHZ "133" CACHE STRING "Core clock in MHz (PIO: 252 fails, see CLAUDE.md)")
+        set(PICO_SYS_CLOCK_MHZ "396" CACHE STRING "Core clock in MHz")
     endif()
     add_compile_definitions(PICO_SYS_CLOCK_MHZ=${PICO_SYS_CLOCK_MHZ})
+
+    # Target PIO SM clock for the PSRAM SPI (SPI rate is half). Must be raised
+    # together with PICO_SYS_CLOCK_MHZ -- the sampling phase depends on BOTH,
+    # because the PIO input synchronizer is clocked by clk_sys, so holding the
+    # SPI rate constant does NOT hold the phase constant (device-observed: 396
+    # MHz with SPI held at 66 MHz still failed the smoke test).
+    # 133 -> clkdiv 1 at a 133 MHz core (our long-proven 66.5 MHz SPI).
+    # 198 -> clkdiv 2 at a 396 MHz core = pico-286's device-verified PicoCalc
+    #        point (SPI 99 MHz, soak-tested 0 errors, ~5 MB/s).
+    # PAIRED to PICO_SYS_CLOCK_MHZ, never defaulted independently: at 396 MHz a
+    # target of 133 gives clkdiv 3 -> SPI 66 MHz, which DEVICE-FAILED the boot
+    # smoke test. 198 -> clkdiv 2 -> SPI 99 MHz is pico-286's soak-tested
+    # PicoCalc point and is what works here.
+    if(PICO_SYS_CLOCK_MHZ GREATER_EQUAL 300)
+        set(PICO_PSRAM_SM_MHZ "198" CACHE STRING "Target PIO SM clock for PSRAM (SPI is half)")
+    else()
+        set(PICO_PSRAM_SM_MHZ "133" CACHE STRING "Target PIO SM clock for PSRAM (SPI is half)")
+    endif()
+    if(NOT PICO_PSRAM_MAPPED)
+        add_compile_definitions(PICO_PSRAM_SM_MHZ=${PICO_PSRAM_SM_MHZ})
+    endif()
 
     # Sound defaults ON for the mapped-PSRAM target (where it works: engine in
     # PSRAM leaves ~110KB of SRAM, and music plays correctly) and OFF for the
     # PicoCalc PIO target (where it is marginal -- see CLAUDE.md "Sound on the
     # PIO target"). Explicitly overridable either way.
     if(PICO_PSRAM_MAPPED)
-        # Core clock in MHz. 133 is the RP2350 power-on default. Raising it scales
-    # resource loading almost directly (decompression + decode + interpreter are
-    # CPU-bound); it does NOT affect display bandwidth. 252 needs no voltage
-    # change; >=378 needs vreg_set_voltage, which is not wired up here.
-    # WARNING: on the PIO target the PSRAM clkdiv is hard-coded to 1.0 (runs at
-    # full clk_sys), so raising this there overclocks the PSRAM chip -- scale
-    # that divisor first. The mapped target re-derives PSRAM timing from clk_sys.
-    # Display speedups, independent of the core clock (which does nothing for
-    # display bandwidth): 16-bit RGB565 over SPI instead of 18-bit/3-byte, plus
-    # 50 MHz SPI instead of 25. Together ~3x fewer bytes-per-second on the panel.
-    # Failure mode is obvious and recoverable (garbled/blank display, reflash).
-    # 16-bit RGB565 pixel format instead of 18-bit/3-byte. INCOMPLETE and OFF:
-    # switching the panel changes the byte count for EVERY writer, and only
-    # pico_driver.c's flush_region was converted -- pico_clear_screen_black still
-    # sends XSIZE*3, and lcdspi.c has ~66 of its own writes (chooser menu, text,
-    # the OOM/HardFault dumps). Device result: sheared/distorted display. The
-    # panel itself is fine with 0x65 (proven by shapones and frank-quest); the
-    # conversion just has to cover all writers before this is usable.
-    option(PICO_LCD_16BIT "16-bit pixel format (INCOMPLETE -- distorts, see comment)" OFF)
-    if(PICO_LCD_16BIT)
-        add_compile_definitions(PICO_LCD_16BIT=1)
-    endif()
 
     option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" ON)
     else()
