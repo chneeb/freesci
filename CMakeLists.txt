@@ -381,6 +381,22 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_REBOOT_BETWEEN_GAMES=1)
     endif()
 
+    # Sound defaults ON for BOTH targets as of 2026-09-18. It was OFF for PIO
+    # while it was marginal there; that is no longer true -- SQ3, PQ2 (with ALL
+    # its music, via PICO_PSRAM_SONGS) and Colonel's Bequest all play, and the
+    # chooser's [S] toggle turns it off per game for the ones that do not fit
+    # (KQ4). The toggle only exists when this is ON, so defaulting it OFF meant
+    # the shipping build had no way to get sound at all.
+    #
+    # THE COST IS UNCONDITIONAL, and worth understanding before flipping it back:
+    # [S] off passes -q, which stops the engine ALLOCATING the ~13KB runtime
+    # sound stack -- but the code and its static tables are linked in either way,
+    # so .bss rises ~7.8KB (17,608 -> ~25,400) and the heap CEILING drops by that
+    # much for EVERY game, even with sound toggled off. On the two games that sit
+    # nearest the ceiling (KQ4, Colonel's Bequest) that is a real subtraction.
+    # Build with -DPICO_PWM_AUDIO=OFF to get the ceiling back.
+    option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" ON)
+
     # Stream the COMPRESSED INPUT buffer for a resource decompress instead of
     # reading it whole into one contiguous SRAM block.
     #
@@ -393,7 +409,15 @@ if(PLATFORM STREQUAL "pico")
     # bounded at 510 bytes (numnodes is src[0], a byte) and is copied out up
     # front. NOT tied to HAVE_PICO on purpose: the desktop differ
     # (tests/decompdiff) builds both paths to prove them byte-identical.
-    option(PICO_STREAM_DECOMPRESS "Stream the compressed input buffer instead of reading it whole" OFF)
+    # Defaults ON with sound on PIO: PICO_PSRAM_SONGS REQUIRES this (without it
+    # the 59KB compressed input is a FATAL sci_malloc_sram), so the two are one
+    # decision. Setting them separately is what let the song cap pre-empt the
+    # PSRAM path and cost a device cycle.
+    if(PICO_PWM_AUDIO AND NOT PICO_PSRAM_MAPPED)
+        option(PICO_STREAM_DECOMPRESS "Stream the compressed input buffer instead of reading it whole" ON)
+    else()
+        option(PICO_STREAM_DECOMPRESS "Stream the compressed input buffer instead of reading it whole" OFF)
+    endif()
     # Which compression methods stream. Bit 0 = method 0, 1 = method 1, 2 = method 2.
     #
     # Defaults to 1 (method 0 ONLY) on device evidence, not taste. The cost of
@@ -412,33 +436,6 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_STREAM_METHODS=${PICO_STREAM_METHODS})
     endif()
 
-    # Largest song (DECOMPRESSED bytes) the PIO target will hold in SRAM.
-    # Songs live in SRAM here because PIO PSRAM is not addressable; on the mapped
-    # target they go to PSRAM and this does nothing.
-    #
-    # 32768 is chosen from measured decompressed song sizes, not taste:
-    #     SQ3  max 30,324   <- under the cap, so the one config where PIO sound
-    #                          WORKS today is not regressed
-    #     PQ2  max 59,153   <- blocked (1 of 47 songs); this is the song that
-    #                          drove the heap to 442,440 of a 475,104 ceiling
-    #     KQ4  max 41,747   <- blocks 2 of 80
-    # Median song is ~1-2 KB, so only the outliers are affected.
-    # With PICO_PSRAM_SONGS the cap must rise to the SLOT size, or it pre-empts
-    # the thing it is supposed to be superseded by: the cap runs during
-    # decompression, long before songit_new can park the song in PSRAM, so a
-    # 32 KB cap silently rejects exactly the 59 KB song the slots exist for.
-    # (Device-observed: "[snd] song 1 ... skipping" followed by "Decompression
-    # failed", with the PSRAM path never reached.) The cap then guards only what
-    # a slot cannot hold, and the resident SRAM cost it was protecting against
-    # no longer exists for these songs.
-    if(PICO_PSRAM_SONGS AND NOT PICO_PSRAM_MAPPED)
-        set(PICO_SONG_MAX_BYTES "65536" CACHE STRING "Largest decompressed song (PIO)")
-    else()
-        set(PICO_SONG_MAX_BYTES "32768" CACHE STRING "Largest decompressed song held in SRAM (PIO only)")
-    endif()
-    if(PICO_PWM_AUDIO AND NOT PICO_PSRAM_MAPPED)
-        add_compile_definitions(PICO_SONG_MAX_BYTES=${PICO_SONG_MAX_BYTES})
-    endif()
 
     # How many times faster than the sample rate the PWM carrier runs.
     #
@@ -471,9 +468,43 @@ if(PLATFORM STREQUAL "pico")
     #
     # Default OFF until device-tested: it changes the song data path for every
     # SCI0 game.
-    option(PICO_PSRAM_SONGS "Park large MIDI songs in PSRAM (PIO only)" OFF)
+    # ON with sound on PIO: this is what lets PQ2 keep ALL its music (its 59,153
+    # byte theme plays from a PSRAM slot instead of being skipped by the cap).
+    if(PICO_PWM_AUDIO AND NOT PICO_PSRAM_MAPPED)
+        option(PICO_PSRAM_SONGS "Park large MIDI songs in PSRAM (PIO only)" ON)
+    else()
+        option(PICO_PSRAM_SONGS "Park large MIDI songs in PSRAM (PIO only)" OFF)
+    endif()
     if(PICO_PSRAM_SONGS AND NOT PICO_PSRAM_MAPPED)
         add_compile_definitions(PICO_PSRAM_SONGS=1)
+    endif()
+
+    # With PICO_PSRAM_SONGS the cap must rise to the SLOT size, or it pre-empts
+    # the thing it is supposed to be superseded by: the cap runs during
+    # decompression, long before songit_new can park the song in PSRAM, so a
+    # 32 KB cap silently rejects exactly the 59 KB song the slots exist for.
+    # (Device-observed: "[snd] song 1 ... skipping" followed by "Decompression
+    # failed", with the PSRAM path never reached.) The cap then guards only what
+    # a slot cannot hold, and the resident SRAM cost it was protecting against
+    # no longer exists for these songs.
+    # Largest song (DECOMPRESSED bytes) the PIO target will accept. Chosen from
+    # measured sizes: SQ3 maxes at 30,324 so the config that works is never
+    # regressed; PQ2's 59,153 theme and KQ4's two ~41KB songs are the outliers.
+    # With PICO_PSRAM_SONGS the cap rises to the SLOT size, or it pre-empts the
+    # very path it is meant to be superseded by (device-observed: "[snd] song 1
+    # ... skipping" with the PSRAM slots never reached).
+    #
+    # The set() and its add_compile_definitions MUST stay together: splitting
+    # them left the define referencing an unset variable, which expands to an
+    # EMPTY define and fails as `size > )` in decompress0.c -- a build error far
+    # from its cause.
+    if(PICO_PSRAM_SONGS AND NOT PICO_PSRAM_MAPPED)
+        set(PICO_SONG_MAX_BYTES "65536" CACHE STRING "Largest decompressed song (PIO)")
+    else()
+        set(PICO_SONG_MAX_BYTES "32768" CACHE STRING "Largest decompressed song held in SRAM (PIO only)")
+    endif()
+    if(PICO_PWM_AUDIO AND NOT PICO_PSRAM_MAPPED)
+        add_compile_definitions(PICO_SONG_MAX_BYTES=${PICO_SONG_MAX_BYTES})
     endif()
 
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
@@ -557,16 +588,6 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_PSRAM_SM_MHZ=${PICO_PSRAM_SM_MHZ})
     endif()
 
-    # Sound defaults ON for the mapped-PSRAM target (where it works: engine in
-    # PSRAM leaves ~110KB of SRAM, and music plays correctly) and OFF for the
-    # PicoCalc PIO target (where it is marginal -- see CLAUDE.md "Sound on the
-    # PIO target"). Explicitly overridable either way.
-    if(PICO_PSRAM_MAPPED)
-
-    option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" ON)
-    else()
-        option(PICO_PWM_AUDIO "Build + init PicoCalc PWM audio synth" OFF)
-    endif()
     # Which softsequencer drives the PCM feed. Empty = FreeSCI's default (opl2,
     # i.e. Adlib FM emulation -- the most expensive one). "SN76496" (Tandy 3-voice
     # square) and "pcspeaker" are far cheaper and are already linked; SCI0 sound
@@ -574,7 +595,16 @@ if(PLATFORM STREQUAL "pico")
     set(PICO_SOFTSEQ "" CACHE STRING "Softseq name on Pico: empty (opl2), SN76496, pcspeaker")
     # Audio sample rate. 11025 halves both the OPL synth cost (33-47% CPU at
     # 22050) and every derived buffer, which is what a memory-tight target needs.
-    set(PICO_SND_RATE "22050" CACHE STRING "Pico audio sample rate (22050 or 11025)")
+    # PIO gets 11025, which is what every PIO sound session was actually tested
+    # at: 22050 costs ~4KB more .bss (bigger ring) and ~10KB more heap (buffers
+    # scale with the rate) on the target that has neither to spare -- exactly
+    # what the note above argues, while the value said 22050. Mapped keeps
+    # 22050; it has a 6MB PSRAM heap and the CPU headroom.
+    if(PICO_PSRAM_MAPPED)
+        set(PICO_SND_RATE "22050" CACHE STRING "Pico audio sample rate (22050 or 11025)")
+    else()
+        set(PICO_SND_RATE "11025" CACHE STRING "Pico audio sample rate (22050 or 11025)")
+    endif()
     # Frames the mixer may emit per call. Default rate/11 (~91ms). The mixer is
     # capped at this per call, so it must exceed rate/poll_rate or the ring
     # starves; every 512 frames costs ~4KB of compbuf, so it is the main audio

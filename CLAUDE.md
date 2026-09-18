@@ -3858,6 +3858,56 @@ with our 31-byte reads / 27-byte writes. The CPU clock is the win; PSRAM tuning 
 **Also to check before trusting it:** SD and LCD SPI rates are requested in Hz and derived from the system
 clock, so they should hold -- but verify on device. And 3x clock on a battery handheld costs power and heat.
 
+### DONE (2026-09-18) — the DEFAULT PIO build is now the tested configuration, and sound is ON
+
+The shipping PIO build had **no way to get sound at all** -- `PICO_PWM_AUDIO` defaulted OFF there, and the
+chooser's `[S]` toggle only exists when it is ON. Fixed, and with it the three flags that have to move
+together:
+
+| | default PIO |
+|---|---|
+| `PICO_SYS_CLOCK_MHZ` / `PICO_PSRAM_SM_MHZ` | 396 / 198 -> SPI 99 MHz |
+| `PICO_PWM_AUDIO` / `PICO_SND_RATE` | ON / **11025** |
+| `PICO_PSRAM_SONGS` / `PICO_STREAM_DECOMPRESS` | ON / ON |
+| `PICO_SONG_MAX_BYTES` | 65536 (follows the slots) |
+
+Every value is one a device run produced today. `-DPICO_PWM_AUDIO=OFF` reverts the whole cluster coherently.
+
+**THE SOUND CLUSTER COLLAPSE STOPPED BEING TIDINESS the moment sound became the default.** Four independent
+flags meant the shipping build would have had sound but NO PQ2 THEME (`PICO_PSRAM_SONGS` off, so the cap skips
+the 59KB song) at a sample rate never tested on PIO (`PICO_SND_RATE` defaulted 22050 while its own comment
+argued for 11025 -- worth ~4KB `.bss` and ~10KB heap on the target that has neither). One decision, four
+knobs, three of them wrong.
+
+**MEASURED COST OF SOUND-BY-DEFAULT -- 8,080 bytes of heap ceiling, paid UNCONDITIONALLY:**
+
+| | `.bss` | heap span |
+|---|---|---|
+| sound ON (default) | 25,344 | **466,544** |
+| `-DPICO_PWM_AUDIO=OFF` | 17,608 | **474,624** |
+
+**`[S]` off does NOT recover it** -- it passes `-q`, which skips the ~13KB of runtime allocation, but the code
+and static tables are linked in either way. Against the two games nearest the ceiling that is a real
+subtraction: KQ4 failed needing 12,532 with 20,512 free, Colonel's died at 304 bytes free. **Test KQ4 and
+Colonel's with `[S]` OFF on this build**; if the lost ceiling bites, two images may be the honest answer.
+
+**FOUR CMAKE ORDERING BUGS IN ONE PASS, all the same shape: a value USED BEFORE IT WAS SET.** CMake does not
+warn when reading an unset variable -- it silently yields empty -- so the failure always surfaced somewhere
+else:
+1. `PICO_PSRAM_SM_MHZ` tested `PICO_SYS_CLOCK_MHZ` before it was set -> silently 396/133, the pair that
+   DEVICE-FAILED the PSRAM smoke test. Built clean.
+2. The stale cache: after the default changed, the existing `build-pico` still held 396/133 and BUILT CLEAN.
+3. `PICO_SONG_MAX_BYTES` tested `PICO_PSRAM_SONGS` before it was set -> cap 32768 with slots ON, which is
+   exactly the bug the device found earlier (the cap rejects the song before the slots see it).
+4. Its `add_compile_definitions` was separated from its `set()` -> an EMPTY define, failing as `size > )` in
+   `decompress0.c`, three directories from the cause.
+
+**The rule: a dependent default must come after what it depends on, a `set()` and its
+`add_compile_definitions` must stay adjacent, and after ANY default change reconfigure from scratch and READ
+`CMakeCache.txt`.** "It built" was true in all four cases. Three were caught by reading the cache or by the
+four-config matrix; only the missing `[S]` reached the device, and that was a default never flipped rather
+than a regression.
+
 ### IN PROGRESS (2026-09-18) — build-flag cleanup: 45 -> 41 declarations, first pass
 
 **Deleted:** `PICO_SOUND_SHED_FLOOR` (+ the whole shed: `pico_sound_shed_check`, `pico_sound_was_shed`, the
