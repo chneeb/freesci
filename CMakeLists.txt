@@ -513,6 +513,19 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_SOUND_SHED_FLOOR=${PICO_SOUND_SHED_FLOOR})
     endif()
 
+    # Target PIO SM clock for the PSRAM SPI (SPI rate is half). Must be raised
+    # together with PICO_SYS_CLOCK_MHZ -- the sampling phase depends on BOTH,
+    # because the PIO input synchronizer is clocked by clk_sys, so holding the
+    # SPI rate constant does NOT hold the phase constant (device-observed: 396
+    # MHz with SPI held at 66 MHz still failed the smoke test).
+    # 133 -> clkdiv 1 at a 133 MHz core (our long-proven 66.5 MHz SPI).
+    # 198 -> clkdiv 2 at a 396 MHz core = pico-286's device-verified PicoCalc
+    #        point (SPI 99 MHz, soak-tested 0 errors, ~5 MB/s).
+    set(PICO_PSRAM_SM_MHZ "133" CACHE STRING "Target PIO SM clock for PSRAM (SPI is half)")
+    if(NOT PICO_PSRAM_MAPPED)
+        add_compile_definitions(PICO_PSRAM_SM_MHZ=${PICO_PSRAM_SM_MHZ})
+    endif()
+
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)

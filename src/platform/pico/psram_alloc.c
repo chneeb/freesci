@@ -2,10 +2,45 @@
 
 #include "psram_alloc.h"
 #include "psram/psram_spi.h"
+#include "hardware/structs/qmi.h"
 #include <string.h>
 #include <stdio.h>
 
 psram_spi_inst_t g_psram;
+
+/* ---- flash timing for a raised system clock ------------------------------
+   THE PIECE THE PIO TARGET WAS MISSING, and the reason overclocking it was
+   wrongly ruled out. QMI divides clk_sys to clock the flash, so raising the
+   system clock raises the FLASH clock with it until the divisor is recomputed.
+   At 252 MHz undivided that is ~250 MHz into a part rated far lower: XIP reads
+   come back corrupt and the board is dead before serial, with TFT noise -- which
+   we read as a PSRAM fault and answered by tuning the PSRAM divisor twice. It
+   was the wrong knob.
+
+   Byte-identical math to psram_set_flash_timings() in psram_mapped.c (the
+   mapped target's copy, which is why THAT target could already be clocked to
+   252). Kept as a separate definition rather than sharing a file because
+   psram_mapped.c is not compiled for PIO and the mapped target is working --
+   not worth disturbing it to save fifteen lines.
+
+   __no_inline_not_in_flash_func is load-bearing: this reprograms the timing of
+   the very flash it would otherwise be executing from. */
+void
+__no_inline_not_in_flash_func(pico_set_flash_timings)(int cpu_mhz, int flash_max_mhz)
+{
+    const int clock_hz = cpu_mhz * 1000000;
+    const int max_flash_freq = flash_max_mhz * 1000000;
+
+    int divisor = (clock_hz + max_flash_freq - (max_flash_freq >> 4) - 1) / max_flash_freq;
+    if (divisor == 1 && clock_hz >= 166000000) divisor = 2;
+
+    int rxdelay = divisor;
+    if (clock_hz / divisor > 100000000 && clock_hz >= 166000000) rxdelay += 1;
+
+    qmi_hw->m[0].timing = 0x60007000u
+                          | ((uint32_t)rxdelay << QMI_M0_TIMING_RXDELAY_LSB)
+                          | ((uint32_t)divisor << QMI_M0_TIMING_CLKDIV_LSB);
+}
 
 static uint32_t s_psram_offset = 0;
 

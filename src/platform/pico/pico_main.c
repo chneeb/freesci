@@ -3,6 +3,7 @@
 
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
+#include "hardware/vreg.h"
 #ifdef PICO_REBOOT_BETWEEN_GAMES
 #include "hardware/watchdog.h"
 #endif
@@ -189,11 +190,39 @@ int main(void)
 #ifndef PICO_SYS_CLOCK_MHZ
 #  define PICO_SYS_CLOCK_MHZ 133
 #endif
+#ifndef PICO_PSRAM_SM_MHZ
+/* Target PIO state-machine clock for the PSRAM SPI; the SPI rate is half it.
+   133 keeps the long-proven 66.5 MHz point at a 133 MHz core. Raise it WITH the
+   core clock -- pico-286's device-verified PicoCalc point at 396 MHz is an SM
+   clock of 198 (SPI 99 MHz), soak-tested at 0 errors. Not independently
+   tunable from the core clock: the sampling phase depends on both. */
+#  define PICO_PSRAM_SM_MHZ 133
+#endif
 #ifndef PICO_SD_SPI_KHZ
 #  define PICO_SD_SPI_KHZ 12500   /* mirrors hw_config.c's default */
 #endif
+#ifndef PICO_FLASH_MAX_MHZ
+/* Cap the flash clock regardless of the core clock. pico-286 ships its 396 MHz
+   PicoCalc build as "F100", i.e. flash held at 100 MHz under a 3x core -- so
+   100 is a device-proven value on this hardware. The mapped target uses 66,
+   which is more conservative and already works there. */
+#  define PICO_FLASH_MAX_MHZ 100
+#endif
 #ifdef PICO_PSRAM_MAPPED
     psram_set_flash_timings(PICO_SYS_CLOCK_MHZ, 66);
+#else
+    /* PIO: recompute flash timing BEFORE raising the clock, or XIP reads go
+       corrupt on the way up. Omitting this is why 252 MHz was "ruled out". */
+    pico_set_flash_timings(PICO_SYS_CLOCK_MHZ, PICO_FLASH_MAX_MHZ);
+#endif
+#if PICO_SYS_CLOCK_MHZ > 250
+    /* Above ~250 MHz the core needs more than the default 1.10 V. Raise it
+       BEFORE set_sys_clock_khz, and give the rail a moment to settle --
+       set_sys_clock_khz simply refuses (returns false) if the PLL cannot be
+       configured, but an under-volted core that DOES configure fails as random
+       corruption instead, which is far harder to read. */
+    vreg_set_voltage(VREG_VOLTAGE_1_30);
+    sleep_ms(10);
 #endif
     if (!set_sys_clock_khz(PICO_SYS_CLOCK_MHZ * 1000, false)) {
         /* Refused (bad PLL divisors, or it needs a voltage bump we do not wire
@@ -204,6 +233,23 @@ int main(void)
            direction. (Adopted from frank-quest's fallback.) */
         set_sys_clock_khz(133000, true);
     }
+
+    /* PIN clk_peri -- the SDK ties it to clk_sys UNDIVIDED
+       ("CLK PERI = clk_sys. Used as reference clock for UART and SPI serial",
+       runtime_init_clocks.c), so raising the core to 396 MHz also clocks the
+       UART and BOTH SPI peripherals -- SD card and LCD -- at 396 MHz, far past
+       spec. Device-observed at 396: serial died immediately after the [clk]
+       print, and SQ3 then HardFaulted on launch, which is what corrupt SD reads
+       feeding the resource loader look like.
+       Pinning it at 133 MHz keeps every peripheral at exactly the reference the
+       proven 133 MHz build uses, so the existing PICO_SD_SPI_KHZ /
+       PICO_LCD_SPI_KHZ divisors stay valid. MUST precede stdio_init_all (UART)
+       and the lcd/sd init below. */
+    if (clock_get_hz(clk_sys) > 133000000u)
+        clock_configure(clk_peri, 0,
+                        CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                        clock_get_hz(clk_sys), 133000000u);
+
     stdio_init_all();
     /* Give the USB host time to enumerate the CDC device before we print */
     sleep_ms(2000);
@@ -258,18 +304,45 @@ int main(void)
            So derive the divisor to hold the SPI at its 133 MHz-equivalent rate.
            Consequence worth knowing: PSRAM does NOT get faster with the
            overclock -- only CPU-bound work does. */
-        /* Round UP to an INTEGER divisor. The PIO fractional divider works by
-           stretching individual cycles, so a fractional value (252/133 = 1.895)
-           makes the SPI clock jittery -- fine for throughput, bad for a
-           bit-banged protocol with tight setup/hold, and a plausible reason the
-           smoke test still failed at the correct average rate. Rounding up also
-           guarantees we land at or BELOW the proven 133 MHz-equivalent rate
-           (252/2 = 126 MHz), never above it. */
-        int psram_div_i = (PICO_SYS_CLOCK_MHZ + 132) / 133;   /* ceil(mhz/133) */
+        /* TARGET AN SM CLOCK, DO NOT HOLD THE SPI RATE CONSTANT.
+           Holding the SPI rate was the obvious move and it FAILED at 396 MHz
+           (clkdiv 3 -> SPI 66 MHz, the same rate that works at 133): the boot
+           smoke test still reported "PSRAM test FAILED".
+
+           Why holding the rate is not enough: the PIO input synchronizer is
+           clocked by clk_sys, NOT the SM clock, so its 2-cycle latency is ~15ns
+           at 133 MHz but ~5ns at 396 MHz. MISO therefore arrives ~10ns earlier
+           relative to the sampling edge -- most of a bit period at 66 MHz SPI.
+           The SAMPLING PHASE moves with the system clock even at a fixed SPI
+           rate, which is exactly why pico-286 reports this failing at both
+           faster AND slower settings and ships a sweep to find the point.
+
+           So the divisor is derived from a target SM clock instead:
+             133 MHz sys, target 133 -> clkdiv 1 -> SPI 66.5  (our proven point)
+             396 MHz sys, target 198 -> clkdiv 2 -> SPI 99    (pico-286's, which
+                                       is device-verified on PicoCalc hardware
+                                       at 396 MHz: soak-tested 0 errors, ~5 MB/s)
+           Round to NEAREST so the SM clock lands near the target rather than
+           systematically under it; integer only, because the PIO fractional
+           divider stretches individual cycles and a bit-banged protocol with
+           tight setup/hold does not tolerate the jitter. */
+        /* Derive from the ACHIEVED clock, never the requested one. If
+           set_sys_clock_khz refused the target it silently fell back to 133,
+           and a divisor computed for 396 would then put the SPI at 44/2 =
+           22 MHz -- far below the proven point and on the wrong side of the
+           fudge cycle, i.e. a dead bus that looks exactly like an overclock
+           failure. This is the trap the [clk] line exists to expose ("trust
+           this, not CMakeCache"), and the mapped target already avoids it by
+           deriving from clock_get_hz. */
+        int achieved_mhz = (int)(clock_get_hz(clk_sys) / 1000000u);
+        int psram_div_i = (achieved_mhz + PICO_PSRAM_SM_MHZ / 2) / PICO_PSRAM_SM_MHZ;
         float psram_clkdiv;
         if (psram_div_i < 1)
             psram_div_i = 1;
         psram_clkdiv = (float)psram_div_i;
+        printf("[psram] PIO clkdiv %.1f from achieved %d MHz -> SPI %.1f MHz\n",
+               (double)psram_clkdiv, achieved_mhz,
+               (double)achieved_mhz / psram_clkdiv / 2.0);
         g_psram = psram_spi_init_clkdiv(pio1, -1, psram_clkdiv, true);
     }
 #endif
@@ -379,7 +452,9 @@ int main(void)
            anything printed before the chooser. clock_get_hz is the ACHIEVED
            value, so this also reveals a silent fallback when
            set_sys_clock_khz() refused the requested frequency. */
-        printf("[clk] sys_clk = %u Hz (requested %d MHz)%s\n",
+        printf("[clk] clk_peri = %u Hz (pinned; SD/LCD SPI + UART reference)\n",
+           (unsigned)clock_get_hz(clk_peri));
+    printf("[clk] sys_clk = %u Hz (requested %d MHz)%s\n",
                (unsigned)clock_get_hz(clk_sys), PICO_SYS_CLOCK_MHZ,
                (clock_get_hz(clk_sys) / 1000000u) == (unsigned)PICO_SYS_CLOCK_MHZ
                  ? "" : "  <-- FELL BACK, requested clock not achieved");

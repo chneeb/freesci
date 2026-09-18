@@ -6,6 +6,11 @@
 /* psram_spi_inst_t (and g_psram) are in psram_alloc.c / pico_main.c only;
    callers of these functions do not need the pico-sdk type. */
 
+/* Recompute QMI flash timing for a raised system clock. MUST be called BEFORE
+   set_sys_clock_khz raises the clock. PIO target only -- the mapped target has
+   its own copy in psram_mapped.c. */
+void     pico_set_flash_timings(int cpu_mhz, int flash_max_mhz);
+
 uint32_t psram_alloc(size_t bytes);
 void     psram_reset(void);
 

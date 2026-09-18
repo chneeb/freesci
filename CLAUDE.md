@@ -3728,6 +3728,64 @@ SQ3 with sound ON, KQ4 with sound OFF, 0 OOMs, 0 faults, 0 spurious sheds, 1 sta
 6 entries, so appending `-q` wrote `argv[6]` -- one past the end, into whatever followed on the stack. It is
 `char *argv[7]` now. That would have presented as a random fault far from the cause.
 
+### DONE (device-confirmed 2026-09-18) — PIO runs at 396 MHz: decode 1.6-1.9x faster
+
+**Device-measured on the PicoCalc, `[clk] sys_clk = 396000000 Hz` with no fallback:**
+
+| | 133 MHz | 396 MHz | |
+|---|---|---|---|
+| pic 777 decode | 82.1 ms | **43.6 ms** | 1.88x |
+| pic 900 decode | 79.4 ms | **50.2 ms** | 1.58x |
+| pic 1 decode | 134.5 ms | **80.9 ms** | 1.66x |
+| resource load | 15,006 ms | **11,672 ms** | 1.29x |
+
+Not the full 3x because decode is partly PSRAM-bound and PSRAM only went 66.5 -> 99 MHz SPI (1.49x).
+
+**CORRECTION TO THIS FILE: `[perf] resource load` is NOT purely SD-bound.** The timing-probe table says it is
+"the part the CORE CLOCK CANNOT speed up (it is SD-clock bound)". Measured: 15,006 -> 11,672 ms at the same
+SD rate, so the map parse has a real CPU component. The claim was never tested before; it is now.
+
+**FOUR pieces of bring-up, all required, none of them the PSRAM divisor we spent 2026-09-10 tuning:**
+1. **Flash timing recomputed BEFORE raising the clock** (`pico_set_flash_timings`, `psram_alloc.c`,
+   `__no_inline_not_in_flash_func` so it does not execute from the flash it is reprogramming). QMI divides
+   clk_sys for the flash, so at 252 MHz undivided the XIP reads were corrupt -- dead before serial, TFT
+   noise. **This is what "RULED OUT (do not retry as-is)" actually was**, and the old note half-spotted it.
+   Capped at `PICO_FLASH_MAX_MHZ` = 100, pico-286's device-proven `F100` value.
+2. **`vreg_set_voltage(VREG_VOLTAGE_1_30)`** before `set_sys_clock_khz`, gated `> 250 MHz`. An under-volted
+   core that DOES configure fails as random corruption, which is far harder to read than a refusal.
+3. **PSRAM sampling phase: target an SM CLOCK, do NOT hold the SPI rate.** `PICO_PSRAM_SM_MHZ` (default 133;
+   198 at 396 MHz -> clkdiv 2 -> SPI 99 MHz, pico-286's soak-tested PicoCalc point).
+4. **PIN `clk_peri`** (`pico_main.c`). The SDK ties it to clk_sys UNDIVIDED -- *"CLK PERI = clk_sys. Used as
+   reference clock for UART and SPI serial"* -- so 396 MHz also clocked the UART and BOTH SPI peripherals
+   (SD card AND LCD) at 396 MHz. Device symptom: serial died right after the `[clk]` print, then SQ3
+   HardFaulted on launch, which is what corrupt SD reads feeding the resource loader look like. Pinned at
+   133 MHz so every existing SD/LCD divisor stays valid.
+
+**TWO WRONG GUESSES ON THE WAY, recorded so they are not repeated:**
+- **"Hold the SPI rate constant across the clock change."** Wrong: the PIO input synchronizer is clocked by
+  **clk_sys**, not the SM clock, so its 2-cycle latency is ~15ns at 133 MHz and ~5ns at 396 -- MISO arrives
+  ~10ns earlier against the sampling edge, most of a bit period at 66 MHz SPI. **The sampling phase moves
+  with the system clock even at a fixed SPI rate.** This is exactly what pico-286 means by "fails at both
+  faster AND slower settings", and why they ship a sweep.
+- **Deriving the PSRAM divisor from `PICO_SYS_CLOCK_MHZ` (the REQUESTED clock).** If `set_sys_clock_khz`
+  falls back, a divisor computed for 396 lands on a 133 MHz clock and puts the SPI at 22 MHz -- a dead bus
+  that looks identical to an overclock failure. Now derived from `clock_get_hz(clk_sys)`, and printed:
+  `[psram] PIO clkdiv N from achieved N MHz -> SPI N MHz`. This is the trap the `[clk]` line already existed
+  to expose ("trust this, not CMakeCache").
+
+**NOT the default (`PICO_SYS_CLOCK_MHZ` stays 133) pending a soak.** Tested on ONE board for one short
+session. The PSRAM sampling phase is board-specific -- that is why pico-286 ships a sweep rather than a
+constant -- and a MARGINAL phase fails as silent data corruption, not a clean halt. This file documents how
+expensive that class of bug is to chase. Soak it (an hour of play across games, watching for `[OOM]`, faults
+and graphical garbage) before flipping the default, and consider the battery/heat cost on a handheld.
+
+**Still open, unchanged by the clock:** loading a savegame in SQ3 **with sound ON** OOMs at
+`pico_decompress_alloc` (`malloc 9,412, free 14,568, arena 462,400`) -- fragmentation with the arena 12 KB
+from the ceiling. Memory is identical at any clock; sound costs ~18 KB and SQ3 runs close to the edge.
+Workaround: `[S]` off to load. Also noticed: `pico_oom_report` printed `lipico_decompress_alloc`, i.e. the
+`line=` field ran into the filename -- a format/buffer bug in the dump, harmless here but misleading later.
+
+*Historical (the roadmap entry that led here):*
 ### ROADMAP (2026-09-18) — raise the PIO system clock to ~396 MHz: the largest remaining PIO win, and the blocker is FLASH, not PSRAM
 
 **`~/Source/pico-286` runs 396 MHz on the SAME PicoCalc with the SAME vendored Ian Scott PIO-SPI PSRAM
