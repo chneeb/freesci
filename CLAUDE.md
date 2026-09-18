@@ -3728,6 +3728,61 @@ SQ3 with sound ON, KQ4 with sound OFF, 0 OOMs, 0 faults, 0 spurious sheds, 1 sta
 6 entries, so appending `-q` wrote `argv[6]` -- one past the end, into whatever followed on the stack. It is
 `char *argv[7]` now. That would have presented as a random fault far from the cause.
 
+### ROADMAP (2026-09-18) — raise the PIO system clock to ~396 MHz: the largest remaining PIO win, and the blocker is FLASH, not PSRAM
+
+**`~/Source/pico-286` runs 396 MHz on the SAME PicoCalc with the SAME vendored Ian Scott PIO-SPI PSRAM
+driver.** So 3x our 133 MHz is demonstrably achievable on this hardware; we are not clock-limited, we are
+missing three pieces of bring-up.
+
+**THIS RETIRES the "RULED OUT (do not retry as-is)" verdict in the overclocking section.** That conclusion was
+reached after guessing two PSRAM clkdivs (scaled 1.895, then integer 2) and watching the smoke test fail both
+times -- with flash timings never in the picture. It was the wrong knob. The same section already half-spotted
+this: *"psram_set_flash_timings() is `#ifdef PICO_PSRAM_MAPPED`, so PIO's flash timing is never adjusted at
+all, and that may itself be the (or a) cause."* pico-286 confirms it is.
+
+**The three missing pieces, with a working reference for each:**
+
+1. **Flash timing recomputed for the clock, executed FROM RAM** (`pico-286 src/pico-main.c`,
+   `void __not_in_flash() flash_timings()`): divisor = ceil(clock / max_flash_freq), forced to >=2 above
+   100 MHz, plus an extra `rxdelay` cycle above 100 MHz, written to `qmi_hw->m[0].timing`. Their build is
+   named `F100` -- flash held at 100 MHz under a 396 MHz core. **We do none of this on PIO**, so at 252 MHz
+   the XIP reads were almost certainly corrupt: dead-before-serial with TFT noise is what bad instruction
+   fetch looks like, and we misread it as a PSRAM fault.
+2. **Core voltage** -- `hardware/vreg.h`, `vreg_set_voltage()` before `set_sys_clock_hz()`, with a failsafe
+   retry (`set_sys_clock_hz(hz, 1)`) if the first attempt is refused. We never raise vreg.
+3. **The PSRAM sampling phase found by SWEEP, not guessed.** They ship `PICOCALC_PSRAM_SWEEP` (walks
+   divisor x fudge, prints SPI rate / errors / throughput, does not boot) and `PICOCALC_PSRAM_SOAK` (hammers
+   the chosen point as the board warms). Their note is exactly our failure mode: *"Reliability is a
+   sampling-phase problem that fails at both faster AND slower settings, so re-derive it with
+   PICOCALC_PSRAM_SWEEP rather than guessing."* That is why our scaled-DOWN divisor did not help either.
+   There is also `PSRAM_FUDGE_VAL`, an extra read-sync cycle REQUIRED above 83 MHz SPI and wrong below it --
+   a knob our driver has no equivalent for, so any naive clock raise lands on the wrong side of it.
+
+**Their operating point: `PSRAM_SM_CLOCK_VAL=198000000` -> SPI 99 MHz, soak-tested 0 errors, ~5.0 MB/s.**
+
+**PAYOFF -- speed and audio quality, against OUR measured numbers:**
+
+| measured at 133 MHz | CPU-bound? | expected at ~396 MHz |
+|---|---|---|
+| pic decode 82-170 ms | YES -- the XIP-RAM test showed 6.5-11x slowdown with the flash cache off, i.e. heavily instruction-fetch bound | ~30-60 ms |
+| frame rate ~25 Hz ordinary | partly | higher -> **the remaining transition starvation goes away**, and `PICO_PWM_BUF_FRAMES` could drop back toward rate/30, returning ~5 KB of heap |
+| OPL synth ~20% CPU at 11025 | yes | ~7% -> **22050 Hz becomes affordable on PIO for the first time** |
+| transition stalls 150-250 ms | yes | proportionally shorter |
+| **resource load 15 s** | **NO -- SD-clock bound** | **UNCHANGED** (the record is explicit that the core clock cannot touch this) |
+
+**WHAT IT DOES NOT BUY: anything memory-bound, which is every hard limit left.** KQ4 with sound, Colonel's
+Bequest exhaustion, the transient working priority map, inter-sprite z-order -- all SRAM capacity and
+fragmentation. MHz adds no bytes. Nor does faster PSRAM make anything new offloadable: the flood-fill aux and
+`script_t.buf` were ruled out for RANDOM ACCESS, and at 5 MB/s with 31-byte transactions random access is
+still hopeless. Memory-MAPPED PSRAM (the Pimoroni target) remains the only thing that dissolves those.
+
+**Note the PSRAM bandwidth itself is NOT the prize:** 5.0 MB/s vs our ~4.0 is ~25%, and 1.5x the SPI rate
+(99 vs 66.5 MHz) yielding only 1.25x throughput says the driver is transaction-overhead-bound -- consistent
+with our 31-byte reads / 27-byte writes. The CPU clock is the win; PSRAM tuning is the ENABLER for it.
+
+**Also to check before trusting it:** SD and LCD SPI rates are requested in Hz and derived from the system
+clock, so they should hold -- but verify on device. And 3x clock on a battery handheld costs power and heat.
+
 ### PARKED PLAN (2026-09-13) — build-flag cleanup: ~40 knobs, about 22 are worth keeping
 
 Not urgent, but the count is now a hazard in itself: getting a working PIO sound build currently means setting
@@ -3915,6 +3970,10 @@ Resource loading is SD read + decompression + decode: the first is SD-clock-boun
   target -- it is parameterised by the system clock, and getting that wrong corrupts XIP (dead before
   serial, TFT noise). Note PSRAM does NOT get faster, so expect sub-linear gains on this target: scripts,
   objects and the resource cache all live there.
+- **252 MHz on PIO: the RULED-OUT verdict below is SUPERSEDED (2026-09-18)** -- see the 396 MHz roadmap
+  entry. `~/Source/pico-286` runs 396 MHz on this same hardware with this same PIO PSRAM driver; what we were
+  missing is flash-timing adjustment (never done on PIO), `vreg`, and a SWEPT rather than guessed PSRAM
+  sampling phase. We tuned the PSRAM divisor twice, which was the wrong knob.
 - **252 MHz on PIO: RULED OUT (do not retry as-is).** The bit-banged PIO-SPI PSRAM fails the boot smoke
   test (`[psram] FAIL: pattern mismatch`). Tried and failed: (a) scaling the clkdiv to hold the SPI at its
   133 MHz-equivalent rate (252/133 = 1.895), and (b) an INTEGER divisor of 2 (126 MHz) to remove PIO
