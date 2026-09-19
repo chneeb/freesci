@@ -548,22 +548,25 @@ if(PLATFORM STREQUAL "pico")
     set(PICO_SD_SPI_KHZ "30000" CACHE STRING "SD SPI clock in kHz (30000; 12500 was the old default)")
     add_compile_definitions(PICO_SD_SPI_KHZ=${PICO_SD_SPI_KHZ})
 
-    # Core clock. 252 on the MAPPED target; 396 on PIO, device-confirmed
-    # 2026-09-18 (decode 1.6-1.9x faster, resource load 1.29x, and noticeably
-    # snappier in play). The old "PIO stays at 133, 252 fails" verdict was wrong
-    # about the CAUSE: the blocker was FLASH timing, never adjusted on PIO, not
-    # the PSRAM divisor we tuned twice. See CLAUDE.md "PIO runs at 396 MHz".
-    #
-    # RESIDUAL RISK, accepted: validated on ONE board. The PSRAM sampling phase
-    # is board-specific (pico-286 ships a sweep rather than a constant) and a
-    # MARGINAL phase fails as silent data corruption, not a clean halt. If a
-    # board shows graphical garbage or unexplained faults, drop to 133 first:
-    #     -DPICO_SYS_CLOCK_MHZ=133
+    # Core clock. 252 on the MAPPED target; 133 on PIO -- the stock clock, and
+    # the PIO DEFAULT AGAIN as of 2026-09-19, chosen for BATTERY LIFE on a
+    # handheld. 396 works and is device-confirmed (2026-09-18: decode 1.6-1.9x
+    # faster, resource load 1.29x, noticeably snappier in play), so this is a
+    # power trade, NOT a retraction -- opt in with:
+    #     -DPICO_SYS_CLOCK_MHZ=396
     # which needs no other change -- PICO_PSRAM_SM_MHZ follows it below.
+    #
+    # Do NOT re-derive the old "PIO stays at 133 because 252 fails" reasoning
+    # from this default: that verdict was wrong about the CAUSE (the blocker was
+    # FLASH timing, never adjusted on PIO, not the PSRAM divisor we tuned twice).
+    # See CLAUDE.md "PIO runs at 396 MHz". A second reason to keep 396 opt-in:
+    # it is validated on ONE board, and the PSRAM sampling phase is
+    # board-specific (pico-286 ships a sweep rather than a constant), with a
+    # marginal phase failing as silent data corruption rather than a clean halt.
     if(PICO_PSRAM_MAPPED)
         set(PICO_SYS_CLOCK_MHZ "252" CACHE STRING "Core clock in MHz")
     else()
-        set(PICO_SYS_CLOCK_MHZ "396" CACHE STRING "Core clock in MHz")
+        set(PICO_SYS_CLOCK_MHZ "133" CACHE STRING "Core clock in MHz")
     endif()
     add_compile_definitions(PICO_SYS_CLOCK_MHZ=${PICO_SYS_CLOCK_MHZ})
 

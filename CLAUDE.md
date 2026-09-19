@@ -3773,9 +3773,13 @@ SD rate, so the map parse has a real CPU component. The claim was never tested b
   `[psram] PIO clkdiv N from achieved N MHz -> SPI N MHz`. This is the trap the `[clk]` line already existed
   to expose ("trust this, not CMakeCache").
 
-**NOW THE PIO DEFAULT (2026-09-18, user decision after play-testing: "feels much snappier").** The soak
-caution below was raised and overruled on device evidence; recorded so the trade is explicit rather than
-forgotten.
+**WAS the PIO default (2026-09-18, after play-testing: "feels much snappier"); REVERTED to 133 MHz on
+2026-09-19 because the higher clock eats battery on a handheld.** Nothing here is retracted -- 396 works,
+the measurements below stand, and it is one flag away (`-DPICO_SYS_CLOCK_MHZ=396`, which drags
+`PICO_PSRAM_SM_MHZ` to 198 by itself). It is a POWER trade, and the soak caution below (one board, a
+board-specific sampling phase, silent corruption as the failure mode) is a second reason to keep it opt-in.
+**Do not read the 133 default as evidence that 396 is broken** -- that is exactly the wrong conclusion the
+old "PIO stays at 133" note led to.
 
 **`PICO_PSRAM_SM_MHZ` IS PAIRED TO THE CLOCK IN CMAKE, never defaulted independently** -- at 396 MHz a target
 of 133 gives clkdiv 3 -> SPI 66 MHz, which DEVICE-FAILED the smoke test. `-DPICO_SYS_CLOCK_MHZ=133` drags the
@@ -3866,7 +3870,7 @@ together:
 
 | | default PIO |
 |---|---|
-| `PICO_SYS_CLOCK_MHZ` / `PICO_PSRAM_SM_MHZ` | 396 / 198 -> SPI 99 MHz |
+| `PICO_SYS_CLOCK_MHZ` / `PICO_PSRAM_SM_MHZ` | **133 / 133 -> SPI 66.5 MHz** (was 396 / 198; reverted 2026-09-19 for battery life) |
 | `PICO_PWM_AUDIO` / `PICO_SND_RATE` | ON / **11025** |
 | `PICO_PSRAM_SONGS` / `PICO_STREAM_DECOMPRESS` | ON / ON |
 | `PICO_SONG_MAX_BYTES` | 65536 (follows the slots) |
