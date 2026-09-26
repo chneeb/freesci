@@ -5,7 +5,7 @@ set(PLATFORM "desktop" CACHE STRING "Target platform: desktop or pico")
 # Memory-mapped QMI PSRAM target (Pimoroni Pico Plus 2, RP2350B) instead of the
 # PicoCalc's PIO-SPI PSRAM. Declared here (before project()) because it selects
 # the board the SDK imports. Default OFF -> unchanged PicoCalc build. See
-# src/platform/pico/psram_mapped.c and CLAUDE.md "Pimoroni mapped-PSRAM target".
+# src/platform/pico/psram_mapped.c and docs/history/pico-pimoroni-mapped.md "Pimoroni mapped-PSRAM target".
 option(PICO_PSRAM_MAPPED "Use memory-mapped QMI PSRAM (Pimoroni Pico Plus 2)" OFF)
 
 # ── Pico SDK must be imported BEFORE project() so the cross-compiler is found ──
@@ -17,7 +17,7 @@ if(PLATFORM STREQUAL "pico")
     # regardless of the compile-time variant).  The pimoroni_pico_plus2_rp2350
     # board config pulls in a 16 MB-flash setup that does NOT boot cleanly here
     # (early crash, TFT noise, no serial) — pico2 is the known-good flash config
-    # our PicoCalc build already boots with. See CLAUDE.md "Pimoroni mapped-PSRAM".
+    # our PicoCalc build already boots with. See docs/history/pico-pimoroni-mapped.md "Pimoroni mapped-PSRAM".
     set(PICO_BOARD "pico2" CACHE STRING "")
 
     if(DEFINED PICO_SDK_PATH)
@@ -226,7 +226,7 @@ if(PLATFORM STREQUAL "pico")
     # ON by default: needed for kCanBeHere collision (walls, control triggers).
     # The extra ~128KB transient decode peak can OOM tight rooms; if an unvisited
     # room OOMs, rebuild with -DPICO_CONTROL_MAP=OFF to keep playing (no collision)
-    # while the peak is shrunk (bit-pack aux_map / offload priority map). See CLAUDE.md.
+    # while the peak is shrunk (bit-pack aux_map / offload priority map). See docs/history/pico-render.md.
     option(PICO_CONTROL_MAP "Decode SCI control map on Pico (collision)" ON)
     if(PICO_CONTROL_MAP)
         add_compile_definitions(PICO_DECODE_CONTROL_MAP=1)
@@ -302,7 +302,7 @@ if(PLATFORM STREQUAL "pico")
     #     removed (SQ3 door opening, picked-up glovebox item, Pestulon-logo overlay)
     #     leaves a ghost, and baked foreground (car windshield / police-dept door)
     #     redraws over later dialog boxes. Needs save-unders we can't afford; kept as
-    #     an opt-in experiment. Implies PRIORITY. See CLAUDE.md "Static-view occlusion".
+    #     an opt-in experiment. Implies PRIORITY. See docs/history/pico-render.md "Static-view occlusion".
     option(PICO_STATIC_VIEW_PRIORITY "Bake static-view priority on Pico (occlusion, no color)" ON)
     # Route the FULLSCREEN-clipped static draw of a settled stopUpd dynview to
     # the composed PSRAM surface instead of the displayed visual[0] -- the
@@ -337,13 +337,13 @@ if(PLATFORM STREQUAL "pico")
     # _init_vocabulary loads the full vocab once, prints its SRAM cost + the
     # GNF-build transient peak ([vocab] lines), then frees it and runs the game
     # parser-less as usual. OFF by default; flip on for one flash, read pico.log,
-    # flip off. See CLAUDE.md "Pico roadmap #1".
+    # flip off. See docs/history/pico-parser-vocab.md "Pico roadmap #1".
     # 4bpp groundwork. SCI0's visual buffer is 8bpp because each byte holds a
     # DITHER PAIR (two EGA indices blended by INTERCOL, hence the 256-entry
     # gfx_sci0_pic_colors). GFXR_DITHER_MODE_D16 -- "Sierra SCI style", what the
     # original hardware showed -- collapses that to ONE index per pixel with a
     # spatial checkerboard, so every value is 0..15 and the buffer can eventually
-    # be nibble-packed (64KB -> 32KB, PIO-only value; see CLAUDE.md).
+    # be nibble-packed (64KB -> 32KB, PIO-only value; see docs/history/pico-4bpp-attempt.md).
     #
     # FORCES the mode rather than defaulting it, deliberately: pic0_dither_mode is
     # a config-file option (config.l), and once the buffer is packed a stray
@@ -362,7 +362,7 @@ if(PLATFORM STREQUAL "pico")
     # an unpacked vocab shredded the free list badly enough to fail the 64KB
     # visual[0] alloc on a cross-game switch). Now DEFAULT ON — it is the shipping
     # config; the Stage-1 unpacked measurement is long done. -DPICO_PACK_VOCAB=OFF
-    # to A/B. See CLAUDE.md "Pico roadmap #1".
+    # to A/B. See docs/history/pico-parser-vocab.md "Pico roadmap #1".
     # Reboot into the chooser instead of looping back to it in-process.
     #
     # picolibc never returns sbrk'd memory on its own, and malloc_trim can only
@@ -517,7 +517,7 @@ if(PLATFORM STREQUAL "pico")
     # synth only ran an idle 22kHz IRQ outputting silence and reserved ~6.8KB SRAM
     # for its waveform table (audio/pwm_strings.h). OFF unlinks pwm_synth.c entirely
     # (full SRAM + flash recovery) and skips pwm_synth_init(). Flip ON to bring sound
-    # back — it re-compiles the synth and re-arms init in one flag. See CLAUDE.md
+    # back — it re-compiles the synth and re-arms init in one flag. See docs/history/pico-sound.md
     # "Sound on Pico (TODO)".
     # [snd] per-second production/consumption/underrun report. Diagnostic only;
     # it was what finally localised the starved sound poll.
@@ -559,7 +559,7 @@ if(PLATFORM STREQUAL "pico")
     # Do NOT re-derive the old "PIO stays at 133 because 252 fails" reasoning
     # from this default: that verdict was wrong about the CAUSE (the blocker was
     # FLASH timing, never adjusted on PIO, not the PSRAM divisor we tuned twice).
-    # See CLAUDE.md "PIO runs at 396 MHz". A second reason to keep 396 opt-in:
+    # See docs/history/pico-clock.md "PIO runs at 396 MHz". A second reason to keep 396 opt-in:
     # it is validated on ONE board, and the PSRAM sampling phase is
     # board-specific (pico-286 ships a sweep rather than a constant), with a
     # marginal phase failing as silent data corruption rather than a clean halt.

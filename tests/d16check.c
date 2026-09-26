@@ -1,6 +1,6 @@
 /* d16check.c -- verify the precondition the whole 4bpp plan rests on: that with
    GFXR_DITHER_MODE_D16 the visual map only ever holds 0..15, so it can be
-   nibble-packed (64KB -> 32KB, PIO-only value; see CLAUDE.md).
+   nibble-packed (64KB -> 32KB, PIO-only value; see docs/history/pico-4bpp-attempt.md).
 
    This is a PRECONDITION check, not a nicety. Packing a buffer that can hold a
    value above 15 corrupts the display silently -- the failure mode that made the
@@ -78,7 +78,7 @@ check_game(const char *dir, int *pics_out, int *worst_distinct)
 
 		/* NB the 8th arg (sci1) MUST be 0 for SCI0 -- passing the resmgr's
 		   sci_version mis-parses as SCI01 and yields garbage (a harness bug
-		   already paid for once, recorded in CLAUDE.md). */
+		   already paid for once, recorded in docs/history/pico-4bpp-attempt.md). */
 		gfxr_draw_pic01(pic, 1, 0, res->size, res->data, &style, res->id,
 				0, NULL, 0);
 

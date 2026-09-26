@@ -999,7 +999,7 @@ _gfxwop_dyn_view_draw(gfxw_widget_t *widget, point_t pos)
 #endif
 		/* MUST stay gfxop_draw_cel_static (forced gfx_rect_fullscreen), NOT
 		   the _clipped variant -- see "TRIED AND REVERTED: ambient clip" in
-		   CLAUDE.md. The ambient state->clip_zone here is frequently STALE
+		   docs/history/pico-render.md. The ambient state->clip_zone here is frequently STALE
 		   (often disjoint from the cel), which is exactly why upstream
 		   overrides it; measured on an SQ3 trace, the fullscreen static draw
 		   is the ONLY thing painting the cel in 75.8% of cases, so clipping

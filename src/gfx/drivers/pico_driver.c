@@ -998,7 +998,7 @@ static int pico_compose_ensure(struct _pico_state *ps)
    the composed surface, so the next BACK restore reproduces clean background
    there. This is the half that makes baking reversible -- WHO calls it (a
    stopUpd view resuming or being disposed) is engine-side and still to be
-   wired; see CLAUDE.md. No-op until something has actually been composed. */
+   wired; see docs/history/pico-render.md. No-op until something has actually been composed. */
 void pico_invalidate_static_region(struct _gfx_driver *drv, rect_t area)
 {
     struct _pico_state *ps = drv ? (struct _pico_state *)drv->state : NULL;

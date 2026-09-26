@@ -87,7 +87,7 @@ static int census_depth = 0;
 /* ── Call-site tagging — window [32,128) (the per-restore clone-variables leaker).
  * Retarget SITE_LO/HI to another size class to name a different bucket's blocks;
  * the one-flash [16384,32768) run that named the ~71KB baseline lump (resource
- * directory / packed vocab / VM stack — CLAUDE.md "DIAGNOSIS — the post-restore
+ * directory / packed vocab / VM stack — docs/history/pico-memory-oom.md "DIAGNOSIS — the post-restore
  * OOM is FRAGMENTATION + arena ratchet") has been reverted back to [32,128).
  *
  * The histogram (CENSUS line) localizes the lump to a size class; this names the

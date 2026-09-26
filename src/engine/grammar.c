@@ -53,7 +53,7 @@
 /* Byte-accurate live/peak tracker for the GNF rule allocator. Rules are
    variable-sized, so the _allocd_rules count alone can't size the build's
    transient peak; this brackets it. Throwaway — only compiled for the vocab
-   probe build, so non-probe builds are byte-identical. See CLAUDE.md roadmap #1. */
+   probe build, so non-probe builds are byte-identical. See docs/history/pico-parser-vocab.md roadmap #1. */
 int _gnf_rule_bytes = 0;
 int _gnf_rule_bytes_peak = 0;
 #define GNF_ACCOUNT(nbytes) do { \

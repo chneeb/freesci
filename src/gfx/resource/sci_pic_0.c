@@ -41,7 +41,7 @@
    in SRAM during the flood fill) fit under the ~388KB heap.  Control colours are
    0-15, so 4 bits/pixel is lossless.  These helpers are visible to the picfill
    templates (#included below) which also write the control map.
-   See CLAUDE.md "Control-map collision". */
+   See docs/history/pico-render.md "Control-map collision". */
 static inline byte ctl_get(const byte *b, int i) {
 	return (i & 1) ? (b[i >> 1] >> 4) : (b[i >> 1] & 0x0f);
 }
