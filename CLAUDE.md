@@ -56,7 +56,7 @@ Requires: `libsdl2-dev`
 ## Run
 
 ```bash
-./build/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl
+./build/src/freesci --gamedir ~/Downloads/quest/sq3 --graphics sdl
 ```
 
 ## Platform variable
@@ -252,7 +252,7 @@ Two fast ways to debug Pico issues without the slow flash cycle:
      -Isrc/include -Ibuild -I/usr/include/SDL2 -D_REENTRANT \
      -o /tmp/scidisasm src/tools/scidisasm.c \
      -Wl,--start-group $LIBS -Wl,--end-group -lSDL2 -lm -lz -lpthread -ldl
-   cd ~/Downloads/sq3 && /tmp/scidisasm   # disassembles all scripts (segfaults mid-batch)
+   cd ~/Downloads/quest/sq3 && /tmp/scidisasm   # disassembles all scripts (segfaults mid-batch)
    ```
    The stock tool segfaults partway through a full batch; to reliably get one script, patch
    `main()` to call `disassemble_script(&d, N, 1/2)` for a single N and run each in its own
@@ -263,7 +263,7 @@ Two fast ways to debug Pico issues without the slow flash cycle:
 2. **Reproduce the no-mouse path on desktop** with `--disable-mouse` (sets
    `have_mouse_flag=0`, so `kHaveMouse` returns 0 just like Pico):
    ```bash
-   ./build/src/freesci --gamedir ~/Downloads/sq3 --graphics sdl --disable-mouse --run
+   ./build/src/freesci --gamedir ~/Downloads/quest/sq3 --graphics sdl --disable-mouse --run
    ```
 
 3. **Enable engine debug flags on the *device* via a config file — no firmware change.** Drop a
