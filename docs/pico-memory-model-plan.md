@@ -66,19 +66,37 @@ reboot between games, the `malloc_trim` dead ends) is a workaround for **not bei
 
 ### Step 0 — measure the movable share (decides everything below)
 
-Census build (`-DFSCI_PROBE_MEM_CENSUS=ON`, which implies `FSCI_PROBE_MEM`) on the known OOM cases:
+**One run is enough to decide:** KQ4 with sound ON, the plain fragmentation wall. Run the SQ3 savegame load
+(sound ON) only if KQ4 gives no clear answer, or later, to size the hunk for the restore peak. That peak is
+mostly transient CFSML/restore state, so it measures something different.
 
-- KQ4 with sound ON (fragmentation wall)
-- SQ3 savegame load with sound ON
+Build (fresh directory; the census costs ~26 KB of heap ceiling, so the OOM hits *earlier* than on a clean
+build, but the composition at the failure point is still what we are after):
 
-At the peak, classify live bytes into:
+```bash
+rm -rf build-pico-census
+cmake -B build-pico-census -DPLATFORM=pico -DPICO_SDK_PATH=~/Source/pico-sdk -DPICO_BOARD=pico2 \
+      -DFSCI_PROBE_MEM_CENSUS=ON
+cmake --build build-pico-census -j$(nproc)   # -> build-pico-census/src/freesci.uf2
+```
 
-- **movable**: resource data, decoded pixmaps/cels, songs, save-unders — things that could be purged and
-  reloaded or relocated;
+On an `sci_malloc` OOM, census builds now print, after the `[OOM]` block (`census_dump_oom`,
+`pico_mem_census.c`):
+
+- `[mem] OOM free=… largest~… arena=…`: total free vs the largest allocatable block (found by bisection).
+  The gap between them is the fragmentation cost a hunk would recover.
+- `[mem] LIVE …`: the size-class histogram of **every** live block, raw `malloc` included.
+- `[mem] SITES: file:line=count/bytes`: the top 40 `sci_malloc` sites **by bytes**. Raw-`malloc` blocks
+  (e.g. `visual[0]`, decode buffers) show up only in `LIVE`, not here.
+
+The per-room `[mem] BREAKDOWN`/`CENSUS` lines still print at each room transition, which gives the build-up
+to the failure.
+
+Classify the live bytes at the failure into:
+
+- **movable**: resource data, decoded pixmaps/cels, songs, save-unders. These could be purged and
+  reloaded, or relocated.
 - **pinned**: VM heap/stack, script bufs, clone tables, widgets/ports, parser/GNF, driver state.
-
-Also record the **largest free block vs total free** at the failing allocation — that number is the
-fragmentation cost the hunk would recover.
 
 Decision rule:
 
@@ -139,7 +157,7 @@ measure the hit rate with a desktop model first.
 
 | step | state | notes |
 |---|---|---|
-| 0 measure movable share | not started | |
+| 0 measure movable share | ready to run | OOM-time dump added 2026-09-27; KQ4 + sound first |
 | 0b board-current comparison vs pico-286 (Low/Medium) | not started | needed before step 3 |
 | 1 fixed pools | not started | |
 | 2 hunk | not started | first class: view cels |

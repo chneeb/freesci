@@ -228,8 +228,8 @@ census_site_deregister(void *ptr)
    Prints the bucket histogram first: that covers EVERY live block including raw
    mallocs and anything outside the SITES window, so if the sites line comes up
    short the histogram still gives the size classes to retarget on. */
-void
-census_dump_sites(void)
+static void
+census_print(int by_bytes, int max_sites)
 {
 	int i, printed = 0;
 
@@ -247,10 +247,12 @@ census_dump_sites(void)
 		for (b = 0; b < census_nsites; b++) {
 			if (census_sites[b].live_count <= 0)
 				continue;
-			if (best < 0 || census_sites[b].live_count > census_sites[best].live_count)
+			if (best < 0 || (by_bytes
+				? census_sites[b].live_bytes > census_sites[best].live_bytes
+				: census_sites[b].live_count > census_sites[best].live_count))
 				best = b;
 		}
-		if (best < 0 || printed >= 24)
+		if (best < 0 || printed >= max_sites)
 			break;
 		printf(" %s:%d=%d/%lu", census_sites[best].file, census_sites[best].line,
 		       census_sites[best].live_count,
@@ -264,6 +266,39 @@ census_dump_sites(void)
 		if (census_sites[i].live_count < 0)
 			census_sites[i].live_count = -census_sites[i].live_count;
 	printf("\n");
+}
+
+void
+census_dump_sites(void)
+{
+	census_print(0, 24);
+}
+
+/* Called from pico_oom_report just before the halt: the heap composition AT the
+   failing allocation, which the per-room breakdowns never see.  Sites are ranked
+   by BYTES here (not count) so single large blocks are not crowded out, and the
+   largest allocatable block is found by bisection with the real allocator --
+   "largest free vs total free" is the fragmentation cost the plan's step 0
+   needs (docs/pico-memory-model-plan.md). */
+void
+census_dump_oom(void)
+{
+	struct mallinfo mi = mallinfo();
+	size_t lo = 0, hi = mi.fordblks + 1;
+
+	while (hi - lo > 16) {
+		size_t mid = lo + (hi - lo) / 2;
+		void *p = __real_malloc(mid);
+		if (p) {
+			__real_free(p);
+			lo = mid;
+		} else
+			hi = mid;
+	}
+	printf("[mem] OOM free=%lu largest~%lu arena=%lu\n",
+	       (unsigned long) mi.fordblks, (unsigned long) lo,
+	       (unsigned long) mi.arena);
+	census_print(1, 40);
 }
 
 static int
@@ -369,6 +404,7 @@ void census_site_register(void *ptr, const char *file, int line)
 { (void)ptr; (void)file; (void)line; }
 
 void census_dump_sites(void) {}
+void census_dump_oom(void) {}
 
 void *
 __wrap_malloc(size_t size)

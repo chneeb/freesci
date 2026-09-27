@@ -52,6 +52,7 @@ void pico_reset_decode_scratches(void);  /* operations.c */
 void pico_reset_decrypt_scratch(void);   /* decompress0.c */
 void pico_reset_said_scratch(void);      /* said.c */
 void census_dump_sites(void);            /* pico_mem_census.c (no-op when OFF) */
+void census_dump_oom(void);              /* pico_mem_census.c (no-op when OFF) */
 
 /* ---- HardFault diagnostics (RP2350 / Cortex-M33) ---------------------- */
 /* The RP2350 has no MMU, so a wild pointer doesn't fault at the access — but a
@@ -141,6 +142,7 @@ void pico_oom_report(const char *what, unsigned long size,
     lcd_print_string(buf);
 
     printf("[OOM]%s", buf);
+    census_dump_oom();
     stdio_flush();
     while (1) tight_loop_contents();
 }
