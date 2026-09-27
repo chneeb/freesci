@@ -321,6 +321,7 @@ start at `0x100000`), and the pinned-pool sizes (listed by category, not by size
 
 | step | state | notes |
 |---|---|---|
+| 0c `PICO_STREAM_METHODS=7` default | **done 2026-09-27** | decompdiff 2139/0 differ + controls; SQ3+sound save-load OK on device, no felt slowdown; `.bss` +4,608 → heap 478,288 B. KQ4 re-check pending |
 | 0 measure movable share | **done 2026-09-27** | movable ~15 KB, pinned dominates; OOM is fragmentation (29 KB free, largest 5.3 KB). Hunk ruled out for PIO; see step 0 result |
 | 0a const-ify `.data` tables | **done 2026-09-27, device-verified** | `.data` 34,444 → 18,092 B; heap 466,544 → 482,896 B; KQ4 + sound runs again |
 | 0b board-current comparison vs pico-286 (Low/Medium) | not started | needed before step 3 |

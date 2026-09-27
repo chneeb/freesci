@@ -461,6 +461,14 @@ int main(void)
                (clock_get_hz(clk_sys) / 1000000u) == (unsigned)PICO_SYS_CLOCK_MHZ
                  ? "" : "  <-- FELL BACK, requested clock not achieved");
         printf("[clk] SD SPI = %d kHz\n", PICO_SD_SPI_KHZ);
+        /* Which compression methods read their input through the 4 KB window
+           instead of a contiguous sci_malloc_sram(compressedLength) buffer
+           (decompress0.c). Printed because nothing else in the log shows it. */
+#ifdef PICO_STREAM_DECOMPRESS
+        printf("[decomp] streaming methods mask = %d (1=m0 2=m1 4=m2)\n", PICO_STREAM_METHODS);
+#else
+        printf("[decomp] streaming OFF\n");
+#endif
 #ifdef PICO_STATIC_COMPOSED
         {
             extern int pico_composed_enabled;

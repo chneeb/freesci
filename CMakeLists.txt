@@ -420,17 +420,22 @@ if(PLATFORM STREQUAL "pico")
     endif()
     # Which compression methods stream. Bit 0 = method 0, 1 = method 1, 2 = method 2.
     #
-    # Defaults to 1 (method 0 ONLY) on device evidence, not taste. The cost of
-    # streaming is paid per read() and so scales with RESOURCE COUNT; the benefit
-    # scales with the largest BLOCK -- and they point opposite ways:
+    # Defaults to 7 (all three) since 2026-09-27. The cost of streaming is paid
+    # per read() and scales with RESOURCE COUNT; the benefit scales with the
+    # largest BLOCK:
     #     method 0  largest 59,153 / 41,747      32 resources in SQ3
     #     method 1  largest 15,685 / 19,087     497 resources
     #     method 2  largest 10,385 / 10,429     106 resources
     # Streaming all three measured 594 -> 819 ms of decompress over SQ3's first
-    # five rooms (+37.9%). Method 0 alone captures the 59 KB allocation this work
-    # was for, at a small fraction of that cost, and drops a 59 KB memcpy too.
-    # Set to 7 to stream everything.
-    set(PICO_STREAM_METHODS "1" CACHE STRING "Bitmask of compression methods to stream (1=m0, 2=m1, 4=m2)")
+    # five rooms (+37.9%), and costs 4,608 B .bss (the 4 KB window + node table).
+    # The old default of 1 (method 0 only) assumed exhaustion-shaped OOMs, where
+    # that .bss hurts. The KQ4+sound census (docs/pico-memory-model-plan.md)
+    # showed the real failure is FRAGMENTATION -- 29 KB free, largest block
+    # 5.3 KB, dying on a 6,334 B method-1/2 compressed input -- which is exactly
+    # what streaming 1 and 2 removes. Device: SQ3 room changes did not feel
+    # slower. tests/decompdiff proves all three byte-identical (build it with
+    # -DPICO_STREAM_METHODS=7). Set to 1 to go back to method 0 only.
+    set(PICO_STREAM_METHODS "7" CACHE STRING "Bitmask of compression methods to stream (1=m0, 2=m1, 4=m2)")
     if(PICO_STREAM_DECOMPRESS)
         add_compile_definitions(PICO_STREAM_DECOMPRESS=1)
         add_compile_definitions(PICO_STREAM_METHODS=${PICO_STREAM_METHODS})

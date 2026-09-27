@@ -8,7 +8,8 @@ All Pico work is on **`master`** (the old `pico-wip-render-debug` and `pico-pimo
 merged and deleted). `origin` = upstream `wjp/freesci-archive`, `fork` = `chneeb/freesci`.
 
 - **PicoCalc / PIO PSRAM** (the default Pico build): **SRAM is the binding constraint.** The heap ceiling is
-  482,896 B raw (2026-09-27, after moving 16 KB of const tables out of `.data`; `size` reports `.data` as text, so the `.bss` baseline does not show it), the failure mode is *fragmentation* (contiguity, not total free bytes), and every OOM/arena/scratch
+  478,288 B raw (2026-09-27: +16,352 from moving const tables out of `.data`, −4,608 for streaming all
+  decompression methods; `size` reports `.data` as text, so the `.bss` baseline does not show it), the failure mode is *fragmentation* (contiguity, not total free bytes), and every OOM/arena/scratch
   lesson in `docs/history/pico-memory-oom.md` applies here.
 - **Pimoroni Pico Plus 2 / memory-MAPPED PSRAM** (`-DPICO_PSRAM_MAPPED=ON`): engine allocations default to a
   6 MB PSRAM heap, SRAM sits ~163 KB with `chunks=1`, and the ceiling/fragmentation problems **do not apply**.
@@ -99,8 +100,8 @@ Everything else defaults correctly; the mapped-only options (`PICO_PSRAM_SCRIPTS
 `PICO_WORKING_PRIORITY`) are all ON and each is an A/B switch.
 
 **After ANY shared-file change, rebuild the PIO target and check its `.bss` is unchanged** — that is the
-guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 25,344** (sound ON,
-measured 2026-09-26; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
+guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 29,952** (sound ON, `PICO_STREAM_METHODS=7`,
+measured 2026-09-27; it was 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
 17,608) are from earlier configs, not regressions:
 ```bash
 cmake --build build-pico -j$(nproc) && arm-none-eabi-size build-pico/src/freesci.elf
@@ -139,9 +140,9 @@ grep -E '^(PICO_|FSCI_)[A-Z_]*:BOOL' build-pico/CMakeCache.txt | sort
 and when a default changes, `rm -rf` the dir and re-configure rather than rebuilding in place. The canonical
 PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO_STATIC_VIEW_PRIORITY`,
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
-`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS`, `PICO_SONG_MAX_BYTES=65536`); 133 MHz
+`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`); 133 MHz
 (`PICO_SYS_CLOCK_MHZ=396` is opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
-itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 25,344.
+itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 29,952.
 
 The game chooser offers per-launch toggles, so many A/Bs need no rebuild: **`[S]`** sound (off = `-q`),
 **`[C]`** composed surface, **`[V]`** static-view priority (PIO only; Colonel's Bequest needs `[V]` off to show

@@ -20,7 +20,7 @@ BUILD
     cd tests/decompdiff
     cp ../../src/scicore/decompress0.c stream_decomp.c
     gcc -c -fgnu89-inline -w -DHAVE_CONFIG_H=1 -DX_DISPLAY_MISSING=1 \
-        -DPICO_STREAM_DECOMPRESS=1 -include streamprefix.h \
+        -DPICO_STREAM_DECOMPRESS=1 -DPICO_STREAM_METHODS=7 -include streamprefix.h \
         -I. -I../../src/include -I../../build -I/usr/include/SDL2 -D_REENTRANT \
         -o stream_decomp.o stream_decomp.c
     LIBS=$(find ../../build -name '*.a' | tr '\n' ' ')
@@ -28,6 +28,12 @@ BUILD
         -I../../src/include -I../../build -I/usr/include/SDL2 -D_REENTRANT \
         -o decompdiff decompdiff_main.c stream_decomp.o \
         -Wl,--start-group $LIBS -Wl,--end-group -lSDL2 -lm -lz -lpthread -ldl
+
+    PICO_STREAM_METHODS=7 is REQUIRED here: the default is 1 (method 0 only),
+    which leaves methods 1 and 2 on the stock path in BOTH halves of the
+    compare, so they pass trivially and the window control below cannot fire.
+    Re-run 2026-09-27 with =7: 2139 resources, 0 differ; controls 32 / 603 /
+    106 / 0 exactly as listed.
 
     Re-copy stream_decomp.c after every edit to src/scicore/decompress0.c --
     it is a COPY, so an un-copied edit silently tests the previous version.

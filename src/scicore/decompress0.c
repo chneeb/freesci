@@ -190,13 +190,15 @@ stream_at(decomp_stream_t *s, unsigned int i)
      method 1   largest 15,685 / 19,087    497 resources
      method 2   largest 10,385 / 10,429    106 resources
 
-   So method 0 alone captures the whole prize (it is the 59 KB allocation that
-   motivated this work) for a small fraction of the cost, and additionally drops
-   a 59 KB memcpy rather than adding work.  Hence the default of 1.
+   Method 0 alone captures the single biggest allocation (59 KB), which is why
+   the default was once 1.  It is 7 since 2026-09-27: the KQ4+sound census
+   showed the binding failure is fragmentation, dying on a 6,334 B method-1/2
+   compressed input with 29 KB free, which only streaming methods 1 and 2
+   removes (see CMakeLists.txt and docs/pico-memory-model-plan.md).
 
    Bit 0 = method 0, bit 1 = method 1, bit 2 = method 2.  7 streams everything. */
 #ifndef PICO_STREAM_METHODS
-#  define PICO_STREAM_METHODS 1
+#  define PICO_STREAM_METHODS 7
 #endif
 #  define STREAM_M0 (PICO_STREAM_METHODS & 1)
 #  define STREAM_M1 (PICO_STREAM_METHODS & 2)
@@ -625,11 +627,9 @@ int decompress0(resource_t *result, int resh, int sci_version)
 #endif
 
 #ifdef PICO_STREAM_DECOMPRESS
-	/* Phase 1: only method 1 (LZW) streams.  Methods 0 and 2 still take the
-	   flat buffer, so they must still allocate it.  Method 1 is the dominant
-	   case by a wide margin -- measured over SQ3/PQ2/KQ4, 1747 of 2139
-	   resources -- so this already removes most of the large contiguous
-	   allocations. */
+	/* Methods selected by PICO_STREAM_METHODS (default 7 = all three) read
+	   through the window; any method left out still allocates the flat
+	   compressed-input buffer below. */
 	if ((compressionMethod == 0 && STREAM_M0) ||
 	    (compressionMethod == 1 && STREAM_M1) ||
 	    (compressionMethod == 2 && STREAM_M2)) {
