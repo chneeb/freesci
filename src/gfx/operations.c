@@ -2703,17 +2703,59 @@ gfxop_add_to_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		return GFX_ERROR;
 	}
 
-	if (!(state->pic = gfxr_add_to_pic(state->resstate, state->pic_nr, nr,
-					   GFX_MASK_VISUAL, flags, state->palette_nr, default_palette, 1))) {
+#if defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)
+	/* Overlay decodes (SQ3 "Pirates of Pestulon") used to need a FRESH 64KB
+	   contiguous visual buffer while visual[0] stayed resident. On a fragmented
+	   heap that malloc fails, gfxr_add_to_pic ignores the decode's GFX_ERROR,
+	   and the overlay silently never draws (the logged `malloc 64000 failed`
+	   pair). Borrow visual[0] exactly as gfxop_new_pic does: restore_base
+	   reloads the base pic from PSRAM into it before the overlay draws, and
+	   pico_render_background restages visual[0] from the re-offloaded
+	   composite afterwards. */
+	{
+		byte *vis = pico_get_visual(state->driver);
+		if (vis) {
+			g_pico_decode_visual_buf = vis;
+			g_pico_decode_visual_borrowed = 1;
+		}
+		g_pico_visual_defer_failed = 0;
+	}
+#endif
+	state->pic = gfxr_add_to_pic(state->resstate, state->pic_nr, nr,
+				     GFX_MASK_VISUAL, flags, state->palette_nr, default_palette, 1);
+#if defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)
+	/* Detach whether or not the decode consumed the pin: visual[0] belongs to
+	   the driver and must never be freed through this pointer. */
+	g_pico_decode_visual_buf = NULL;
+	g_pico_decode_visual_borrowed = 0;
+#endif
+	if (!state->pic) {
 		GFXERROR("Could not add pic #%d to pic #%d!\n", state->pic_nr, nr);
 		return GFX_ERROR;
 	}
+#if defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)
+	/* At 1x the scaled and unscaled pic are the same object (gfxr_add_to_pic
+	   returns res->scaled_data.pic both times), so the second call only
+	   re-decoded the overlay onto the finished composite. gfxop_new_pic already
+	   skips it the same way. */
+	if (state->driver->mode->xfact == 1 && state->driver->mode->yfact == 1)
+		state->pic_unscaled = state->pic;
+	else
+#endif
 	state->pic_unscaled = gfxr_add_to_pic(state->resstate, state->pic_nr, nr,
 					      GFX_MASK_VISUAL, flags,
 					      state->palette_nr,
 					      default_palette, 1);
 
+#if defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)
+	{
+		int ret = _gfxop_set_pic(state);
+		pico_render_background(state->driver);
+		return ret;
+	}
+#else
 	return _gfxop_set_pic(state);
+#endif
 }
 
 

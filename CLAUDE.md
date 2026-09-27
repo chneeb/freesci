@@ -320,6 +320,9 @@ Memory (`pico-memory-oom.md`):
 - Adding a field to a FreeSCI widget struct: `_gfxw_new_widget` does **not** memset — initialise it by hand.
 - When adding a path that frees a shared buffer, copy the guards of the existing free sites
   (`priority_is_scratch`, `PICO_IS_DECOMPRESS_SCRATCH`).
+- Every PIO pic decode borrows `visual[0]` as its visual buffer — `gfxop_new_pic` AND `gfxop_add_to_pic`
+  (overlays). A decode that needs a fresh 64 KB block fails silently on a fragmented heap:
+  `gfxr_add_to_pic` ignores the decode's return value (the SQ3 Pestulon bug, fixed 2026-09-27).
 
 Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 - `free`/`realloc` route by **ownership** (`psram_heap_owns`) at the single `--wrap` chokepoint in
@@ -357,8 +360,6 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   restores into composed. (render)
 - **SQ3 intro Two Guys panels persist as bands** — accepted; caused by `PICO_STATIC_VIEW_PRIORITY`, real fix is a
   transient working priority map (no SRAM for it on PIO). (render)
-- **SQ3 "Pirates of Pestulon" intermittently missing** — overlay path fragility; capture `[ovl]` on a failing
-  run. Untried fix: give `gfxop_add_to_pic` the `visual[0]` borrow. (render)
 - **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints need `[V]` off; hits true
   exhaustion (use `[S]` off). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)

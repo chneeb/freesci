@@ -726,7 +726,33 @@ else in that block (it also sets `pico_priority_only_static` and bakes priority 
 **Start there, and bisect rather than reason -- the bisect found in one flash what three rounds of code
 reading did not.**
 
+### FIXED (device-confirmed 2026-09-27) — SQ3 "Pirates of Pestulon" missing: the overlay decode's 64 KB buffer
+
+**Symptom → cause, closed.** The user established the correlation on device: the title is missing
+**exactly when** the log shows the `malloc 64000 failed` pair. Mechanism, read from the code:
+`gfxop_add_to_pic` had no `visual[0]` borrow, so the overlay decode (`sci_resmgr.c`, the deferred
+`malloc(GFXR_AUX_MAP_SIZE)`) needed a fresh contiguous 64 KB block while `visual[0]` stayed resident. On a
+fragmented heap it failed and returned `GFX_ERROR` — but **`gfxr_add_to_pic` ignores the return value of
+`gfxr_interpreter_calculate_pic`**, so nothing errored (hence never a `Could not add pic`), the overlay's
+commands never ran, and the logo stayed on screen without the title. Two lines because `gfxop_add_to_pic`
+called `gfxr_add_to_pic` twice (scaled + "unscaled"), and both allocations failed. The 2026-06-29 note that
+"the logo was lost inside a decode that completed" was wrong about completion: the decode aborted, silently.
+
+**Fix (`operations.c` `gfxop_add_to_pic`, PIO only — `HAVE_PICO && !PICO_PSRAM_MAPPED`):** the untried
+fix recorded above. Arm the `visual[0]` borrow before the decode exactly as `gfxop_new_pic` does
+(`restore_base` reloads the base pic from PSRAM into it first; `sci_resmgr` skips every free of a borrowed
+buffer), detach it afterwards, and restage `visual[0]` with `pico_render_background` after `_gfxop_set_pic`
+(stage only, no LCD flush). Also skip the redundant second `gfxr_add_to_pic` at 1x: it returned the same
+`res->scaled_data.pic` after re-decoding the overlay onto the finished composite (`gfxop_new_pic` already
+skips it the same way). Net: an overlay decode now needs **no** 64 KB allocation and runs once, not twice.
+
+**Device:** SQ3 with sound, the new firmware (also `PICO_STREAM_METHODS=7`): the `malloc 64000 failed` pair
+is gone and the title shows over the logo; intro, savegame load and exit all clean. The Pimoroni build is
+untouched (its `.bss` is unchanged); the PIO `.bss` is unchanged by this fix.
+
 ### Also accepted: SQ3 "Pirates of Pestulon" is INTERMITTENT, and separate from the above
+
+**Superseded 2026-09-27: FIXED, see the section just above.**
 
 Same binary, missing on one run and correct on the next (2026-09-12). Unlike the panels this is NOT
 deterministic, so it is a different bug -- the long-standing runtime-state fragility of the overlay path.
