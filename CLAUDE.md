@@ -8,7 +8,7 @@ All Pico work is on **`master`** (the old `pico-wip-render-debug` and `pico-pimo
 merged and deleted). `origin` = upstream `wjp/freesci-archive`, `fork` = `chneeb/freesci`.
 
 - **PicoCalc / PIO PSRAM** (the default Pico build): **SRAM is the binding constraint.** The heap ceiling is
-  466,544 B raw (2026-09-27; `.data` is 34 KB of SRAM that `size` reports as text), the failure mode is *fragmentation* (contiguity, not total free bytes), and every OOM/arena/scratch
+  482,896 B raw (2026-09-27, after moving 16 KB of const tables out of `.data`; `size` reports `.data` as text, so the `.bss` baseline does not show it), the failure mode is *fragmentation* (contiguity, not total free bytes), and every OOM/arena/scratch
   lesson in `docs/history/pico-memory-oom.md` applies here.
 - **Pimoroni Pico Plus 2 / memory-MAPPED PSRAM** (`-DPICO_PSRAM_MAPPED=ON`): engine allocations default to a
   6 MB PSRAM heap, SRAM sits ~163 KB with `chunks=1`, and the ceiling/fragmentation problems **do not apply**.

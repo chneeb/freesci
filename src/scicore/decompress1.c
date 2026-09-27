@@ -49,17 +49,17 @@ struct bit_read_struct {
 #define LEAF_NODE(pos, value)  ((value) | HUFFMAN_LEAF),
 
 
-static int length_tree[] = {
+static const int length_tree[] = {
 #include "treedef.1"
 	0 /* We need something witout a comma at the end */
 };
 
-static int distance_tree[] = {
+static const int distance_tree[] = {
 #include "treedef.2"
 	0 /* We need something witout a comma at the end */
 };
 
-static int ascii_tree[] = {
+static const int ascii_tree[] = {
 #include "treedef.3"
 	0 /* We need something witout a comma at the end */
 };
@@ -122,7 +122,7 @@ getbits(struct bit_read_struct *inp, int bits)
 }
 
 static int
-huffman_lookup(struct bit_read_struct *inp, int *tree)
+huffman_lookup(struct bit_read_struct *inp, const int *tree)
 {
 	int pos = 0;
 	int bit;

@@ -2,7 +2,7 @@
 
 #include <gfx_system.h>
 
-static int gfxfont_6x10_widths[] = {
+static const int gfxfont_6x10_widths[] = {
 	6,	/* 0x00 */
 	6,	/* 0x01 */
 	6,	/* 0x02 */
@@ -261,7 +261,7 @@ static int gfxfont_6x10_widths[] = {
 	6	/* 0xff */
 };
 
-static unsigned char gfxfont_6x10_data[] = {
+static const unsigned char gfxfont_6x10_data[] = {
 	/* 0x00 ('.') */
 	0x00, 	/* ............ */
 	0xa8, 	/* ##..##..##.. */
@@ -3083,10 +3083,10 @@ static unsigned char gfxfont_6x10_data[] = {
 gfx_bitmap_font_t gfxfont_6x10 = {
 	-1, /* resource ID */
 	256, /* # of characters */
-	gfxfont_6x10_widths, /* Widths */
+	(int *) gfxfont_6x10_widths, /* Widths; const table in flash, never written */
 	1, /* Bytes per row */
 	11, /* Line height */
 	10, /* Char height */
 	10, /* Char size (occupied, in bytes) */
-	gfxfont_6x10_data /* Bulk data */
+	(byte *) gfxfont_6x10_data /* Bulk data; const, never written */
 };

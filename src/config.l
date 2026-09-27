@@ -239,7 +239,7 @@ typedef struct {
 /* Read a rectangle */
 
 
-standard_option standard_options[] = {
+const standard_option standard_options[] = {
 	OPT_RECT("pic_port_bounds", gfx_options.pic_port_bounds),
 	OPT_NVP("pic0_dither_mode", gfx_options.pic0_dither_mode, valid_modes),
 	OPT_NVP("color_mode", gfx_options.pic0_dither_mode, valid_modes),
@@ -869,7 +869,7 @@ static void
 parse_option(char *option, int optlen, char *value)
 {
 	int optindex = 0;
-	standard_option *opt = NULL;
+	const standard_option *opt = NULL;
 
 	while (!opt && standard_options[optindex].type)
 		if (optlen == strlen(standard_options[optindex].name)

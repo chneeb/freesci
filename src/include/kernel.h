@@ -398,6 +398,6 @@ typedef struct {
 	kfunct_sig_pair_t new;
 } sci_kernel_function_t;
 
-extern sci_kernel_function_t kfunct_mappers[];
+extern const sci_kernel_function_t kfunct_mappers[];
 
 #endif /* _SCI_KERNEL_H_ */

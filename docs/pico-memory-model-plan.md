@@ -106,6 +106,51 @@ Decision rule:
   "works like desktop" target and PIO as best-effort. Step 3 is the only lever left and needs the
   justification from §1.
 
+### Step 0 — RESULT (KQ4 + sound, census build, 2026-09-27; `pico.log`)
+
+Census build from *before* step 0a (so ~16 KB less heap than today, plus the ~26 KB census cost). 133 MHz.
+
+- **Symptoms before the halt:** `malloc 14170 failed` → `sound.001` missing (room 96), `malloc 7817` →
+  `sound.002` missing (room 698), `malloc 5620` (room 201). These are graceful raw-malloc skips, so the music
+  silently disappears first.
+- **Halt:** room 201, `sci_malloc_sram(6334)` for the compressed-input buffer at `decompress0.c:640`
+  (a method 1/2 resource: `PICO_STREAM_METHODS=1` streams only method 0).
+- **`[mem] OOM free=28976 largest~5290 arena=440260`**: the arena is at the ceiling, **29 KB is free but the
+  largest piece is 5.3 KB.** This failure is pure fragmentation: an unfragmented heap would have served it
+  4× over.
+
+Live heap at the halt (`used` = 411,284 B including headers; sites are `sci_malloc` blocks ≥ 128 B):
+
+| class | bytes | what |
+|---|---:|---|
+| permanent by design | ~142 KB | `visual[0]` 64,004 (`pico_driver.c:391`); decode scratches 48 KB (raw, inferred); LZW token tables 16,392 (`decompress0.c:303/304`); sound mixer ~13.6 KB (`soft.c`) |
+| VM, pinned | ~93 KB | script bufs 43,336 (`seg_manager.c:242`, 14 scripts); VM stack 16,388 (`:1362`); script hashmaps 15,540 (`int_hashmap.c:33`); clone/list/node tables ~13 KB (`:1450/1449/1158/1332`); `state_t` 5,044 |
+| engine index / UI, pinned | ~63 KB | **resource directory 38,724** (`resource_patch.c:99`, 968 × 40 B `resource_t`); gfx resource trees 6,136; vocab ~7 KB; widgets/menus ~6 KB |
+| **movable** | **~15 KB** | decoded fonts 13,848 (`sci_font.c:107/137`), sound iterators ~1 KB. The resource cache is essentially empty: the Pico already flushes it. |
+| untagged | ~98 KB | blocks < 128 B (~3,300 of them, ≥ 38 KB), other raw mallocs, ~11 KB of malloc headers |
+
+**Decision (per the rule above): pinned dominates, so a Sierra-style hunk for movable data would recover
+~15 KB and does not rescue PIO.** Steps 2 and 3 are therefore off the table for PIO unless something changes.
+What the data *does* point at is fragmentation by small pinned blocks interleaved with transient decode
+buffers:
+
+1. **Re-run on a clean build with step 0a.** That is ~42 KB more heap than this run (16 KB const tables +
+   26 KB census), and it may be enough to move KQ4+sound past room 201. Cheap; do this first.
+2. **`-DPICO_STREAM_METHODS=7`.** The failing request is exactly the class this flag removes (7–19 KB
+   method-1/2 compressed inputs). Its known cost is 4.6 KB `.bss` + 38% decompress time, and
+   `pico-sound.md` records that it helps fragmentation-shaped failures and hurts exhaustion-shaped ones.
+   This one is fragmentation-shaped. One-flag A/B.
+3. **Name the < 128 B blocks** (step 1's input). The census can't: `CENSUS_NPTRS` is 2048 and there are
+   ~3,300 small blocks. Do it on **desktop** with a site histogram instead, since the engine's allocation
+   pattern is the same code. Pooling them is what stops them pinning gaps.
+4. **Shrink or relocate the 38.7 KB resource directory.** It is the largest single pinned engine block after
+   `visual[0]`; a packed `resource_t` could plausibly halve it.
+
+**Census accounting bug:** the `[16,32)`-ish bucket shows a *negative* count (−1,123 blocks, −21,884 B), so
+`LIVE` totals are low by at least that much. Likely cause (unverified): newlib-internal allocations
+(`strdup`, stdio) go through `_malloc_r`, which `--wrap=malloc` does not catch, while their `free()`
+*is* caught. Trust `mallinfo` (`arena`/`free`) over the `LIVE` total until fixed.
+
 ### Step 1 — fixed pools for the fixed-size churn (cheap, independent)
 
 pico-286's static-array principle applied to FreeSCI's small, frequent, fixed-size allocations (widgets,
@@ -155,15 +200,24 @@ The RP2350's "520 KB" is 532,480 B: 512 KB main SRAM (`0x20000000–0x20080000`)
 | `.ram_vector_table` | 272 | |
 | `.data` | 34,444 | initialised tables + RAM-resident code. **`arm-none-eabi-size` reports this under `text`, not `data`, so the `.bss` baseline does not show it.** |
 | `.bss` (+ 2 KB `.heap` min) | 23,024 (+2,048) | size's "bss 25,344" = `.bss` + `.heap` + vector table |
-| **heap** (`__end__` `0x2000e190` → `__HeapLimit` `0x20080000`) | **466,544** | everything `malloc` can ever hand out, including the 2 KB `.heap` section |
+| **heap** (`__end__` `0x2000e190` → `__HeapLimit` `0x20080000`) | **466,544** | everything `malloc` can ever hand out, including the 2 KB `.heap` section. **482,896 after step 0a.** |
 
 The "~475 KB" in older notes is from earlier configs. Out of the 466,544 B, `visual[0]` (64,000) and the
-decode scratches (48 KB) are permanent, which leaves ≈ 355 KB for the engine.
+decode scratches (48 KB) are permanent, which leaves ≈ 355 KB for the engine (≈ 371 KB after step 0a).
 
-The largest `.data` items look like tables that are never written: fonts `gfxfont_5x8_*`/`gfxfont_6x10_*`
-(6.6 KB), `kfunct_mappers` (2.7 KB), `con_builtin_font_data` (2 KB), `ascii_tree` (2 KB), `sci_games`,
-`standard_options`. That is ~15 KB that could be made `const` and moved to flash. **Unverified**: check that
-each is truly read-only before moving it. It is a cheap, independent win that is worth doing before step 1.
+**Done 2026-09-27 (step 0a):** the never-written tables were made `const`, which moves them to flash:
+`kfunct_mappers`, the 5×8/6×10 font data and widths, `con_builtin_font_data`, the DCL `ascii`/`length`/
+`distance` trees, `sci_games`, `standard_options` (edited in `config.l` and the pre-generated `config.c` in
+lockstep), and `sci0_default_knames`. `.data` went from 34,444 to 18,092 B and the **heap from 466,544 to
+482,896 B**; `.bss` is unchanged at 25,344. Excluded because something writes them: `formats` (`script.c`
+patches it), `_about_freesci_pages` (colours set at runtime), the pixmap colour tables, `sd_cards`,
+`sysex_buffer`. `default_rhythm_keymap` (256 B, MT-32 only) was skipped: it would need const-correcting the
+whole `midi_mt32_poke` chain.
+
+What remains in `.data` is mostly code that the SDK linker script (`memmap_default.ld`) deliberately runs
+from RAM: all of libgcc (~4 KB soft-double math and 64-bit division, plus ~3.9 KB of the ARM unwinder, which
+never runs in normal operation), newlib `mem*`, and the TinyUSB IRQ path. Moving the unwinder and double math
+back to flash would need a custom linker script. That is ~8 KB, possible but not free, and not attempted.
 
 ### Proposed SRAM layout (sizes marked `?` are placeholders until step 0)
 
@@ -260,9 +314,9 @@ start at `0x100000`), and the pinned-pool sizes (listed by category, not by size
 
 | step | state | notes |
 |---|---|---|
-| 0 measure movable share | ready to run | OOM-time dump added 2026-09-27; KQ4 + sound first |
-| 0a const-ify `.data` tables (~15 KB) | not started | independent, cheap; verify each table is read-only |
+| 0 measure movable share | **done 2026-09-27** | movable ~15 KB, pinned dominates; OOM is fragmentation (29 KB free, largest 5.3 KB). Hunk ruled out for PIO; see step 0 result |
+| 0a const-ify `.data` tables | done 2026-09-27, desktop-verified | `.data` 34,444 → 18,092 B; heap 466,544 → 482,896 B; not yet run on device |
 | 0b board-current comparison vs pico-286 (Low/Medium) | not started | needed before step 3 |
 | 1 fixed pools | not started | |
-| 2 hunk | not started | first class: view cels |
+| 2 hunk | **not worth it on PIO** (step 0) | movable share ~15 KB |
 | 3 VM accessor + page cache | not started | conditional on §1 |

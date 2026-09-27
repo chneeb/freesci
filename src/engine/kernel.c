@@ -194,7 +194,7 @@ static int sci_max_allowed_unknown_kernel_functions[] = {
 #define DEFUN(nm, cname, sig) {KF_NEW, nm, {cname, sig, NULL}}
 #define NOFUN(nm) {KF_NONE, nm, {NULL, NULL, NULL}}
 
-sci_kernel_function_t kfunct_mappers[] = {
+const sci_kernel_function_t kfunct_mappers[] = {
 /*00*/	DEFUN("Load", kLoad, "iii*"),
 /*01*/	DEFUN("UnLoad", kUnLoad, "i.*"),
 /*02*/	DEFUN("ScriptID", kScriptID, "Ioi*"),

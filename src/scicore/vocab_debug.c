@@ -11,7 +11,7 @@
 #define SCI0_KNAMES_WELL_DEFINED 0x6e
 #define SCI0_KNAMES_DEFAULT_ENTRIES_NR 0x72
 
-const char *sci0_default_knames[SCI0_KNAMES_DEFAULT_ENTRIES_NR] =
+const char *const sci0_default_knames[SCI0_KNAMES_DEFAULT_ENTRIES_NR] =
 {
 /*0x00*/ "Load",
 /*0x01*/ "UnLoad",

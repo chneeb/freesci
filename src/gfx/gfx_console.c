@@ -48,7 +48,7 @@
 
 #define CON_GFX_PROMPT "$ "
 
-extern byte con_builtin_font_data[];
+extern const byte con_builtin_font_data[];
 
 typedef struct {
 	int height; /* Number of pixels occupied by this entry, or 0 if unused */
@@ -470,7 +470,7 @@ _init_con_font()
 	con_font.row_size = (CON_BUILTIN_CHARS_WIDTH + 7) >> 3;
 	con_font.height = con_font.line_height = CON_BUILTIN_CHARS_HEIGHT;
 	con_font.char_size = ((CON_BUILTIN_CHARS_WIDTH + 7) >> 3) * CON_BUILTIN_CHARS_HEIGHT;
-	con_font.data = con_builtin_font_data;
+	con_font.data = (byte *) con_builtin_font_data; /* const table, never written */
 
 	con_font_initialized = 1;
 }
@@ -1188,7 +1188,7 @@ _free_con_buffer(con_buffer_t *buf)
 }
 
 
-byte con_builtin_font_data[] = {
+const byte con_builtin_font_data[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x7e, 0x81, 0xa5, 0x81, 0xbd, 0x99, 0x81, 0x7e,
   0x7e, 0xff, 0xdb, 0xff, 0xc3, 0xe7, 0xff, 0x7e,

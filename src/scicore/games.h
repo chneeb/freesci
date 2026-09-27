@@ -42,7 +42,7 @@ typedef struct _sci_game {
 } sci_game_t;
 
 /* Interpreter versions for Amiga and Atari ST ports are tentative */
-sci_game_t sci_games[] = {
+const sci_game_t sci_games[] = {
 	{ 0x5D451535, SCI_VERSION_AUTODETECT, SCI_VERSION(1,000,510), "Leisure Suit Larry 1 v1.0-mac"}, /* x.yyy.zzz */ /* Launcher says v2.0, game crashes on DoAvoider */
 	{ 0x6C176EE0, SCI_VERSION_AUTODETECT, SCI_VERSION(1,000,577), "Leisure Suit Larry 1 v2.1"},
 	{ 0x1C36E076, SCI_VERSION_AUTODETECT, SCI_VERSION(1,000,510), "Leisure Suit Larry 1 v1.000-es"}, /* 1.SQ4.057 */ /* Crashes on function 0x7b */
