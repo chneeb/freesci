@@ -363,9 +363,10 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 - **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints need `[V]` off; hits true
   exhaustion (use `[S]` off). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)
-- **KQ4 with sound** now runs (2026-09-27, one clean-build session after the 16 KB const-table move: no
-  allocation failures, music played) -- margin unknown, re-check if anything grows the heap. **SQ3 savegame
-  load with sound ON** OOMs (not re-tested since the const move). (sound)
+- **KQ4 with sound** now runs (2026-09-27: after the const-table move, and again on `33be492c` with
+  `PICO_STREAM_METHODS=7` -- intro, restart and a savegame load, no allocation failures). Margin unmeasured;
+  re-check if anything grows the heap. **SQ3 savegame
+  load with sound ON** works again (2026-09-27, three device runs). (sound)
 - **After a failed game, no further game starts** until power cycle — undiagnosed. (sound)
 - **Dropped notes** — upstream has no OPL voice stealing (`opl2.c`). (sound)
 - **Runtime actor-to-actor control writes** are a no-op (`state->control_map` NULL). (misc)
