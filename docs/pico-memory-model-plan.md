@@ -134,6 +134,13 @@ Live heap at the halt (`used` = 411,284 B including headers; sites are `sci_mall
 What the data *does* point at is fragmentation by small pinned blocks interleaved with transient decode
 buffers:
 
+**Follow-up 1 — DONE 2026-09-27: KQ4 + sound now works** on the clean shipping build with step 0a
+(uf2 from `cca70a03`). One session, including an in-game restart: **no `malloc … failed` lines at all**, so
+the music resources that silently dropped before (`sound.001`/`.002`) now load, and songs played
+(`Song finished` lines; the user had the volume turned down, so audibility was not checked). Resource scan
+21.1 s. Probes were off, so the rooms visited and the remaining margin are **not** recorded. Treat KQ4+sound
+as fitting but thin: the underlying fragmentation is unchanged, and items 2–4 remain the ways to widen it.
+
 1. **Re-run on a clean build with step 0a.** That is ~42 KB more heap than this run (16 KB const tables +
    26 KB census), and it may be enough to move KQ4+sound past room 201. Cheap; do this first.
 2. **`-DPICO_STREAM_METHODS=7`.** The failing request is exactly the class this flag removes (7–19 KB
@@ -315,7 +322,7 @@ start at `0x100000`), and the pinned-pool sizes (listed by category, not by size
 | step | state | notes |
 |---|---|---|
 | 0 measure movable share | **done 2026-09-27** | movable ~15 KB, pinned dominates; OOM is fragmentation (29 KB free, largest 5.3 KB). Hunk ruled out for PIO; see step 0 result |
-| 0a const-ify `.data` tables | done 2026-09-27, desktop-verified | `.data` 34,444 → 18,092 B; heap 466,544 → 482,896 B; not yet run on device |
+| 0a const-ify `.data` tables | **done 2026-09-27, device-verified** | `.data` 34,444 → 18,092 B; heap 466,544 → 482,896 B; KQ4 + sound runs again |
 | 0b board-current comparison vs pico-286 (Low/Medium) | not started | needed before step 3 |
 | 1 fixed pools | not started | |
 | 2 hunk | **not worth it on PIO** (step 0) | movable share ~15 KB |
