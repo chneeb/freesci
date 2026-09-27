@@ -43,6 +43,9 @@ experiments were moved **verbatim** to `docs/history/` — read the relevant one
 
 `PICO_SQ3_SRAM_CEILING_ASSESSMENT.md` (repo root) is the Codex SRAM-ceiling assessment referenced in the memory history.
 
+**Forward plan:** `docs/pico-memory-model-plan.md` — PIO memory-model refactor (fixed pools, Sierra-style
+purgeable hunk, VM accessor) derived from the pico-286 comparison. Read it before starting new OOM/fragmentation work.
+
 ## Build
 
 ```bash
@@ -346,6 +349,8 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 
 ## Pico — open issues
 
+- **PIO memory model** — the fragmentation wall behind most OOMs below is structural (general `malloc`, pinned
+  big blocks). Plan and status: `docs/pico-memory-model-plan.md`; step 0 (census: movable vs pinned share) not run. (memory)
 - **PIO dialog bleed / SQ3 door not closing** — composed surface (2c) fixed PQ2; the SQ3 door is baked once and
   never redrawn, which neither invalidation rule distinguishes from stale. Next idea: mirror save-under
   restores into composed. (render)

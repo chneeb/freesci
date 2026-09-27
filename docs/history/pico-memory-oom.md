@@ -4,6 +4,9 @@
 > **historical record**: investigation logs, retracted theories and reverted experiments. Line numbers,
 > "pending retest" markers and `.bss` figures reflect the date of each entry, not the current tree.
 > The current state and the standing rules live in `CLAUDE.md`.
+>
+> **Forward plan (2026-09-27):** the structural fix for the fragmentation wall recorded here is planned in
+> `docs/pico-memory-model-plan.md`.
 
 <!-- from CLAUDE.md lines 200-233 -->
 
