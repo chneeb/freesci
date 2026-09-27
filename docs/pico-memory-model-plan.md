@@ -49,7 +49,7 @@ headroom for our own fixes). If neither is compelling, stop after step 2.
 
 ## 2. Why FreeSCI hits the wall and Sierra does not
 
-Our ~475 KB SRAM heap ceiling is in the same range as what Sierra had free under DOS. The difference is the
+Our SRAM heap (466,544 B raw on the current default build; see §3a) is in the same range as what Sierra had free under DOS. The difference is the
 allocator discipline, not the byte count:
 
 | | Sierra SCI0 (inside pico-286) | FreeSCI on PIO |
@@ -143,6 +143,109 @@ read-write; a write-back cache handles writes. It is untested, FreeSCI takes raw
 many places, and per-access cost at 133 MHz is unknown. Only attempt with the §1 justification in hand, and
 measure the hit rate with a desktop model first.
 
+## 3a. Where the 520 KB goes, and a proposed fixed layout
+
+### Today (default PIO build, measured 2026-09-27 from `build-pico/src/freesci.elf`)
+
+The RP2350's "520 KB" is 532,480 B: 512 KB main SRAM (`0x20000000–0x20080000`) plus two 4 KB scratch banks.
+
+| region | bytes | notes |
+|---|---:|---|
+| SCRATCH_X + SCRATCH_Y | 8,192 | stacks (`__StackTop` = `0x20082000`) |
+| `.ram_vector_table` | 272 | |
+| `.data` | 34,444 | initialised tables + RAM-resident code. **`arm-none-eabi-size` reports this under `text`, not `data`, so the `.bss` baseline does not show it.** |
+| `.bss` (+ 2 KB `.heap` min) | 23,024 (+2,048) | size's "bss 25,344" = `.bss` + `.heap` + vector table |
+| **heap** (`__end__` `0x2000e190` → `__HeapLimit` `0x20080000`) | **466,544** | everything `malloc` can ever hand out, including the 2 KB `.heap` section |
+
+The "~475 KB" in older notes is from earlier configs. Out of the 466,544 B, `visual[0]` (64,000) and the
+decode scratches (48 KB) are permanent, which leaves ≈ 355 KB for the engine.
+
+The largest `.data` items look like tables that are never written: fonts `gfxfont_5x8_*`/`gfxfont_6x10_*`
+(6.6 KB), `kfunct_mappers` (2.7 KB), `con_builtin_font_data` (2 KB), `ascii_tree` (2 KB), `sci_games`,
+`standard_options`. That is ~15 KB that could be made `const` and moved to flash. **Unverified**: check that
+each is truly read-only before moving it. It is a cheap, independent win that is worth doing before step 1.
+
+### Proposed SRAM layout (sizes marked `?` are placeholders until step 0)
+
+```
+ 0x20000000 ┌──────────────────────────────────────┐
+            │ vectors + .data + .bss  ~58 KB       │ link time (.data 34 KB of it;
+            │                                      │ ~15 KB may be const-able)
+            ├──────────────────────────────────────┤ ── carved once at boot,
+            │ visual[0]               62.5 KB      │    never freed, never
+            │  320×200 8bpp, resident              │    interleaved with malloc
+            ├──────────────────────────────────────┤
+            │ decode scratches        48 KB        │ existing: priority 32 KB
+            │                                      │ + decompress 16 KB
+            ├──────────────────────────────────────┤
+            │ PINNED POOLS            ~150 KB  ?   │ ≈ Sierra's HEAP
+            │ ┌ VM stack (0x1000 entries)        ┐ │ fixed-size slabs,
+            │ │ script bufs (hot RW VM memory)   │ │ sized from census
+            │ │ clone table / object slabs       │ │ high-water marks
+            │ │ widget + port slabs              │ │
+            │ │ parser / GNF, said scratch       │ │ never moves; OOM = "pool
+            │ └ driver state, resource dir      ┘ │ X too small", tunable
+            ├──────────────────────────────────────┤
+            │ HUNK                    ~165 KB  ?   │ ≈ Sierra's HUNK
+            │  handle-based, lock/unlock           │ resource data, decoded
+            │  compacts unlocked blocks downward   │ cels/pixmaps, songs,
+            │  purges least-recently-used to PSRAM │ save-unders (old_screen)
+            │  or SD when full                     │
+            ├──────────────────────────────────────┤
+            │ general malloc          ~40 KB   ?   │ leftovers: libc, FatFS,
+            │                                      │ odd one-off allocations
+ 0x20080000 ├──────────────────────────────────────┤
+            │ SCRATCH_X / SCRATCH_Y   8 KB         │ stacks
+ 0x20082000 └──────────────────────────────────────┘
+```
+
+The three `?` regions share the ≈ 355 KB. If step 0 shows most of the peak is movable, the hunk grows and the
+pools shrink. If most of it is pinned, the hunk ends up small and cannot rescue PIO (the stop condition in
+step 0).
+
+### How the hunk beats fragmentation
+
+```
+ today (general malloc)            hunk after compaction
+ ┌────┬──┬─────┬─┬────┬───┐        ┌────┬─────┬────┬───┬──────────┐
+ │cel │  │pic  │ │snd │   │        │cel │pic  │snd │L  │  free    │
+ │    │fr│     │w│    │fr │   →    │    │     │    │   │ (one     │
+ └────┴──┴─────┴─┴────┴───┘        └────┴─────┴────┴───┴  block)  ┘
+   free space split into gaps       L = locked, stays put
+   a small widget "w" pins the      widgets live in their own slabs,
+   gap → a 32 KB request fails      so they can't split the hunk
+
+ handle table:  h → { ptr, size, lock count, least-recently-used tick, source }
+                code keeps h, calls lock(h) for a pointer, unlock(h) after
+```
+
+### Proposed PSRAM layout (8 MB, PIO)
+
+```
+ 0x000000 ┌──────────────────────────────┐
+          │ per-room bump arena          │ existing: pic maps, cel index
+          │  rewound by psram_reset()    │ data (0 is a valid address)
+ 0x100000 ├──────────────────────────────┤
+          │ HUNK TIER 2 (new)            │ purged hunk blocks parked here
+          │  handle-owned, survives      │ instead of re-reading SD; a
+          │  room changes                │ later lock copies them back
+ 0x600000 ├──────────────────────────────┤
+          │ VM page backing (step 3,     │ only if the VM-accessor and
+          │  optional)                   │ write-back page cache is built
+ 0x700000 ├──────────────────────────────┤
+          │ parse scratch   64,000 B     │ existing fixed slot
+ 0x710000 ├──────────────────────────────┤
+          │ song slots      8 × 64 KB    │ existing
+ 0x790000 ├──────────────────────────────┤
+          │ save-under slot(s) (new)     │ fixes old_screen: outside the
+          │                              │ arena, so a room change can't
+          │                              │ wipe them
+ 0x800000 └──────────────────────────────┘
+```
+
+Two things are not measured yet: the bump arena's real high-water mark (measure it before fixing the tier-2
+start at `0x100000`), and the pinned-pool sizes (listed by category, not by size).
+
 ## 4. Constraints (from `CLAUDE.md`)
 
 - PIO `.bss` baseline **25,344** (sound ON). Any change to it must be deliberate and recorded here; check
@@ -158,6 +261,7 @@ measure the hit rate with a desktop model first.
 | step | state | notes |
 |---|---|---|
 | 0 measure movable share | ready to run | OOM-time dump added 2026-09-27; KQ4 + sound first |
+| 0a const-ify `.data` tables (~15 KB) | not started | independent, cheap; verify each table is read-only |
 | 0b board-current comparison vs pico-286 (Low/Medium) | not started | needed before step 3 |
 | 1 fixed pools | not started | |
 | 2 hunk | not started | first class: view cels |
