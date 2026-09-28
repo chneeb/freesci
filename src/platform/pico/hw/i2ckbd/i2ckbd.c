@@ -110,3 +110,23 @@ int set_kbd_backlight(uint8_t val){
     }
     return -1;
 }
+
+/* Panel (LCD) backlight, 0..255: register 0x05 on the keyboard MCU, which owns
+   both backlights (0x0A is the keyboard one, set_kbd_backlight above). Write
+   only -- the same transaction pico-286 uses (picocalc_lcd_set_backlight);
+   nothing needs to be read back. */
+int set_lcd_backlight(uint8_t val){
+    unsigned char msg[2];
+    int retval;
+
+    if (i2c_inited == 0) return -1;
+    msg[0] = 0x05;
+    msg[1] = val;
+    bitSet(msg[0],7);
+    retval = i2c_write_timeout_us(I2C_KBD_MOD, I2C_KBD_ADDR, msg, 2, false, 500000);
+    if (retval == PICO_ERROR_GENERIC || retval == PICO_ERROR_TIMEOUT) {
+        printf("set_lcd_backlight i2c write error\n");
+        return -1;
+    }
+    return 0;
+}

@@ -562,6 +562,13 @@ if(PLATFORM STREQUAL "pico")
     set(PICO_SD_SPI_KHZ "30000" CACHE STRING "SD SPI clock in kHz (30000; 12500 was the old default)")
     add_compile_definitions(PICO_SD_SPI_KHZ=${PICO_SD_SPI_KHZ})
 
+    # Panel backlight, 0..255, set once at keyboard init (register 0x05 on the
+    # keyboard MCU). -1 leaves the MCU's own default. 96 is pico-286's choice on
+    # this board: ~38% of the current at 255, only slightly dimmer to the eye
+    # (brightness is perceived roughly logarithmically, current is linear).
+    set(PICO_LCD_BACKLIGHT "96" CACHE STRING "Panel backlight 0-255 (-1 = MCU default)")
+    add_compile_definitions(PICO_LCD_BACKLIGHT=${PICO_LCD_BACKLIGHT})
+
     # Core clock. 252 on the MAPPED target; 133 on PIO -- the stock clock, and
     # the PIO DEFAULT AGAIN as of 2026-09-19, chosen for BATTERY LIFE on a
     # handheld. 396 works and is device-confirmed (2026-09-18: decode 1.6-1.9x

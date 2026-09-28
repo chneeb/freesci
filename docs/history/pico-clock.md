@@ -192,3 +192,27 @@ reports the ACHIEVED clock and flags a fallback explicitly. **Trust that line, n
 ~66 write sites in `lcdspi.c` (chooser, text, the OOM/HardFault dumps) still push 3 bytes/pixel. Device
 result: sheared display. Completing it across all writers is worth ~2x display bandwidth.
 
+
+---
+
+### 360 MHz on PIO, pico-286 "High" profile (device-tested once, 2026-09-28; opt-in)
+
+`-DPICO_SYS_CLOCK_MHZ=360`, fresh build dir, no code change: the existing bring-up derives exactly pico-286's
+High profile -- 1.30 V raised before the clock (automatic above 250 MHz), PSRAM divider round(360/198) = 2 ->
+90 MHz SPI with the extra read cycle on (pico-286: `PSRAM_SPI=90 PSRAM_FUDGE=1`), flash ceil(360/100) = 4 ->
+90 MHz. The build differs from shipping only in `PICO_SYS_CLOCK_MHZ` and `PICO_PSRAM_SM_MHZ`.
+
+Device (SQ3 + sound, intro + savegame load): `[clk] sys_clk = 360000000 Hz` (no fallback), clean run,
+**resource load 14,808 -> 11,791 ms**, rooms "render much quicker". Not soaked yet -- the 396 caution applies:
+a marginal point fails as silent corruption, so judge it over long sessions before making it a default.
+
+**clk_peri note:** above 133 MHz `clk_peri` is pinned to **133 MHz** (the 396 bring-up fix), but the 133 MHz
+shipping build does NOT pin and runs its peripherals from **48 MHz** (the `[clk] clk_peri = 48000000` line,
+despite the "pinned" wording). So the SD/LCD SPI rates differ between the two: 30 MHz requested gives 24 MHz
+from 48 MHz but ~22.2 MHz from 133 MHz; LCD 25 MHz requested gives 24 vs ~22.2 MHz. Harmless (396 ran the same
+way), and it means the 360 MHz resource-load gain is pure CPU -- the SD card is slightly SLOWER there. Pinning
+to the 48 MHz USB PLL instead would make both builds identical if that ever matters.
+
+**Backlight (all Pico builds):** `PICO_LCD_BACKLIGHT` (default **96**) writes the panel backlight, register
+0x05 on the keyboard MCU, once at keyboard init (`set_lcd_backlight`, write-only, as pico-286 does). pico-286's
+measurement: ~38% of the current at 255 while looking only slightly dimmer. `-1` leaves the MCU default.

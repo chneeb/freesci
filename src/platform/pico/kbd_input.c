@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include "kbd_input.h"
 #include "i2ckbd.h"
 #include <stdbool.h>
@@ -28,6 +29,14 @@ static bool shift_held = false;
 
 void kbd_input_init(void) {
     init_i2c_kbd();
+#if defined(PICO_LCD_BACKLIGHT) && PICO_LCD_BACKLIGHT >= 0
+    /* Panel backlight: the largest consumer that costs nothing to turn down.
+       Brightness is perceived roughly logarithmically while current tracks the
+       PWM duty linearly, so 96 draws ~38% of the current at 255 while looking
+       only slightly dimmer (pico-286's measured choice). */
+    set_lcd_backlight(PICO_LCD_BACKLIGHT);
+    printf("[lcd] backlight = %d\n", PICO_LCD_BACKLIGHT);
+#endif
     shift_held = false;
 }
 

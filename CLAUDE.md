@@ -140,8 +140,8 @@ grep -E '^(PICO_|FSCI_)[A-Z_]*:BOOL' build-pico/CMakeCache.txt | sort
 and when a default changes, `rm -rf` the dir and re-configure rather than rebuilding in place. The canonical
 PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO_STATIC_VIEW_PRIORITY`,
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
-`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); 133 MHz
-(`PICO_SYS_CLOCK_MHZ=396` is opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
+`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); `PICO_LCD_BACKLIGHT=96`; 133 MHz
+(`PICO_SYS_CLOCK_MHZ=360` -- pico-286's High profile, tested once, resource load 14.8 -> 11.8 s on SQ3 -- and `PICO_SYS_CLOCK_MHZ=396` are opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
 itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,084.
 
 The game chooser offers per-launch toggles, so many A/Bs need no rebuild: **`[S]`** sound (off = `-q`),
