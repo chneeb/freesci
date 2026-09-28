@@ -457,9 +457,18 @@ if(PLATFORM STREQUAL "pico")
     # Device-confirmed. Only the initial/reset level -- underruns still hold the
     # last real sample. See the long comment in pwm_synth.c.
     set(PICO_PWM_IDLE_LEVEL "0" CACHE STRING "PWM level before any audio exists")
+    # Output gain in percent, the ceiling that the game's own 0..15 volume
+    # (kDoSound volume, now implemented in sfx/core.c) scales within. 100 is the
+    # old full-scale output, which is louder than the PicoCalc amplifier needs.
+    # The loudness is not clipping: measured on desktop, SQ3's intro peaks at
+    # full scale with an RMS of -10..-16 dBFS and clips <= 0.03% of samples.
+    # Every halving costs one bit of the 8-bit PWM (about 6 dB), so do not go
+    # much lower than needed -- use the hardware knob for the rest.
+    set(PICO_PWM_VOLUME "50" CACHE STRING "PWM output gain in percent (100 = full scale)")
     if(PICO_PWM_AUDIO)
         add_compile_definitions(PICO_PWM_CARRIER_MULT=${PICO_PWM_CARRIER_MULT})
         add_compile_definitions(PICO_PWM_IDLE_LEVEL=${PICO_PWM_IDLE_LEVEL})
+        add_compile_definitions(PICO_PWM_VOLUME=${PICO_PWM_VOLUME})
     endif()
 
     # Park large MIDI songs in PSRAM instead of duplicating them in SRAM, and

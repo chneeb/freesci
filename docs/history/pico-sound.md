@@ -804,3 +804,53 @@ would desync the caller.
 **Still on the output side:** `result->data` (up to `result->size`) still needs contiguous SRAM. This removes
 the input-side requirement only.
 
+
+---
+
+### PARKED (2026-09-28) — loudness: master volume implemented, `PICO_PWM_VOLUME` ceiling, loudness unconfirmed on device
+
+**Report:** sound is too loud on the PicoCalc; only the hardware volume wheel controls it.
+
+**Not a volume fix to port.** pico-286 has none (its PicoCalc PWM path outputs the 16-bit mix at full scale,
+`src/pico-main.c:352`); shapones' PicoCalc `pwm_audio.hpp` has no gain stage either. The remembered fix is
+rp2040-ili9341-infones `70f83e4` (I2S gain default 150% -> 100%, a different board).
+
+**Not clipping (measured on desktop, mixer output in 10 s windows):** SQ3 intro peak 21,809-32,768, RMS
+5,318-9,651 (-10..-16 dBFS), clipped <= 0.034% and only in the first window; PQ2 peak 20,341-26,832,
+RMS 3,325-5,148, clipped 0. KQ4 was silent on desktop in that run. So the output is simply full scale into
+the amplifier, and no ceiling has to sit below a clip point.
+
+**Two changes:**
+- `sfx_set_volume` / `sfx_get_volume` (`sfx/core.c`) were upstream stubs (`FIXME: Implement volume`): a
+  game's kDoSound volume (0..15, passed shifted left by 15) was ignored and read back as 0. Now stored and
+  returned; `sfx_master_level()` gives the 0..15 level. PQ2 sets 15 at startup. Desktop output is unchanged
+  (no desktop PCM device applies it), but reading the volume back now returns the real level.
+- `pico_pwm.c` applies `PICO_PWM_VOLUME` (percent, CMake, **default 50**) x master level as one gain in
+  1/256ths at the single S16 -> 8-bit conversion. 100% at level 15 reduces exactly to the old
+  `(src >> 8) + 128`, so `-DPICO_PWM_VOLUME=100` restores the previous output. Each halving costs one of the
+  8 PWM bits (~6 dB). A `[snd] PWM volume = N%` startup line names the compiled value.
+
+**Device, one quick test:** "still sounds like before". The log could not show which firmware was flashed
+(the startup line was added afterwards), so whether 50% was actually heard is **unconfirmed**. Next time:
+check the `[snd] PWM volume` line, then compare at the same wheel position. Also worth doing: the same game
+in pico-286 at the same wheel position -- if FreeSCI is clearly louder, the fix belongs in the OPL synth
+(`opl2.c` volume tables), not the output stage.
+
+### PARKED (2026-09-28) — shrill drum sounds: aliasing at 11,025 Hz (analysis only)
+
+Two causes, both confirmed in the code, neither fixed:
+1. **Aliasing in the synth (likely dominant).** `opl2.c` renders the OPL directly at `SAMPLE_RATE`
+   (11,025 on PIO, Nyquist 5.5 kHz) and never enables OPL rhythm mode (`0xBD` = `0xC0`, rhythm bit clear), so
+   SCI0 drums are melodic FM patches with bright, noise-like spectra far above Nyquist, folding back as
+   metallic inharmonic tones. Same mechanism as rp2040-ili9341-infones `6538f7c` (NES noise channel
+   aliasing at 22,050).
+2. **Imaging in the PWM output.** `pwm_synth.c` runs the carrier at 4x but HOLDS each sample for 4 carrier
+   cycles (zero-order hold) instead of interpolating.
+
+Options, cheapest first: (A) linear interpolation across the 4 carrier sub-steps in the PWM IRQ -- fixes the
+imaging, nearly free; (B) a one-pole low-pass (~4 kHz) on the output as a CMake option -- tames the band
+where aliases and harshness sit, slightly duller; (C) 22,050 Hz on PIO with a higher clock (at 133 MHz it
+costs the synth 35-47% CPU vs ~20%, see "Use 11025, not 22050, on PIO" above); (D) oversample only the
+synth -- same CPU as C. **Before building any of them:** render the same SQ3 music on desktop to WAV at
+11,025 (as shipped), with A, with A+B, and at 44,100 as a reference, and compare by ear; and if the
+Pimoroni board is at hand, listen there (22,050 Hz) -- clean drums there confirm aliasing.

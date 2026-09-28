@@ -36,6 +36,11 @@
 #ifdef PICO_PWM_AUDIO
 
 #include "../../platform/pico/audio/pwm_synth.h"
+#include <sfx_engine.h>
+
+#ifndef PICO_PWM_VOLUME
+#  define PICO_PWM_VOLUME 100
+#endif
 
 #define PICO_PWM_RATE PICO_SND_RATE
 /* The mixer produces AT MOST buf_size frames per call (mix_compute_buf_len caps
@@ -138,10 +143,14 @@ pcmout_pico_output(sfx_pcm_device_t *self, byte *buf, int count,
 {
 	gint16 *src = (gint16 *) buf;
 	int i;
+	/* Gain in 1/256ths: the PICO_PWM_VOLUME ceiling times the game's master
+	   level (sfx_master_level, 0..15). 100% at level 15 is 256, where the
+	   conversion below reduces exactly to the old (src >> 8) + 128. */
+	int gain = PICO_PWM_VOLUME * sfx_master_level() * 256 / (100 * 15);
 
 	for (i = 0; i < count; i++) {
 		/* S16 signed -> 8-bit unsigned (PWM wrap is 256). */
-		int s = (src[i] >> 8) + 128;
+		int s = ((src[i] * gain) >> 16) + 128;
 		if (s < 0)
 			s = 0;
 		else if (s > 255)

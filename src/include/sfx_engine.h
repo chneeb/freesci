@@ -106,6 +106,12 @@ sfx_set_volume(sfx_state_t *self, int volume);
 ** Parameters: (int) volume: The new global volume, between 0 and 127 (see above)
 */
 
+int
+sfx_master_level(void);
+/* The global volume as the SCI 0..15 level (15 = maximum), for PCM devices
+** that apply it themselves.
+*/
+
 void
 sfx_all_stop(sfx_state_t *self);
 /* Stops all songs currently playing, purges song library

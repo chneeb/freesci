@@ -923,17 +923,30 @@ sfx_send_midi(sfx_state_t *self, song_handle_t handle, int channel,
 	return SFX_OK;
 }
 
+/* Global (master) volume, as passed by kDoSound: the SCI 0..15 level shifted
+   left by 15 (ksound.c). Upstream left this a stub, so a game's volume setting
+   was ignored and reading it back returned 0. It is now stored, returned, and
+   applied by the Pico PWM output (pico_pwm.c); other PCM devices still ignore
+   it. Starts at the maximum, which is also what SCI0 games set at startup. */
+static int sfx_master_volume = 15 << 15;
+
 int
 sfx_get_volume(sfx_state_t *self)
 {
-	fprintf(stderr, "FIXME: Implement volume\n");
-	return 0;
+	return sfx_master_volume;
 }
 
 void
 sfx_set_volume(sfx_state_t *self, int volume)
 {
-	fprintf(stderr, "FIXME: Implement volume\n");
+	sfx_master_volume = volume;
+}
+
+int
+sfx_master_level(void)
+{
+	int level = sfx_master_volume >> 15;
+	return level < 0 ? 0 : level > 15 ? 15 : level;
 }
 
 void

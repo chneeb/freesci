@@ -140,7 +140,7 @@ grep -E '^(PICO_|FSCI_)[A-Z_]*:BOOL' build-pico/CMakeCache.txt | sort
 and when a default changes, `rm -rf` the dir and re-configure rather than rebuilding in place. The canonical
 PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO_STATIC_VIEW_PRIORITY`,
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
-`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`); 133 MHz
+`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); 133 MHz
 (`PICO_SYS_CLOCK_MHZ=396` is opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
 itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,084.
 
@@ -369,6 +369,9 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   load with sound ON** works again (2026-09-27, three device runs). (sound)
 - **After a failed game, no further game starts** until power cycle — undiagnosed. (sound)
 - **Dropped notes** — upstream has no OPL voice stealing (`opl2.c`). (sound)
+- **Loudness / shrill drums — PARKED** (2026-09-28) until the memory work is further along. The game's
+  master volume now works and `PICO_PWM_VOLUME` (default 50) sets the output ceiling, but the loudness change
+  is unconfirmed on device; drums alias at 11,025 Hz. Analysis and options in `pico-sound.md`. (sound)
 - **Runtime actor-to-actor control writes** are a no-op (`state->control_map` NULL). (misc)
 - **396 MHz on PIO**: soak it before trusting it long-term; it is opt-in (`-DPICO_SYS_CLOCK_MHZ=396`). (clock)
 

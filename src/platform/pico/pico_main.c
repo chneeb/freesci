@@ -469,6 +469,11 @@ int main(void)
 #else
         printf("[decomp] streaming OFF\n");
 #endif
+#ifdef PICO_PWM_VOLUME
+        /* The compiled output gain (pico_pwm.c): otherwise a log cannot tell
+           which firmware was flashed when judging loudness by ear. */
+        printf("[snd] PWM volume = %d%%\n", PICO_PWM_VOLUME);
+#endif
 #ifdef PICO_STATIC_COMPOSED
         {
             extern int pico_composed_enabled;
