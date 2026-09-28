@@ -160,13 +160,17 @@ typedef struct _resource_altsource_struct {
 /* Packed resource directory entry (PIO PicoCalc; opt-in elsewhere with
    -DSCIR_PACKED_RESOURCES for desktop testing). One entry exists per
    resource.map line for the whole game -- 968 in KQ4 -- so the entry size is
-   paid ~1000x in SRAM. Packed: 28 B instead of 40.
+   paid ~1000x in SRAM. Packed: 24 B instead of 40.
      - the LRU links are 16-bit 1-based indices into mgr->resources (0 = none)
        instead of two pointers: SCIR_LRU_* in resource.c;
      - the source is an 8-bit 1-based index into a small table of the few
        volume/patch sources (0 = NULL), sharing a word with a 24-bit
        file_offset (SCI0 volumes are < 1 MB): SCIR_SOURCE / SCIR_SET_SOURCE;
      - type is 8-bit (SCI0 types are 0..31).
+     - no alt_sources list: the map loader built one 12 B heap block per
+       resource (not only per duplicate), and nothing ever reads it -- it is
+       only created and freed. Dropping it saves the heap blocks (~16 B each
+       with the malloc header, ~970 in KQ4) plus 4 B per entry.
    Not used where SCI1 must work (desktop default, Pimoroni), because SCI1
    volumes may exceed the 24-bit offset. */
 #if (defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)) || defined(SCIR_PACKED_RESOURCES)
@@ -179,7 +183,6 @@ typedef struct _resource_struct {
 	unsigned int size;
 	unsigned int file_offset : 24; /* Offset in file */
 	unsigned int source_idx : 8;   /* SCIR_SOURCE(); 0 = no source */
-	struct _resource_altsource_struct *alt_sources; /* SLL of alternative resource data sources */
 
 	unsigned short number;
 	guint16 id; /* contains number and type */

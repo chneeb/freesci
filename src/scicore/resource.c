@@ -147,9 +147,9 @@ int resourcecmp (const void *first, const void *second)
 /* resource_t.source_idx -> resource_source_t*. Only a handful of sources exist
    (one per volume file plus the patch directory), all registered while the map
    is read, so a linear search on insert is fine and lookup is O(1). */
-/* 28 B on 32-bit targets (the Pico); a layout change that re-adds padding
+/* 24 B on 32-bit targets (the Pico); a layout change that re-adds padding
    fails the build here instead of silently costing ~1 KB per 250 resources. */
-typedef char scir_packed_size_check[(sizeof(void *) != 4 || sizeof(resource_t) == 28) ? 1 : -1];
+typedef char scir_packed_size_check[(sizeof(void *) != 4 || sizeof(resource_t) == 24) ? 1 : -1];
 
 #define SCIR_MAX_SOURCES 32 /* SCI0 games have <= 10 volumes plus the patch dir */
 static resource_source_t *scir_source_table[SCIR_MAX_SOURCES];
@@ -195,12 +195,18 @@ scir_source_idx(resource_source_t *source)
 void
 _scir_add_altsource(resource_t *res, resource_source_t *source, unsigned int file_offset)
 {
+#ifdef SCIR_PACKED
+	/* No alt_sources when packed: the list is never read (see sciresource.h),
+	   so building it only cost a heap block per resource. */
+	(void) res; (void) source; (void) file_offset;
+#else
 	resource_altsource_t *rsrc = (resource_altsource_t*)sci_malloc(sizeof(resource_altsource_t));
 
 	rsrc->next = res->alt_sources;
 	rsrc->source = source;
 	rsrc->file_offset = file_offset;
 	res->alt_sources = rsrc;
+#endif
 }
 
 resource_t *
@@ -808,7 +814,9 @@ _scir_free_resources(resource_t *resources, int resources_nr)
 	for (i = 0; i < resources_nr; i++) {
 		resource_t *res = resources + i;
 
+#ifndef SCIR_PACKED
 		_scir_free_altsources(res->alt_sources);
+#endif
 
 		if (res->status != SCI_STATUS_NOMALLOC
 		    && !PICO_IS_DECOMPRESS_SCRATCH(res->data))

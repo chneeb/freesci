@@ -100,7 +100,9 @@ process_patch(resource_source_t *source,
 									       *resource_nr_p
 									       * sizeof(resource_t));
 					newrsc = (*resource_p-1) + *resource_nr_p;
+#ifndef SCIR_PACKED
 					newrsc->alt_sources = NULL;
+#endif
 				}
 
 				/* Overwrite everything, because we're patching */
