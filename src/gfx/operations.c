@@ -108,6 +108,7 @@ extern byte *pico_get_visual(gfx_driver_t *drv);
 extern void pico_connect_engine_priority(gfx_pixmap_t *priority_map,
 					 gfx_pixmap_t *static_priority_map);
 extern void pico_render_background(gfx_driver_t *drv);
+extern unsigned long long pico_perf_us(void);  /* pico_time.c */
 #if defined(FSCI_PROBE_MEM) && defined(HAVE_PICO)
 /* [mem] largest: the biggest block that could be allocated right now (sbrk
    headroom included) and the session minimum -- the real per-room margin, e.g.
@@ -2380,6 +2381,9 @@ int
 gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 {
 	int retval;
+#ifdef HAVE_PICO
+	unsigned long long _room_t0 = pico_perf_us();
+#endif
 	BASIC_CHECKS(GFX_FATAL);
 
 #ifdef HAVE_PICO
@@ -2689,6 +2693,23 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 #endif
 #endif
 
+#ifdef HAVE_PICO
+	/* [perf] room line (always on, one line per room): the new pic's load +
+	   decode time, and the time spent in resource loads since the previous
+	   room and for the session (resource.c). The session totals are the A/B
+	   figure for the SD-path work: same route, compare the last line. */
+	{
+		extern unsigned long long pico_resload_us, pico_resload_us_total;
+		extern unsigned pico_resload_n, pico_resload_n_total;
+		sciprintf("[perf] room %d: pic %lu ms | %u resource loads %lu ms since last room"
+			  " | session %u loads %lu ms\n", nr,
+			  (unsigned long) ((pico_perf_us() - _room_t0) / 1000),
+			  pico_resload_n, (unsigned long) (pico_resload_us / 1000),
+			  pico_resload_n_total, (unsigned long) (pico_resload_us_total / 1000));
+		pico_resload_n = 0;
+		pico_resload_us = 0;
+	}
+#endif
 	/* Post-decode baseline: free heap once the new room is fully resident.
 	   Compare against the next room's "room enter" line — if this baseline
 	   drifts down over many rooms, something allocated per room is not freed. */

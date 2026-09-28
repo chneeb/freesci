@@ -320,11 +320,76 @@ _scir_load_from_patch_file(int fh, resource_t *res, char *filename)
 	res->status = SCI_STATUS_ALLOCATED;
 }
 
+#if (defined(HAVE_PICO) && !defined(SCIR_NO_VOLUME_CACHE)) || defined(SCIR_VOLUME_CACHE)
+/* SCIR_VOLUME_CACHE: desktop test switch; SCIR_NO_VOLUME_CACHE: Pico A/B baseline */
+#  define SCIR_KEEP_VOLUMES_OPEN 1
+#endif
+#ifdef SCIR_KEEP_VOLUMES_OPEN
+/* Resource volumes stay OPEN on the Pico (up to SCIR_VOLUME_FDS of them), with
+   FatFS fast seek. Otherwise every resource load re-opens
+   "<gamedir>/RESOURCE.00N" -- a directory lookup per path level on the SD card
+   -- seeks by walking the FAT chain from the start of the file, and closes it
+   again. Volumes beyond the cache fall back to open/close per load. Closed by
+   scir_close_volume_fds() when the resource manager is freed. */
+#define SCIR_VOLUME_FDS 4
+static struct { resource_source_t *src; int fd; } scir_volume_fds[SCIR_VOLUME_FDS];
+#ifdef HAVE_PICO
+extern int pico_io_enable_fastseek(int fd);
+#else
+#  define pico_io_enable_fastseek(fd) ((void) (fd))
+#endif
+
+static int
+scir_volume_open(resource_source_t *src, const char *filename, int *cached)
+{
+	int i, fd;
+
+	*cached = 0;
+	for (i = 0; i < SCIR_VOLUME_FDS; i++)
+		if (scir_volume_fds[i].src == src) {
+			*cached = 1;
+			return scir_volume_fds[i].fd;
+		}
+	fd = open(filename, O_RDONLY | O_BINARY);
+	if (!IS_VALID_FD(fd))
+		return fd;
+	for (i = 0; i < SCIR_VOLUME_FDS; i++)
+		if (!scir_volume_fds[i].src) {
+			scir_volume_fds[i].src = src;
+			scir_volume_fds[i].fd = fd;
+			*cached = 1;
+			pico_io_enable_fastseek(fd);
+			break;
+		}
+	return fd;
+}
+
 static void
-_scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
+scir_close_volume_fds(void)
+{
+	int i;
+
+	for (i = 0; i < SCIR_VOLUME_FDS; i++)
+		if (scir_volume_fds[i].src) {
+			close(scir_volume_fds[i].fd);
+			scir_volume_fds[i].src = NULL;
+		}
+}
+#endif /* SCIR_KEEP_VOLUMES_OPEN */
+
+#ifdef HAVE_PICO
+/* Time spent in resource loads, for the per-room [perf] line (operations.c). */
+unsigned long long pico_resload_us = 0, pico_resload_us_total = 0;
+unsigned pico_resload_n = 0, pico_resload_n_total = 0;
+extern unsigned long long pico_perf_us(void);
+#endif
+
+static void
+_scir_load_resource_inner(resource_mgr_t *mgr, resource_t *res, int protect)
 {
 	char filename[PATH_MAX];
 	int fh;
+	int fh_cached = 0;   /* fh belongs to the open-volume cache: do not close */
 	resource_t backup;
 	/* The working directory is saved only right before this function changes
 	   it (a patch file's chdir, or the uppercase sci_open fallback, which
@@ -355,6 +420,11 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 	} else
 		strcpy(filename, SCIR_SOURCE(res)->location.file.name);
 
+#ifdef SCIR_KEEP_VOLUMES_OPEN
+	if (SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_VOLUME)
+		fh = scir_volume_open(SCIR_SOURCE(res), filename, &fh_cached);
+	else
+#endif
 	fh = open(filename, O_RDONLY | O_BINARY);
 
 
@@ -404,15 +474,35 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 			res->data = NULL;
 			res->status = SCI_STATUS_NOMALLOC;
 			res->size = 0;
+			if (!fh_cached)
+				close(fh);   /* was leaked on this path */
 			SCIR_RESTORE_CWD();
 			return;
 		}
 	}
 
-	close(fh);
+	if (!fh_cached)
+		close(fh);
 	SCIR_RESTORE_CWD();
 #undef SCIR_SAVE_CWD
 #undef SCIR_RESTORE_CWD
+}
+
+static void
+_scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
+{
+#ifdef HAVE_PICO
+	unsigned long long t0 = pico_perf_us(), dt;
+
+	_scir_load_resource_inner(mgr, res, protect);
+	dt = pico_perf_us() - t0;
+	pico_resload_us += dt;
+	pico_resload_us_total += dt;
+	pico_resload_n++;
+	pico_resload_n_total++;
+#else
+	_scir_load_resource_inner(mgr, res, protect);
+#endif
 }
 
 resource_t *
@@ -436,6 +526,7 @@ sci_test_view_type(resource_mgr_t *mgr)
 	int compression;
 	resource_t *res;
 	int i;
+	int fh_cached;   /* from the open-volume cache: do not close */
 
 	mgr->sci_version = SCI_VERSION_AUTODETECT;
 
@@ -450,6 +541,14 @@ sci_test_view_type(resource_mgr_t *mgr)
 			continue;
 
 		strcpy(filename, SCIR_SOURCE(res)->location.file.name);
+		fh_cached = 0;
+#ifdef SCIR_KEEP_VOLUMES_OPEN
+		/* Once per view/pic resource at startup: 563 opens of the same few
+		   volumes for KQ4 without the cache. */
+		if (SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_VOLUME)
+			fh = scir_volume_open(SCIR_SOURCE(res), filename, &fh_cached);
+		else
+#endif
 		fh = open(filename, O_RDONLY | O_BINARY);
 
 		if (!IS_VALID_FD(fh)) {
@@ -465,7 +564,8 @@ sci_test_view_type(resource_mgr_t *mgr)
 		lseek(fh, res->file_offset, SEEK_SET);
 
 		compression = sci0_get_compression_method(fh);
-		close(fh);
+		if (!fh_cached)
+			close(fh);
 
 		if (compression == 3)
 			return (mgr->sci_version = SCI_VERSION_01_VGA);
@@ -483,6 +583,14 @@ sci_test_view_type(resource_mgr_t *mgr)
 			continue;
 
 		strcpy(filename, SCIR_SOURCE(res)->location.file.name);
+		fh_cached = 0;
+#ifdef SCIR_KEEP_VOLUMES_OPEN
+		/* Once per view/pic resource at startup: 563 opens of the same few
+		   volumes for KQ4 without the cache. */
+		if (SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_VOLUME)
+			fh = scir_volume_open(SCIR_SOURCE(res), filename, &fh_cached);
+		else
+#endif
 		fh = open(filename, O_RDONLY | O_BINARY);
 
 
@@ -499,7 +607,8 @@ sci_test_view_type(resource_mgr_t *mgr)
 		lseek(fh, res->file_offset, SEEK_SET);
 
 		compression = sci0_get_compression_method(fh);
-		close(fh);
+		if (!fh_cached)
+			close(fh);
 
 		if (compression == 3)
 			return (mgr->sci_version = SCI_VERSION_01_VGA);
@@ -840,6 +949,9 @@ void
 scir_free_resource_manager(resource_mgr_t *mgr)
 {
 	_scir_free_resources(mgr->resources, mgr->resources_nr);
+#ifdef SCIR_KEEP_VOLUMES_OPEN
+	scir_close_volume_fds();   /* before the sources they point at are freed */
+#endif
 	_scir_free_resource_sources(mgr->sources);
 	mgr->resources = NULL;
 #ifdef SCIR_PACKED

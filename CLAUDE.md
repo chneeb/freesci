@@ -100,8 +100,8 @@ Everything else defaults correctly; the mapped-only options (`PICO_PSRAM_SCRIPTS
 `PICO_WORKING_PRIORITY`) are all ON and each is an A/B switch.
 
 **After ANY shared-file change, rebuild the PIO target and check its `.bss` is unchanged** — that is the
-guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 30,084** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
-measured 2026-09-27; 29,952 before the packing, 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
+guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 30,656** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
+volume cache + fast seek, measured 2026-09-28; 30,084 before the volume cache, 29,952 before the packing, 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
 17,608) are from earlier configs, not regressions:
 ```bash
 cmake --build build-pico -j$(nproc) && arm-none-eabi-size build-pico/src/freesci.elf
@@ -140,9 +140,9 @@ grep -E '^(PICO_|FSCI_)[A-Z_]*:BOOL' build-pico/CMakeCache.txt | sort
 and when a default changes, `rm -rf` the dir and re-configure rather than rebuilding in place. The canonical
 PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO_STATIC_VIEW_PRIORITY`,
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
-`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); `PICO_LCD_BACKLIGHT=96`; 133 MHz
+`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); `PICO_LCD_BACKLIGHT=96`; `PICO_VOLUME_CACHE` ON; 133 MHz
 (`PICO_SYS_CLOCK_MHZ=360` -- pico-286's High profile, tested once, resource load 14.8 -> 11.8 s on SQ3 -- and `PICO_SYS_CLOCK_MHZ=396` are opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
-itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,084.
+itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,656.
 
 The game chooser offers per-launch toggles, so many A/Bs need no rebuild: **`[S]`** sound (off = `-q`),
 **`[C]`** composed surface, **`[V]`** static-view priority (PIO only; Colonel's Bequest needs `[V]` off to show
@@ -155,6 +155,9 @@ its copy-protection fingerprints). The launch log records the combination.
 | `[clk] sys_clk = N Hz (requested M MHz)` | `pico_main.c`, at the LAUNCH point (after the chooser, so it is reachable with uf2loader attached) | the **achieved** clock, and flags a silent `set_sys_clock_khz` fallback explicitly. **Trust this, not CMakeCache** -- see the build-system trap under "Overclocking". |
 | `[clk] SD SPI = N kHz` | same | which SD rate was compiled in |
 | `[perf] resource load: N ms (M resources)` | `main.c`, after the resmgr comes up | the startup SD scan + resource-map parse. **This is the part of loading the CORE CLOCK CANNOT speed up** (it is SD-clock bound), so it is the number to watch when changing `PICO_SD_SPI_KHZ`. Pairs with `[perf] pic N decode` (`FSCI_PROBE_PERF`), which is the CPU/PSRAM-bound half. |
+
+| `[perf] room N: pic X ms \| K resource loads Y ms since last room \| session ...` | `operations.c` `gfxop_new_pic` | per-room pic load+decode and resource-load time; the session total is the A/B figure for SD-path work (same route) |
+| `[sd] fast seek on for fd N (K fragment(s))` | `pico_io.c` | a resource volume got a FatFS fast-seek map (`PICO_VOLUME_CACHE`, default ON) |
 
 | `FSCI_PROBE_FPS` (OFF) | `FSCI_PROBE_FPS` | `[fps]` frames + worst frame gap per second. Works WITHOUT sound, so a target's frame rate (== the sound poll rate, which sets the minimum `PICO_SND_BUF_FRAMES`) can be measured before deciding whether audio fits | `pico_driver.c` |
 

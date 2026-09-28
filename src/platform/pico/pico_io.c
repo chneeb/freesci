@@ -28,6 +28,51 @@
 static FIL   fat_files[MAX_FDS];
 static bool  fat_open[MAX_FDS];
 
+/* FatFS fast seek (FF_USE_FASTSEEK): a cluster link map per file lets f_lseek
+   and f_read find a cluster without walking the FAT chain from the start of
+   the file. Used for the resource volumes the resource manager keeps open
+   (resource.c). A table holds 1 + 2 per fragment + 1 DWORDs, so 32 DWORDs
+   cover 15 fragments; a freshly copied file is usually 1. A more fragmented
+   file simply stays on normal seeks. */
+#define FASTSEEK_SLOTS  4
+#define FASTSEEK_DWORDS 32
+static DWORD fastseek_tbl[FASTSEEK_SLOTS][FASTSEEK_DWORDS];
+static int   fastseek_owner[FASTSEEK_SLOTS] = { -1, -1, -1, -1 };
+
+int pico_io_enable_fastseek(int fd)
+{
+    int idx = fd - FD_OFFSET, slot;
+    FRESULT r;
+
+    if (idx < 0 || idx >= MAX_FDS || !fat_open[idx]) return -1;
+    for (slot = 0; slot < FASTSEEK_SLOTS; slot++)
+        if (fastseek_owner[slot] < 0) break;
+    if (slot == FASTSEEK_SLOTS) return -1;
+
+    fastseek_tbl[slot][0] = FASTSEEK_DWORDS;
+    fat_files[idx].cltbl = fastseek_tbl[slot];
+    r = f_lseek(&fat_files[idx], CREATE_LINKMAP);
+    if (r != FR_OK) {
+        /* FR_NOT_ENOUGH_CORE: too fragmented for the table -- normal seeks */
+        fat_files[idx].cltbl = NULL;
+        printf("[sd] fast seek off for fd %d (f_lseek %d, needs %lu DWORDs)\n",
+               fd, (int)r, (unsigned long)fastseek_tbl[slot][0]);
+        return -1;
+    }
+    fastseek_owner[slot] = idx;
+    printf("[sd] fast seek on for fd %d (%lu fragment(s))\n",
+           fd, (unsigned long)((fastseek_tbl[slot][0] - 2) / 2));
+    return 0;
+}
+
+static void fastseek_release(int idx)
+{
+    int slot;
+    for (slot = 0; slot < FASTSEEK_SLOTS; slot++)
+        if (fastseek_owner[slot] == idx)
+            fastseek_owner[slot] = -1;
+}
+
 static int alloc_fd(void)
 {
     for (int i = 0; i < MAX_FDS; i++)
@@ -60,6 +105,7 @@ int _close(int fd)
     if (idx < 0 || idx >= MAX_FDS || !fat_open[idx]) { errno = EBADF; return -1; }
     f_close(&fat_files[idx]);
     fat_open[idx] = false;
+    fastseek_release(idx);   /* f_open clears cltbl on the slot's next use */
     return 0;
 }
 

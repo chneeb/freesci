@@ -236,3 +236,28 @@ resource loads use a plain `open()` first). Desktop shim, KQ4 12 s: `opendir` 1,
 
 **Device (SQ3 + sound, 133 MHz): resource load 14,808 -> 2,315 ms**, savegame load and exit clean. That is far
 faster than 360 MHz was before the fix (11.8 s), so the startup-time argument for a higher clock is gone.
+
+### Open-volume cache + FatFS fast seek; per-room load timer (2026-09-28, device A/B)
+
+`PICO_VOLUME_CACHE` (default ON; OFF is the A/B baseline): up to 4 resource volumes stay open for the game
+(`scir_volume_open`, `resource.c`) instead of an open + seek + close per load, and each gets a FatFS fast-seek
+cluster map (`pico_io_enable_fastseek`, `pico_io.c`, 4 x 32 DWORDs; prints `[sd] fast seek on for fd N (K
+fragment(s))` or falls back to normal seeks if a file is too fragmented). The startup check
+`sci_test_view_type` also uses the cache -- a desktop backtrace showed it opening a volume once per view and
+pic (563 opens for KQ4). Desktop at the 32 KB LRU limit: identical eviction sequences for SQ3/PQ2/KQ4, volume
+opens per 40 s session 585/523/904 -> 3/3/4. `.bss` +572 B (the tables), +28 B for the timer.
+
+Always-on timer: `[perf] room N: pic X ms | K resource loads Y ms since last room | session K loads Y ms`.
+
+Device A/B, SQ3 + sound at 133 MHz, same route (777 -> 900 -> 1 -> 2, savegame load, 43, 430), 343 loads both:
+
+| | no cache | cache + fast seek |
+|---|---:|---:|
+| startup `resource load` | 2,293 ms | **309 ms** |
+| session resource loads | 3,902 ms | **1,531 ms** (repeatable: 1,536 on a second run) |
+| per load | 11.4 ms | 4.5 ms |
+| resource loads around the savegame load (164) | 1,851 ms | 716 ms |
+
+Startup since the start of this work: **14,808 -> 309 ms** (48x). All three SQ3 volumes: 1 fragment on this card.
+`FF_FS_TINY 0` (a sector buffer per open file, +4 KB `.bss`) was not done: the remaining 4.5 ms per load is
+mostly the read and decompression itself.

@@ -569,6 +569,14 @@ if(PLATFORM STREQUAL "pico")
     set(PICO_LCD_BACKLIGHT "96" CACHE STRING "Panel backlight 0-255 (-1 = MCU default)")
     add_compile_definitions(PICO_LCD_BACKLIGHT=${PICO_LCD_BACKLIGHT})
 
+    # Keep the resource volumes open with FatFS fast seek (resource.c
+    # scir_volume_open, pico_io.c pico_io_enable_fastseek) instead of an
+    # open + seek-from-start + close per resource load. OFF is the A/B baseline.
+    option(PICO_VOLUME_CACHE "Keep resource volumes open with FatFS fast seek" ON)
+    if(NOT PICO_VOLUME_CACHE)
+        add_compile_definitions(SCIR_NO_VOLUME_CACHE=1)
+    endif()
+
     # Core clock. 252 on the MAPPED target; 133 on PIO -- the stock clock, and
     # the PIO DEFAULT AGAIN as of 2026-09-19, chosen for BATTERY LIFE on a
     # handheld. 396 works and is device-confirmed (2026-09-18: decode 1.6-1.9x
