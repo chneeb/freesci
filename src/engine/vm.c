@@ -2299,11 +2299,17 @@ _game_run(state_t *s, int restoring)
 			s->execution_stack_pos = -1;
 			s->execution_stack_pos_changed = 0;
 
+#ifdef FSCI_PROBE_MEM_CENSUS
+			{ extern void census_checkpoint(const char *); census_checkpoint("restore-1-before-teardown"); }
+#endif
 			game_exit(s);
 			script_free_engine(s);
 			script_init_engine(s, s->version);
 			game_init(s);
 			sfx_reset_player();
+#ifdef FSCI_PROBE_MEM_CENSUS
+			{ extern void census_checkpoint(const char *); census_checkpoint("restore-2-light-state"); }
+#endif
 
 			/* The first post-restore pic decode uses the permanent priority scratch
 			   (B-1, operations.c), allocated once at boot and resident across the
@@ -2314,10 +2320,16 @@ _game_run(state_t *s, int restoring)
 				state_t *rs = gamestate_restore(s, rname);
 				free(rname);
 				if (rs) {
+#ifdef FSCI_PROBE_MEM_CENSUS
+					{ extern void census_checkpoint(const char *); census_checkpoint("restore-4-restored-light-alive"); }
+#endif
 					game_exit(s);
 					script_free_vm_memory(s);
 					sci_free(s);
 					s = rs;
+#ifdef FSCI_PROBE_MEM_CENSUS
+					{ extern void census_checkpoint(const char *); census_checkpoint("restore-5-done"); }
+#endif
 #ifdef HAVE_PICO
 					/* game_exit above NULLed the global; the restored state rs is
 					   never run through game_init, so republish it here or the

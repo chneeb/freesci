@@ -4848,6 +4848,10 @@ gamestate_restore(state_t *s, char *dirname)
 
     _cfsml_error = _cfsml_read_state_t(fh, retval, _cfsml_inp, &(_cfsml_line_ctr), &_cfsml_eof);
     read_eof = _cfsml_error;
+#ifdef FSCI_PROBE_MEM_CENSUS
+     /* Parse peak: the reader's temporaries are still live here. */
+     { extern void census_checkpoint(const char *); census_checkpoint("restore-3-parse-peak"); }
+#endif
      _cfsml_free_pointer_references(_cfsml_myptrrefptr, _cfsml_error);
      if (_cfsml_last_value_retreived) {
        free(_cfsml_last_value_retreived);

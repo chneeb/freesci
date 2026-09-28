@@ -188,6 +188,33 @@ Next (A): walk once INSIDE the restore, before the reader frees its temporaries,
 Then either give those temporaries a fixed scratch region, or allocate the restored state as one unit (B), or
 restore on a cold heap by rebooting (C; costs the 21 s KQ4 resource scan per load).
 
+### Restore checkpoints — RESULT (A; KQ4 + sound, census build, 2026-09-28)
+
+`census_checkpoint(tag)` (live sites by bytes + a heap walk) at five points of the clean-heap restore
+(`vm.c` `_game_run`, and the parse peak in `savegame.c` `gamestate_restore`). All walks `ok`.
+
+| checkpoint | free | gaps | bytes in gaps | largest gap | top (+ not yet sbrk'd) |
+|---|---:|---:|---:|---:|---:|
+| 1 before teardown | 39,864 | 42 | 34,912 | 4,720 | 4,952 (+24.6 KB) |
+| 2 light state (after `game_exit` + `game_init`) | 65,304 | 7 | 42,512 | 15,696 | 22,792 (+24.6 KB) |
+| 3 parse peak | 59,568 | 12 | 36,776 | 15,696 | 22,792 (+24.6 KB) |
+| 4 restored, light state still alive | 14,168 | **169** | 5,896 | 848 | 8,272 (+12.3 KB) |
+| 5 done (light state freed) | 47,256 | **212** | 38,984 | 5,256 | 8,272 (+12.3 KB) |
+
+- **Teardown and parse do not fragment** (7 → 12 gaps).
+- **3 → 4: the reader's pointer-reference records.** `_cfsml_register_pointer` (`savegame.c:274`) heap-allocates
+  one 8 B record per pointer read -- 236 at the peak -- interleaved one by one with the restored objects, and
+  `_cfsml_free_pointer_references` frees them all right after the parse: 169 holes averaging 35 B. The
+  restored script bufs (`savegame.c:4503`, 42 KB) then have to come from the top.
+- **4 → 5: the light state.** Its script hash maps (`int_hashmap.c:33`, 115 blocks), segment entries
+  (`seg_manager.c:1035`, 94) and `state_t` are freed only after the restored state was built around them:
+  +43 larger holes.
+
+Fixes, in order: (1) batch the pointer-reference records (chunks of ~128 per allocation) so they leave 2 holes
+instead of 236; (2) free more of the light state BEFORE the parse, as its script bufs / VM stack / LRU already
+are -- riskier, since `gamestate_restore` still reads script 0's segment, `sys_strings` and `game_obj` from it
+after the parse.
+
 ### Step 1 — fixed pools for the fixed-size churn (cheap, independent)
 
 pico-286's static-array principle applied to FreeSCI's small, frequent, fixed-size allocations (widgets,

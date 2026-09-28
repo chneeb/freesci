@@ -559,6 +559,20 @@ census_heap_walk(const char *tag)
 	printf("\n");
 }
 
+/* Named snapshot for bracketing a code path (e.g. the clean-heap restore): the
+   live sites by BYTES plus a heap walk. A site live at one checkpoint and gone at
+   the next is a transient; the walk shows the holes it leaves behind. */
+void
+census_checkpoint(const char *tag)
+{
+	struct mallinfo mi = mallinfo();
+
+	printf("[mem] CHECKPOINT %s: free=%lu arena=%lu\n", tag,
+	       (unsigned long) mi.fordblks, (unsigned long) mi.arena);
+	census_print(1, 40);
+	census_heap_walk(tag);
+}
+
 /* Called from pico_oom_report just before the halt: the heap composition AT the
    failing allocation, which the per-room breakdowns never see.  Sites are ranked
    by BYTES here (not count) so single large blocks are not crowded out, and the
@@ -696,6 +710,7 @@ void census_site_register(void *ptr, const char *file, int line)
 void census_dump_sites(void) {}
 void census_dump_oom(void) {}
 void census_heap_walk(const char *tag) { (void)tag; }
+void census_checkpoint(const char *tag) { (void)tag; }
 
 void *
 __wrap_malloc(size_t size)
