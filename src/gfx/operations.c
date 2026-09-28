@@ -108,6 +108,26 @@ extern byte *pico_get_visual(gfx_driver_t *drv);
 extern void pico_connect_engine_priority(gfx_pixmap_t *priority_map,
 					 gfx_pixmap_t *static_priority_map);
 extern void pico_render_background(gfx_driver_t *drv);
+#if defined(FSCI_PROBE_MEM) && defined(HAVE_PICO)
+/* [mem] largest: the biggest block that could be allocated right now (sbrk
+   headroom included) and the session minimum -- the real per-room margin, e.g.
+   for deciding whether a new permanent buffer of N bytes would fit. */
+extern size_t pico_largest_alloc(void);
+static void
+pico_print_largest(const char *when, int nr)
+{
+	static size_t min_largest = (size_t) -1;
+	static int min_nr = -1;
+	size_t l = pico_largest_alloc();
+
+	if (l < min_largest) {
+		min_largest = l;
+		min_nr = nr;
+	}
+	sciprintf("[mem] largest %s nr=%d: %lu (session min %lu at room %d)\n",
+		  when, nr, (unsigned long) l, (unsigned long) min_largest, min_nr);
+}
+#endif
 extern void pico_setup_sci0_palette(gfx_driver_t *drv);
 
 /* Free the permanent decode scratches when a game fully exits to the chooser.
@@ -2393,6 +2413,9 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		struct mallinfo _mi = mallinfo();
 		sciprintf("[mem] room enter nr=%d: free=%d arena=%d used=%d\n",
 			  nr, _mi.fordblks, _mi.arena, _mi.uordblks);
+#ifdef HAVE_PICO
+		pico_print_largest("enter", nr);
+#endif
 	}
 #endif /* FSCI_PROBE_MEM */
 
@@ -2674,6 +2697,9 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 		struct mallinfo _mi = mallinfo();
 		sciprintf("[mem] room ready nr=%d: free=%d arena=%d used=%d\n",
 			  nr, _mi.fordblks, _mi.arena, _mi.uordblks);
+#ifdef HAVE_PICO
+		pico_print_largest("ready", nr);
+#endif
 #if defined(HAVE_PICO) && defined(PICO_PSRAM_MAPPED)
 		/* Mapped-PSRAM build: the clone/node/list/hunk tables live in PSRAM, so
 		   this climbs during play while SRAM 'used' above stays lower. */

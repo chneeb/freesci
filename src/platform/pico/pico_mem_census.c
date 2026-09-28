@@ -71,6 +71,29 @@ extern int   psram_heap_owns(const void *p);
 #	define PSRAM_REALLOC_IF_OWNED(p, n) ((void)0)
 #endif
 
+/* Largest block the allocator can hand out right now, by bisection with the
+   REAL allocator (so no "malloc N failed" noise and no census accounting).
+   Includes what the heap can still grow into via sbrk -- it is literally "would
+   an N-byte malloc succeed now". Side effect: a successful probe may sbrk the
+   heap up (arena grows; the memory stays free in the top chunk). Used by the
+   FSCI_PROBE_MEM room lines to measure the real per-room margin. */
+size_t
+pico_largest_alloc(void)
+{
+	size_t lo = 0, hi = 512 * 1024;
+
+	while (hi - lo > 16) {
+		size_t mid = lo + (hi - lo) / 2;
+		void *p = __real_malloc(mid);
+		if (p) {
+			__real_free(p);
+			lo = mid;
+		} else
+			hi = mid;
+	}
+	return lo;
+}
+
 #ifdef FSCI_PROBE_MEM_CENSUS
 
 /* Bucket b (b>=1) covers [1<<(b+2), 1<<(b+3)); bucket 0 is < 8 bytes.

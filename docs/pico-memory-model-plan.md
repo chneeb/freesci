@@ -249,6 +249,27 @@ dominated by the different pre-restore heap. What checkpoint 4 -> 5 still frees 
 unavoidable or small. **Summary of the restore work: gaps in the first room after a load 199 -> ~68; this
 approach has reached diminishing returns.**
 
+### Real margin — RESULT (KQ4 + sound, shipping config + `FSCI_PROBE_MEM` only, 2026-09-28)
+
+`[mem] largest enter|ready nr=N: X (session min Y at room R)` on every room change: the biggest block a malloc
+would get right now, sbrk headroom included, by bisection with the real allocator (`pico_largest_alloc`,
+`pico_mem_census.c`). The probe build differs from shipping by that one option and 12 B of `.bss`, so unlike the
+census it does not eat the margin it measures.
+
+| moment | free | largest allocatable |
+|---|---:|---:|
+| intro, room 991 | 25,488 → 68,328 | 79,296 → 65,520 |
+| rooms 700 / 96 / 698 | 85-93 KB | 61,936 |
+| room 201 (the old OOM room) | 62,856 → 77,160 | **41,264** (normal-play minimum) |
+| rooms 25 / 26 | 72-87 KB | 49,296 |
+| **room 27, right after a savegame load** | 49,624 | **24,560** (session minimum) |
+| room 27 ready | 104,328 | 57,472 |
+
+**Headroom: ~41 KB contiguous in normal play, ~25 KB right after a load** (room-change snapshots; short peaks
+inside a room can go lower). Room 201 died two days ago with 29 KB free and a 5.3 KB largest piece; now 41 KB
+allocatable. **A permanent 32 KB working priority map does not fit on PIO** (it would leave ~9 KB in play and
+nothing after a load); a new permanent buffer should stay under **~20 KB**.
+
 ### Step 1 — fixed pools for the fixed-size churn (cheap, independent)
 
 pico-286's static-array principle applied to FreeSCI's small, frequent, fixed-size allocations (widgets,
