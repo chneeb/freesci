@@ -158,6 +158,36 @@ as fitting but thin: the underlying fragmentation is unchanged, and items 2–4 
 (`strdup`, stdio) go through `_malloc_r`, which `--wrap=malloc` does not catch, while their `free()`
 *is* caught. Trust `mallinfo` (`arena`/`free`) over the `LIVE` total until fixed.
 
+### Heap walk — RESULT (KQ4 + sound, census build, 2026-09-28)
+
+`census_heap_walk` (`pico_mem_census.c`, census builds only) walks newlib's chunks at every room change and at
+an OOM halt, names the blocks on both sides of each free gap, and reports "largest if pins moved": the biggest
+gap you would get if every allocated run of at most 512 B between two gaps lived elsewhere. It checks itself
+against `mallinfo`: **11/11 walks `ok`** on device. Every live block is now tagged (raw mallocs by caller PC,
+resolved with `addr2line`), untracked 0. No OOM this run, and a savegame load worked.
+
+| snapshot | gaps | bytes in gaps | largest gap | top chunk | largest if pins moved | pins |
+|---|---:|---:|---:|---:|---:|---:|
+| intro, room 991 | 15 | 37,672 | 12,536 | 12,056 (+53 KB not yet sbrk'd) | 12,536 | 1 |
+| room 27, before load | 47 | 43,480 | 6,000 | 27,576 | 11,432 | 22 |
+| **room 27, after load** | **206** | **63,088** | **5,312** | **9,576** | **6,816** | **150** |
+
+- **The heap is healthy until the savegame load; the load shatters it**: 72.6 KB free afterwards, but the
+  biggest single piece is the 9.6 KB top chunk.
+- **Pins after the load** are the restored state's small, long-lived pieces: `savegame.c:933` (object
+  `variables`, 106 chunks), `kernel.c:788` (string copies, 103), `vocab_debug.c:353` (kernel names, 36),
+  `savegame.c:327` (restored strings, 29), `savegame.c:3164` (`variables`, 23), `savegame.c:4337`
+  (`mem_obj_t`, 22). Kilobyte-sized restored blocks also sit between gaps: script bufs (`savegame.c:4503`),
+  the VM stack (`savegame.c:4285`), and the lazily allocated LZW tables (`decompress0.c:303/305`).
+- **Small-object pools alone would not fix it:** "largest if pins moved" after the load is 6.8 KB against
+  5.3 KB. Step 1 as written buys little; the problem is how the RESTORE places the whole new state.
+- Answers the working-priority-map question: 27.5 KB contiguous before the load, 9.6 KB after -- 32 KB does not
+  fit.
+
+Next (A): walk once INSIDE the restore, before the reader frees its temporaries, to name what makes the holes.
+Then either give those temporaries a fixed scratch region, or allocate the restored state as one unit (B), or
+restore on a cold heap by rebooting (C; costs the 21 s KQ4 resource scan per load).
+
 ### Step 1 — fixed pools for the fixed-size churn (cheap, independent)
 
 pico-286's static-array principle applied to FreeSCI's small, frequent, fixed-size allocations (widgets,
@@ -327,6 +357,6 @@ start at `0x100000`), and the pinned-pool sizes (listed by category, not by size
 | 0 measure movable share | **done 2026-09-27** | movable ~15 KB, pinned dominates; OOM is fragmentation (29 KB free, largest 5.3 KB). Hunk ruled out for PIO; see step 0 result |
 | 0a const-ify `.data` tables | **done 2026-09-27, device-verified** | `.data` 34,444 → 18,092 B; heap 466,544 → 482,896 B; KQ4 + sound runs again |
 | 0b board-current comparison vs pico-286 (Low/Medium) | not started | needed before step 3 |
-| 1 fixed pools | not started | |
+| 1 fixed pools | not started | heap walk: small-object pools alone buy little (restore fragmentation needs more) |
 | 2 hunk | **not worth it on PIO** (step 0) | movable share ~15 KB |
 | 3 VM accessor + page cache | not started | conditional on §1 |

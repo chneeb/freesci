@@ -1224,7 +1224,8 @@ pico_mem_breakdown(state_t *s, int nr)
 	extern int    pico_census_count[];
 	extern size_t pico_census_total_bytes;
 	extern int    pico_census_total_count;
-	extern void   census_dump_sites(void);  /* live [256,512) call sites */
+	extern void   census_dump_sites(void);  /* live blocks by call site */
+	extern void   census_heap_walk(const char *tag); /* which blocks split the free space */
 #endif
 	size_t tracked_bytes;
 	gfx_pixmap_t *rp;
@@ -1486,6 +1487,7 @@ pico_mem_breakdown(state_t *s, int nr)
 	   revisits → the growing site is the leak. Prints via printf to USB/UART
 	   (it carries __FILE__ strings; sciprintf's callback path is not needed). */
 	census_dump_sites();
+	census_heap_walk("room");
 #endif /* FSCI_PROBE_MEM_CENSUS */
 }
 #endif

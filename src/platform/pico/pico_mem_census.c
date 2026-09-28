@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <malloc.h>
 
 extern void *__real_malloc(size_t size);
@@ -111,17 +112,30 @@ static int census_depth = 0;
    a few KB total, so a narrow window simply misses it.  Do NOT drop SITE_LO to
    0: the 8-byte blocks alone run ~1900 live in a room and would blow
    CENSUS_NPTRS. */
-#define SITE_LO 128
-#define SITE_HI (1u << 24)
-#define CENSUS_NSITES   96
-#define CENSUS_NPTRS    2048   /* power of two; > peak live tagged blocks */
+/* EVERY live block is tagged since 2026-09-28 (for census_heap_walk): the
+   fragmentation question is which SMALL blocks sit between free gaps, so the
+   small ones are exactly the ones that must be named. To afford it the table is
+   compact -- 4096 pointers + a 1-byte site index (20 KB) instead of 2048 x
+   {ptr, site, usable} (24 KB); a block's size is read back with
+   malloc_usable_size() when it is freed.
+   Two kinds of site:
+     - sci_malloc/sci_calloc blocks: (__FILE__, __LINE__), from sci_memory.c;
+     - everything else reaching the wrappers (raw malloc/calloc/realloc): the
+       caller's return address (file == NULL, line == PC). Resolve offline with
+         arm-none-eabi-addr2line -f -e build-pico-census/src/freesci.elf 0xPC
+   A sci_malloc block is first tagged by PC inside __wrap_malloc and then
+   re-tagged with its file:line, so it is never counted twice. */
+#define CENSUS_NSITES   255    /* site index 255 = untracked */
+#define CENSUS_NPTRS    4096   /* power of two; > peak live blocks */
+#define CENSUS_NO_SITE  255
 
 struct census_site { const char *file; int line; int live_count; size_t live_bytes; };
-struct census_ptr  { void *ptr; int site; unsigned usable; };
 
 static struct census_site census_sites[CENSUS_NSITES];
 static int                 census_nsites = 0;
-static struct census_ptr   census_ptrs[CENSUS_NPTRS];
+static void               *census_ptrs[CENSUS_NPTRS];
+static uint8_t             census_ptr_site[CENSUS_NPTRS];
+static unsigned            census_untracked = 0;  /* table or site overflow */
 
 static unsigned
 census_ptr_hash(void *p)
@@ -147,79 +161,134 @@ census_find_site(const char *file, int line)
 	return -1;   /* table full — block goes untracked (won't corrupt counts) */
 }
 
-void
-census_site_register(void *ptr, const char *file, int line)
+/* Slot holding ptr, or -1. */
+static int
+census_slot_of(void *ptr)
+{
+	unsigned h = census_ptr_hash(ptr), i;
+
+	for (i = 0; i < CENSUS_NPTRS; i++) {
+		unsigned slot = (h + i) & (CENSUS_NPTRS - 1);
+		if (census_ptrs[slot] == ptr)
+			return (int) slot;
+		if (census_ptrs[slot] == NULL)
+			return -1;
+	}
+	return -1;
+}
+
+/* Tag ptr with (file, line), replacing any earlier tag of the same block. */
+static void
+census_tag(void *ptr, const char *file, int line)
 {
 	size_t usable;
 	unsigned h, i;
-	int site;
+	int site, slot;
 
 	if (!ptr)
 		return;
 	usable = malloc_usable_size(ptr);
-	if (usable < SITE_LO || usable >= SITE_HI)
-		return;
 	site = census_find_site(file, line);
-	if (site < 0)
+	slot = census_slot_of(ptr);
+	if (slot >= 0) {
+		/* Re-tag: sci_malloc naming a block its __wrap_malloc tagged by PC. */
+		int old = census_ptr_site[slot];
+		if (old != CENSUS_NO_SITE) {
+			census_sites[old].live_count--;
+			census_sites[old].live_bytes -= usable;
+		}
+		census_ptr_site[slot] = site < 0 ? CENSUS_NO_SITE : (uint8_t) site;
+		if (site >= 0) {
+			census_sites[site].live_count++;
+			census_sites[site].live_bytes += usable;
+		}
 		return;
+	}
 
 	h = census_ptr_hash(ptr);
 	for (i = 0; i < CENSUS_NPTRS; i++) {
-		unsigned slot = (h + i) & (CENSUS_NPTRS - 1);
-		if (census_ptrs[slot].ptr == NULL) {
-			census_ptrs[slot].ptr = ptr;
-			census_ptrs[slot].site = site;
-			census_ptrs[slot].usable = (unsigned) usable;
-			census_sites[site].live_count++;
-			census_sites[site].live_bytes += usable;
+		unsigned s = (h + i) & (CENSUS_NPTRS - 1);
+		if (census_ptrs[s] == NULL) {
+			census_ptrs[s] = ptr;
+			census_ptr_site[s] = site < 0 ? CENSUS_NO_SITE : (uint8_t) site;
+			if (site >= 0) {
+				census_sites[site].live_count++;
+				census_sites[site].live_bytes += usable;
+			} else
+				census_untracked++;
 			return;
 		}
 	}
-	/* ptr table full — drop silently; deregister will simply miss it. */
+	census_untracked++;   /* ptr table full — deregister will simply miss it */
 }
 
-/* Called from __wrap_free/__wrap_realloc by ptr. No-op for unregistered ptrs
-   (raw allocs, out-of-range sizes), so it is safe to call on every free. */
+void
+census_site_register(void *ptr, const char *file, int line)
+{
+	census_tag(ptr, file, line);
+}
+
+/* Tag a raw allocation by the wrapper's caller. Must be expanded directly in a
+   __wrap_* function so __builtin_return_address(0) is that function's caller. */
+#define CENSUS_TAG_PC(ptr) \
+	census_tag((ptr), NULL, (int) (uintptr_t) __builtin_return_address(0))
+
+/* Called from __wrap_free/__wrap_realloc BEFORE the block is released
+   (malloc_usable_size must still be valid). No-op for unregistered ptrs. */
 static void
 census_site_deregister(void *ptr)
 {
-	unsigned h, i;
+	int slot;
 
-	if (!ptr)
+	if (!ptr || (slot = census_slot_of(ptr)) < 0)
 		return;
-	h = census_ptr_hash(ptr);
-	for (i = 0; i < CENSUS_NPTRS; i++) {
-		unsigned slot = (h + i) & (CENSUS_NPTRS - 1);
-		if (census_ptrs[slot].ptr == ptr) {
-			int site = census_ptrs[slot].site;
-			census_sites[site].live_count--;
-			census_sites[site].live_bytes -= census_ptrs[slot].usable;
-			census_ptrs[slot].ptr = NULL;
-			/* Re-probe the rest of the cluster so a deleted slot doesn't
-			   strand later entries that collided past it. */
-			{
-				unsigned j = (slot + 1) & (CENSUS_NPTRS - 1);
-				while (census_ptrs[j].ptr) {
-					void *rp = census_ptrs[j].ptr;
-					int   rs = census_ptrs[j].site;
-					unsigned ru = census_ptrs[j].usable;
-					unsigned nh = census_ptr_hash(rp), k;
-					census_ptrs[j].ptr = NULL;
-					for (k = 0; k < CENSUS_NPTRS; k++) {
-						unsigned s2 = (nh + k) & (CENSUS_NPTRS - 1);
-						if (census_ptrs[s2].ptr == NULL) {
-							census_ptrs[s2].ptr = rp;
-							census_ptrs[s2].site = rs;
-							census_ptrs[s2].usable = ru;
-							break;
-						}
-					}
-					j = (j + 1) & (CENSUS_NPTRS - 1);
+	if (census_ptr_site[slot] != CENSUS_NO_SITE) {
+		int site = census_ptr_site[slot];
+		census_sites[site].live_count--;
+		census_sites[site].live_bytes -= malloc_usable_size(ptr);
+	}
+	census_ptrs[slot] = NULL;
+	/* Re-probe the rest of the cluster so a deleted slot doesn't strand later
+	   entries that collided past it. */
+	{
+		unsigned j = ((unsigned) slot + 1) & (CENSUS_NPTRS - 1);
+		while (census_ptrs[j]) {
+			void   *rp = census_ptrs[j];
+			uint8_t rs = census_ptr_site[j];
+			unsigned nh = census_ptr_hash(rp), k;
+			census_ptrs[j] = NULL;
+			for (k = 0; k < CENSUS_NPTRS; k++) {
+				unsigned s2 = (nh + k) & (CENSUS_NPTRS - 1);
+				if (census_ptrs[s2] == NULL) {
+					census_ptrs[s2] = rp;
+					census_ptr_site[s2] = rs;
+					break;
 				}
 			}
-			return;
+			j = (j + 1) & (CENSUS_NPTRS - 1);
 		}
 	}
+}
+
+static void
+census_site_name(int site, char *buf, size_t n)
+{
+	if (site < 0 || site == CENSUS_NO_SITE)
+		snprintf(buf, n, "untracked");
+	else if (census_sites[site].file == NULL)
+		snprintf(buf, n, "pc:0x%08x", (unsigned) census_sites[site].line);
+	else {
+		const char *f = census_sites[site].file, *q = f;
+		while (*q) { if (*q == '/') f = q + 1; q++; }
+		snprintf(buf, n, "%s:%d", f, census_sites[site].line);
+	}
+}
+
+static int
+census_site_of_mem(void *mem)
+{
+	int slot = census_slot_of(mem);
+	return slot < 0 ? -1 : census_ptr_site[slot];
 }
 
 /* Prints the live tagged sites in [SITE_LO,SITE_HI), most blocks first, for
@@ -254,9 +323,12 @@ census_print(int by_bytes, int max_sites)
 		}
 		if (best < 0 || printed >= max_sites)
 			break;
-		printf(" %s:%d=%d/%lu", census_sites[best].file, census_sites[best].line,
-		       census_sites[best].live_count,
-		       (unsigned long) census_sites[best].live_bytes);
+		{
+			char nm[48];
+			census_site_name(best, nm, sizeof(nm));
+			printf(" %s=%d/%lu", nm, census_sites[best].live_count,
+			       (unsigned long) census_sites[best].live_bytes);
+		}
 		/* Mark printed by flipping sign of count temporarily. */
 		census_sites[best].live_count = -census_sites[best].live_count;
 		printed++;
@@ -272,6 +344,219 @@ void
 census_dump_sites(void)
 {
 	census_print(0, 24);
+}
+
+/* ── Heap walk (2026-09-28): WHICH blocks split the free space ───────────────
+ * The KQ4+sound census showed the OOM is fragmentation (29 KB free, largest
+ * piece 5.3 KB), but counts by size/site cannot say which blocks sit BETWEEN the
+ * gaps. This walks newlib's heap chunk by chunk and names them.
+ *
+ * Layout relied on (full newlib mallocr, not nano -- __malloc_av_ is present):
+ * a chunk is {prev_size, size}, size bit 0 = PREV_INUSE, bit 1 = IS_MMAPPED;
+ * chunks are contiguous from the 8-aligned start of the sbrk region (pico-sdk's
+ * _sbrk starts at __end__) up to the "top" chunk, av_[2]. A chunk is in use iff
+ * the NEXT chunk's PREV_INUSE bit is set. The walk is SELF-CHECKING: free gaps
+ * + top must equal mallinfo().fordblks, printed as ok/MISMATCH -- a wrong
+ * layout assumption shows up as MISMATCH, never as plausible numbers.
+ *
+ * A "pin" is an allocated run of at most WALK_PIN_MAX bytes with a free gap on
+ * both sides: moving it elsewhere (a fixed pool) would merge the two gaps.
+ * "largest if pins moved" is the biggest gap that merging would produce -- what
+ * step 1 of docs/pico-memory-model-plan.md (fixed pools) could buy. */
+extern char __end__;
+extern char __HeapLimit;
+extern void *__malloc_av_[];
+
+static int census_bucket(size_t n);
+
+#define WALK_PIN_MAX  512
+#define WALK_TOPGAPS  12
+#define WALK_RUNMAX   (WALK_PIN_MAX / 16)   /* chunks in a pin run, max */
+
+struct walk_gap { uintptr_t addr; size_t size; int below; size_t below_sz; int above; size_t above_sz; };
+static struct walk_gap walk_top[WALK_TOPGAPS];
+static unsigned walk_pin_n[256];
+static size_t   walk_pin_b[256];
+
+static int
+walk_site_ix(int site)
+{
+	return site < 0 ? CENSUS_NO_SITE : site;
+}
+
+static void
+walk_note_gap(uintptr_t addr, size_t size, int below, size_t below_sz)
+{
+	int i, j;
+
+	for (i = 0; i < WALK_TOPGAPS; i++)
+		if (walk_top[i].size < size)
+			break;
+	if (i == WALK_TOPGAPS)
+		return;
+	for (j = WALK_TOPGAPS - 1; j > i; j--)
+		walk_top[j] = walk_top[j - 1];
+	walk_top[i].addr = addr;
+	walk_top[i].size = size;
+	walk_top[i].below = below;
+	walk_top[i].below_sz = below_sz;
+	walk_top[i].above = -2;          /* filled in when the next chunk is seen */
+	walk_top[i].above_sz = 0;
+}
+
+void
+census_heap_walk(const char *tag)
+{
+	struct mallinfo mi = mallinfo();
+	uintptr_t p = ((uintptr_t) &__end__ + 7) & ~(uintptr_t) 7;
+	uintptr_t top = (uintptr_t) __malloc_av_[2];
+	size_t used_b = 0, gap_b = 0, largest = 0, top_sz = 0;
+	unsigned used_n = 0, gap_n = 0, pins = 0, steps = 0;
+	int bad = 0, i;
+	/* run = allocated chunks since the last gap */
+	size_t run_b = 0;
+	unsigned run_n = 0;
+	int run_site[WALK_RUNMAX];
+	size_t run_sz[WALK_RUNMAX];
+	int have_gap = 0;               /* a gap precedes the current run */
+	size_t merged = 0, merged_max = 0;
+	int last_site = -2;             /* last allocated chunk, for "below" */
+	size_t last_sz = 0;
+	int pending = -1;               /* walk_top slot waiting for "above" */
+	unsigned gh_n[CENSUS_NBUCKETS];
+	size_t gh_b[CENSUS_NBUCKETS];
+	char a[48], b[48];
+
+	memset(walk_top, 0, sizeof(walk_top));
+	memset(walk_pin_n, 0, sizeof(walk_pin_n));
+	memset(walk_pin_b, 0, sizeof(walk_pin_b));
+	memset(gh_n, 0, sizeof(gh_n));
+	memset(gh_b, 0, sizeof(gh_b));
+
+	if (!top || top < p) {
+		printf("[heap] %s walk: no heap yet\n", tag);
+		return;
+	}
+
+	while (p < top) {
+		size_t sz = ((size_t *) p)[1] & ~(size_t) 3;
+		uintptr_t nx = p + sz;
+		int in_use;
+
+		if (sz < 16 || nx > top || ++steps > 20000) {
+			bad = 1;
+			break;
+		}
+		in_use = ((size_t *) nx)[1] & 1;
+
+		if (in_use) {
+			int site = census_site_of_mem((void *) (p + 8));
+			used_n++;
+			used_b += sz;
+			if (pending >= 0) {
+				walk_top[pending].above = site;
+				walk_top[pending].above_sz = sz;
+				pending = -1;
+			}
+			if (run_n < WALK_RUNMAX) {
+				run_site[run_n] = site;
+				run_sz[run_n] = sz;
+			}
+			run_n++;
+			run_b += sz;
+			last_site = site;
+			last_sz = sz;
+		} else {
+			int k;
+			gap_n++;
+			gap_b += sz;
+			if (sz > largest)
+				largest = sz;
+			k = census_bucket(sz);
+			gh_n[k]++;
+			gh_b[k] += sz;
+
+			if (have_gap && run_b <= WALK_PIN_MAX && run_n <= WALK_RUNMAX) {
+				/* The run is a pin between the previous gap and this one. */
+				unsigned r;
+				pins++;
+				for (r = 0; r < run_n; r++) {
+					int s = walk_site_ix(run_site[r]);
+					walk_pin_n[s]++;
+					walk_pin_b[s] += run_sz[r];
+				}
+				merged += run_b + sz;
+			} else
+				merged = sz;
+			if (merged > merged_max)
+				merged_max = merged;
+
+			walk_note_gap(p, sz, run_n ? last_site : -2, run_n ? last_sz : 0);
+			pending = -1;
+			for (i = 0; i < WALK_TOPGAPS; i++)
+				if (walk_top[i].addr == p) {
+					pending = i;
+					break;
+				}
+			have_gap = 1;
+			run_b = 0;
+			run_n = 0;
+		}
+		p = nx;
+	}
+	if (!bad && p != top)
+		bad = 1;
+	if (!bad) {
+		top_sz = ((size_t *) top)[1] & ~(size_t) 3;
+		/* The top chunk is free too: a small final run merges into it. */
+		if (have_gap && run_b <= WALK_PIN_MAX && run_n <= WALK_RUNMAX
+		    && merged + run_b + top_sz > merged_max)
+			merged_max = merged + run_b + top_sz;
+	}
+
+	printf("[heap] %s walk %s: used %u blocks %lu B, %u gaps %lu B, top %lu"
+	       " (+%lu unsbrk'd), largest gap %lu, largest if pins moved %lu,"
+	       " %u pins | mallinfo free %lu, untracked %u\n",
+	       tag,
+	       bad ? "BROKEN" : (gap_b + top_sz == mi.fordblks ? "ok" : "MISMATCH"),
+	       used_n, (unsigned long) used_b, gap_n, (unsigned long) gap_b,
+	       (unsigned long) top_sz,
+	       (unsigned long) ((uintptr_t) &__HeapLimit - (top + top_sz)),
+	       (unsigned long) largest, (unsigned long) merged_max, pins,
+	       (unsigned long) mi.fordblks, census_untracked);
+	if (bad)
+		printf("[heap]   stopped at 0x%08lx (top 0x%08lx) after %u chunks\n",
+		       (unsigned long) p, (unsigned long) top, steps);
+
+	printf("[heap]   gaps by size:");
+	for (i = 0; i < CENSUS_NBUCKETS; i++)
+		if (gh_n[i])
+			printf(" <%lu:%u/%lu", (unsigned long) ((size_t) 1 << (i + 3)),
+			       gh_n[i], (unsigned long) gh_b[i]);
+	printf("\n");
+
+	for (i = 0; i < WALK_TOPGAPS && walk_top[i].size; i++) {
+		census_site_name(walk_top[i].below == -2 ? -1 : walk_top[i].below, a, sizeof(a));
+		census_site_name(walk_top[i].above == -2 ? -1 : walk_top[i].above, b, sizeof(b));
+		printf("[heap]   gap %lu @%08lx  below %s/%lu  above %s/%lu\n",
+		       (unsigned long) walk_top[i].size, (unsigned long) walk_top[i].addr,
+		       walk_top[i].below == -2 ? "-" : a, (unsigned long) walk_top[i].below_sz,
+		       walk_top[i].above == -2 ? "-" : b, (unsigned long) walk_top[i].above_sz);
+	}
+
+	printf("[heap]   pins by site (chunks/bytes):");
+	for (i = 0; i < 30; i++) {
+		int best = -1, s;
+		for (s = 0; s < 256; s++)
+			if (walk_pin_n[s] && (best < 0 || walk_pin_n[s] > walk_pin_n[best]))
+				best = s;
+		if (best < 0)
+			break;
+		census_site_name(best, a, sizeof(a));
+		printf(" %s=%u/%lu", a, walk_pin_n[best], (unsigned long) walk_pin_b[best]);
+		walk_pin_n[best] = 0;
+	}
+	printf("\n");
 }
 
 /* Called from pico_oom_report just before the halt: the heap composition AT the
@@ -299,6 +584,7 @@ census_dump_oom(void)
 	       (unsigned long) mi.fordblks, (unsigned long) lo,
 	       (unsigned long) mi.arena);
 	census_print(1, 40);
+	census_heap_walk("OOM");
 }
 
 static int
@@ -338,8 +624,10 @@ __wrap_malloc(size_t size)
 		printf("malloc %u failed to allocate memory\n", (unsigned) size);
 		return rc;
 	}
-	if (census_depth == 0)
+	if (census_depth == 0) {
 		census_add_size(malloc_usable_size(rc));
+		CENSUS_TAG_PC(rc);
+	}
 	return rc;
 }
 
@@ -356,6 +644,7 @@ __wrap_calloc(size_t count, size_t size)
 		return rc;
 	}
 	census_add_size(malloc_usable_size(rc));
+	CENSUS_TAG_PC(rc);
 	return rc;
 }
 
@@ -378,6 +667,7 @@ __wrap_realloc(void *mem, size_t size)
 	if (mem)
 		census_sub_size(oldb);    /* old block gone (moved or grown in place) */
 	census_add_size(malloc_usable_size(rc));
+	CENSUS_TAG_PC(rc);
 	return rc;
 }
 
@@ -405,6 +695,7 @@ void census_site_register(void *ptr, const char *file, int line)
 
 void census_dump_sites(void) {}
 void census_dump_oom(void) {}
+void census_heap_walk(const char *tag) { (void)tag; }
 
 void *
 __wrap_malloc(size_t size)
