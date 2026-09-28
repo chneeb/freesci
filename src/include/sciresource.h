@@ -157,6 +157,44 @@ typedef struct _resource_altsource_struct {
 } resource_altsource_t;
 
 
+/* Packed resource directory entry (PIO PicoCalc; opt-in elsewhere with
+   -DSCIR_PACKED_RESOURCES for desktop testing). One entry exists per
+   resource.map line for the whole game -- 968 in KQ4 -- so the entry size is
+   paid ~1000x in SRAM. Packed: 28 B instead of 40.
+     - the LRU links are 16-bit 1-based indices into mgr->resources (0 = none)
+       instead of two pointers: SCIR_LRU_* in resource.c;
+     - the source is an 8-bit 1-based index into a small table of the few
+       volume/patch sources (0 = NULL), sharing a word with a 24-bit
+       file_offset (SCI0 volumes are < 1 MB): SCIR_SOURCE / SCIR_SET_SOURCE;
+     - type is 8-bit (SCI0 types are 0..31).
+   Not used where SCI1 must work (desktop default, Pimoroni), because SCI1
+   volumes may exceed the 24-bit offset. */
+#if (defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)) || defined(SCIR_PACKED_RESOURCES)
+#  define SCIR_PACKED 1
+#endif
+
+#ifdef SCIR_PACKED
+typedef struct _resource_struct {
+	unsigned char *data;
+	unsigned int size;
+	unsigned int file_offset : 24; /* Offset in file */
+	unsigned int source_idx : 8;   /* SCIR_SOURCE(); 0 = no source */
+	struct _resource_altsource_struct *alt_sources; /* SLL of alternative resource data sources */
+
+	unsigned short number;
+	guint16 id; /* contains number and type */
+	unsigned short lockers; /* Number of places where this resource was locked */
+	guint16 lru_next; /* 1-based index into mgr->resources; 0 = end */
+	guint16 lru_prev;
+	unsigned char type;
+	unsigned char status;
+} resource_t; /* for storing resources in memory */
+
+resource_source_t *scir_source_ptr(unsigned int idx);
+unsigned int scir_source_idx(resource_source_t *source);
+#  define SCIR_SOURCE(res) scir_source_ptr((res)->source_idx)
+#  define SCIR_SET_SOURCE(res, src) ((res)->source_idx = scir_source_idx(src))
+#else
 typedef struct _resource_struct {
 	unsigned char *data;
 
@@ -177,6 +215,9 @@ typedef struct _resource_struct {
 
 	resource_altsource_t *alt_sources; /* SLL of alternative resource data sources */
 } resource_t; /* for storing resources in memory */
+#  define SCIR_SOURCE(res) ((res)->source)
+#  define SCIR_SET_SOURCE(res, src) ((res)->source = (src))
+#endif
 
 
 typedef struct {

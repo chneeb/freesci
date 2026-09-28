@@ -143,6 +143,55 @@ int resourcecmp (const void *first, const void *second)
 /*-- Resmgr helper functions --*/
 /*-----------------------------*/
 
+#ifdef SCIR_PACKED
+/* resource_t.source_idx -> resource_source_t*. Only a handful of sources exist
+   (one per volume file plus the patch directory), all registered while the map
+   is read, so a linear search on insert is fine and lookup is O(1). */
+/* 28 B on 32-bit targets (the Pico); a layout change that re-adds padding
+   fails the build here instead of silently costing ~1 KB per 250 resources. */
+typedef char scir_packed_size_check[(sizeof(void *) != 4 || sizeof(resource_t) == 28) ? 1 : -1];
+
+#define SCIR_MAX_SOURCES 32 /* SCI0 games have <= 10 volumes plus the patch dir */
+static resource_source_t *scir_source_table[SCIR_MAX_SOURCES];
+static unsigned int scir_sources_nr = 0;
+
+resource_source_t *
+scir_source_ptr(unsigned int idx)
+{
+	return (idx && idx <= scir_sources_nr) ? scir_source_table[idx - 1] : NULL;
+}
+
+unsigned int
+scir_source_idx(resource_source_t *source)
+{
+	unsigned int i;
+
+	if (!source)
+		return 0;
+	for (i = 0; i < scir_sources_nr; i++)
+		if (scir_source_table[i] == source)
+			return i + 1;
+	if (scir_sources_nr == SCIR_MAX_SOURCES) {
+		sciprintf("Resmgr: more than %d resource sources\n", SCIR_MAX_SOURCES);
+		return 0; /* reads as a missing source: the map entry is rejected */
+	}
+	scir_source_table[scir_sources_nr] = source;
+	return ++scir_sources_nr;
+}
+
+#define SCIR_LRU_NEXT(mgr, r) ((r)->lru_next ? (mgr)->resources + (r)->lru_next - 1 : NULL)
+#define SCIR_LRU_PREV(mgr, r) ((r)->lru_prev ? (mgr)->resources + (r)->lru_prev - 1 : NULL)
+#define SCIR_LRU_IDX(mgr, p) ((p) ? (guint16) ((resource_t *) (p) - (mgr)->resources + 1) : 0)
+#define SCIR_LRU_SET_NEXT(mgr, r, p) ((r)->lru_next = SCIR_LRU_IDX(mgr, p))
+#define SCIR_LRU_SET_PREV(mgr, r, p) ((r)->lru_prev = SCIR_LRU_IDX(mgr, p))
+#else
+#define SCIR_LRU_NEXT(mgr, r) ((r)->next)
+#define SCIR_LRU_PREV(mgr, r) ((r)->prev)
+#define SCIR_LRU_SET_NEXT(mgr, r, p) ((r)->next = (p))
+#define SCIR_LRU_SET_PREV(mgr, r, p) ((r)->prev = (p))
+#endif
+
+
 void
 _scir_add_altsource(resource_t *res, resource_source_t *source, unsigned int file_offset)
 {
@@ -276,7 +325,7 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 	memcpy(&backup, res, sizeof(resource_t));
 
 	/* First try lower-case name */
-	if (res->source->source_type == RESSOURCE_TYPE_DIRECTORY) {
+	if (SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_DIRECTORY) {
 
 		if (!patch_sprintfers[mgr->sci_version]) {
 			sciprintf("Resource manager's SCI version (%d) has no patch file name printers -> internal error!\n",
@@ -286,9 +335,9 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 
 		/* Get patch file name */
 		patch_sprintfers[mgr->sci_version](filename, res);
-		chdir(res->source->location.dir.name);
+		chdir(SCIR_SOURCE(res)->location.dir.name);
 	} else
-		strcpy(filename, res->source->location.file.name);
+		strcpy(filename, SCIR_SOURCE(res)->location.file.name);
 
 	fh = open(filename, O_RDONLY | O_BINARY);
 
@@ -315,8 +364,8 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 
 	lseek(fh, res->file_offset, SEEK_SET);
 
-	if (res->source->source_type == RESSOURCE_TYPE_DIRECTORY ||
-	    res->source->source_type == RESSOURCE_TYPE_AUDIO_DIRECTORY)
+	if (SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_DIRECTORY ||
+	    SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_AUDIO_DIRECTORY)
 		_scir_load_from_patch_file(fh, res, filename);
 	else if (!decompressors[mgr->sci_version]) {
 		/* Check whether we support this at all */
@@ -380,11 +429,11 @@ sci_test_view_type(resource_mgr_t *mgr)
 
 		if (!res) continue;
 
-		if (res->source->source_type == RESSOURCE_TYPE_DIRECTORY ||
-		    res->source->source_type == RESSOURCE_TYPE_AUDIO_DIRECTORY)
+		if (SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_DIRECTORY ||
+		    SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_AUDIO_DIRECTORY)
 			continue;
 
-		strcpy(filename, res->source->location.file.name);
+		strcpy(filename, SCIR_SOURCE(res)->location.file.name);
 		fh = open(filename, O_RDONLY | O_BINARY);
 
 		if (!IS_VALID_FD(fh)) {
@@ -413,11 +462,11 @@ sci_test_view_type(resource_mgr_t *mgr)
 
 		if (!res) continue;
 
-		if (res->source->source_type == RESSOURCE_TYPE_DIRECTORY ||
-		    res->source->source_type == RESSOURCE_TYPE_AUDIO_DIRECTORY)
+		if (SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_DIRECTORY ||
+		    SCIR_SOURCE(res)->source_type == RESSOURCE_TYPE_AUDIO_DIRECTORY)
 			continue;
 
-		strcpy(filename, res->source->location.file.name);
+		strcpy(filename, SCIR_SOURCE(res)->location.file.name);
 		fh = open(filename, O_RDONLY | O_BINARY);
 
 
@@ -498,7 +547,6 @@ _scir_scan_new_sources(resource_mgr_t *mgr, int *detected_version, resource_sour
 	int preset_version = mgr->sci_version;
 	int resource_error = 0;
 	int dummy = mgr->sci_version;
-	resource_t **concat_ptr = &(mgr->resources[mgr->resources_nr-1].next);
 
 	if (detected_version == NULL)
 		detected_version = &dummy;
@@ -776,6 +824,9 @@ scir_free_resource_manager(resource_mgr_t *mgr)
 	_scir_free_resources(mgr->resources, mgr->resources_nr);
 	_scir_free_resource_sources(mgr->sources);
 	mgr->resources = NULL;
+#ifdef SCIR_PACKED
+	scir_sources_nr = 0; /* the sources were just freed */
+#endif
 
 	sci_free(mgr);
 }
@@ -800,14 +851,19 @@ _scir_remove_from_lru(resource_mgr_t *mgr, resource_t *res)
 		return;
 	}
 
-	if (res->next)
-		res->next->prev = res->prev;
-	if (res->prev)
-		res->prev->next = res->next;
-	if (mgr->lru_first == res)
-		mgr->lru_first = res->next;
-	if (mgr->lru_last == res)
-		mgr->lru_last = res->prev;
+	{
+		resource_t *next = SCIR_LRU_NEXT(mgr, res);
+		resource_t *prev = SCIR_LRU_PREV(mgr, res);
+
+		if (next)
+			SCIR_LRU_SET_PREV(mgr, next, prev);
+		if (prev)
+			SCIR_LRU_SET_NEXT(mgr, prev, next);
+		if (mgr->lru_first == res)
+			mgr->lru_first = next;
+		if (mgr->lru_last == res)
+			mgr->lru_last = prev;
+	}
 
 	mgr->memory_lru -= res->size;
 
@@ -823,13 +879,13 @@ _scir_add_to_lru(resource_mgr_t *mgr, resource_t *res)
 		return;
 	}
 
-	res->prev = NULL;
-	res->next = mgr->lru_first;
+	SCIR_LRU_SET_PREV(mgr, res, NULL);
+	SCIR_LRU_SET_NEXT(mgr, res, mgr->lru_first);
 	mgr->lru_first = res;
 	if (!mgr->lru_last)
 		mgr->lru_last = res;
-	if (res->next)
-		res->next->prev = res;
+	if (SCIR_LRU_NEXT(mgr, res))
+		SCIR_LRU_SET_PREV(mgr, SCIR_LRU_NEXT(mgr, res), res);
 
 	mgr->memory_lru += res->size;
 #if (SCI_VERBOSE_RESMGR > 1)
@@ -855,7 +911,7 @@ _scir_print_lru_list(resource_mgr_t *mgr)
 			res->size);
 		mem += res->size;
 		++entries;
-		res = res->next;
+		res = SCIR_LRU_NEXT(mgr, res);
 	}
 
 	fprintf(stderr,"Total: %d entries, %d bytes (mgr says %d)\n",

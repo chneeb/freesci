@@ -100,8 +100,8 @@ Everything else defaults correctly; the mapped-only options (`PICO_PSRAM_SCRIPTS
 `PICO_WORKING_PRIORITY`) are all ON and each is an A/B switch.
 
 **After ANY shared-file change, rebuild the PIO target and check its `.bss` is unchanged** — that is the
-guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 29,952** (sound ON, `PICO_STREAM_METHODS=7`,
-measured 2026-09-27; it was 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
+guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 30,084** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
+measured 2026-09-27; 29,952 before the packing, 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
 17,608) are from earlier configs, not regressions:
 ```bash
 cmake --build build-pico -j$(nproc) && arm-none-eabi-size build-pico/src/freesci.elf
@@ -142,7 +142,7 @@ PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
 `PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`); 133 MHz
 (`PICO_SYS_CLOCK_MHZ=396` is opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
-itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 29,952.
+itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,084.
 
 The game chooser offers per-launch toggles, so many A/Bs need no rebuild: **`[S]`** sound (off = `-q`),
 **`[C]`** composed surface, **`[V]`** static-view priority (PIO only; Colonel's Bequest needs `[V]` off to show

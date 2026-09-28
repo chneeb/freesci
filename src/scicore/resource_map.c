@@ -87,7 +87,14 @@ sci_res_read_entry(resource_mgr_t *mgr, resource_source_t *map,
 	res->status = SCI_STATUS_NOMALLOC;
 
 	if (sci_version == SCI_VERSION_01_VGA_ODD) {
-		res->source = scir_get_volume(mgr, map, SCI01V_RESFILE_GET_FILE(buf + 2));
+		SCIR_SET_SOURCE(res, scir_get_volume(mgr, map, SCI01V_RESFILE_GET_FILE(buf + 2)));
+#ifdef SCIR_PACKED
+		if (SCI01V_RESFILE_GET_OFFSET(buf + 2) >> 24) {
+			sciprintf("Resmgr: resource offset 0x%x does not fit 24 bits\n",
+				  (unsigned) SCI01V_RESFILE_GET_OFFSET(buf + 2));
+			return 1;
+		}
+#endif
 		res->file_offset = SCI01V_RESFILE_GET_OFFSET(buf + 2);
 
 #if 0
@@ -95,7 +102,15 @@ sci_res_read_entry(resource_mgr_t *mgr, resource_source_t *map,
 			return 1;
 #endif
 	} else {
-		res->source = scir_get_volume(mgr, map, SCI0_RESFILE_GET_FILE(buf + 2));
+		SCIR_SET_SOURCE(res, scir_get_volume(mgr, map, SCI0_RESFILE_GET_FILE(buf + 2)));
+#ifdef SCIR_PACKED
+		/* resource_t.file_offset is 24 bits when packed: reject, never truncate. */
+		if (SCI0_RESFILE_GET_OFFSET(buf + 2) >> 24) {
+			sciprintf("Resmgr: resource offset 0x%x does not fit 24 bits\n",
+				  (unsigned) SCI0_RESFILE_GET_OFFSET(buf + 2));
+			return 1;
+		}
+#endif
 		res->file_offset = SCI0_RESFILE_GET_OFFSET(buf + 2);
 
 #if 0
@@ -111,7 +126,7 @@ sci_res_read_entry(resource_mgr_t *mgr, resource_source_t *map,
 		res->file, res->file_offset);
 #endif
 
-	if (res->source == NULL) return 1;
+	if (SCIR_SOURCE(res) == NULL) return 1;
 	return 0;
 }
 
@@ -261,7 +276,7 @@ sci0_read_resource_map(resource_mgr_t *mgr, resource_source_t *map, resource_t *
 				}
 
 			_scir_add_altsource(resources + addto,
-					    resources[resource_index].source,
+					    SCIR_SOURCE(&resources[resource_index]),
 					    resources[resource_index].file_offset);
 
 			if (fresh)
@@ -438,11 +453,11 @@ sci1_read_resource_map(resource_mgr_t *mgr, resource_source_t *map, resource_sou
 
 		if (entry_size_selector < SCI_VERSION_1_1)
 		{
-			res->source = scir_get_volume(mgr, map, SCI1_RESFILE_GET_FILE(buf));
+			SCIR_SET_SOURCE(res, scir_get_volume(mgr, map, SCI1_RESFILE_GET_FILE(buf)));
 			res->file_offset = SCI1_RESFILE_GET_OFFSET(buf);
 		} else
 		{
-			res->source = vol; 
+			SCIR_SET_SOURCE(res, vol);
 			res->file_offset = SCI11_RESFILE_GET_OFFSET(buf);
 		};
 		
@@ -463,7 +478,7 @@ sci1_read_resource_map(resource_mgr_t *mgr, resource_source_t *map, resource_sou
 #endif
 
 		_scir_add_altsource(resources + addto,
-				    resources[resource_index].source,
+				    SCIR_SOURCE(&resources[resource_index]),
 				    resources[resource_index].file_offset);
 		
 		if (fresh)

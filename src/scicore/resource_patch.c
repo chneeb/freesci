@@ -109,7 +109,7 @@ process_patch(resource_source_t *source,
 				newrsc->number = resnumber;
 				newrsc->status = SCI_STATUS_NOMALLOC;
 				newrsc->type = restype;
-				newrsc->source = source;
+				SCIR_SET_SOURCE(newrsc, source);
 				newrsc->file_offset = 2 + patch_data_offset;
 
 				_scir_add_altsource(newrsc, source, 2);
