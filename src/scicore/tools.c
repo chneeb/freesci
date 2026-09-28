@@ -684,8 +684,6 @@ sci_open(const char *fname, int flags)
 	char *path;
 	char *caller_cwd;
 
-	sci_init_dir(&dir);
-
 	separator_position = (char *)strrchr(fname, G_DIR_SEPARATOR);
 	if (separator_position)
 	{
@@ -695,6 +693,22 @@ sci_open(const char *fname, int flags)
 		chdir(path);
 		free(path);
 	}
+
+#if defined(HAVE_PICO) || defined(SCI_OPEN_FAST) /* SCI_OPEN_FAST: desktop test switch */
+	/* FAT (FatFS) matches names case-insensitively, so the case-insensitive
+	   directory scan below (_fcaseseek) and the getcwd()+chdir() round trip
+	   after it are pure cost on the SD card. Open directly. (Resource loads
+	   mostly bypass sci_open -- _scir_load_resource tries a plain open()
+	   first -- so this helps the startup checks and savegame file access.)
+	   The chdir(path) above is KEPT: sci_open leaves the working directory at
+	   the file's directory, and later relative file access may rely on that.
+	   Falls back to the portable path if the direct open fails. */
+	file = open(separator_position ? separator_position + 1 : fname, flags);
+	if (IS_VALID_FD(file))
+		return file;
+#endif
+
+	sci_init_dir(&dir);
 
 	name = _fcaseseek(separator_position ? separator_position + 1 : fname, &dir);
 	if (name)

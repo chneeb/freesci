@@ -216,3 +216,23 @@ to the 48 MHz USB PLL instead would make both builds identical if that ever matt
 **Backlight (all Pico builds):** `PICO_LCD_BACKLIGHT` (default **96**) writes the panel backlight, register
 0x05 on the keyboard MCU, once at keyboard init (`set_lcd_backlight`, write-only, as pico-286 does). pico-286's
 measurement: ~38% of the current at 255 while looking only slightly dimmer. `-1` leaves the MCU default.
+
+### Startup resource scan 6.4x faster: redundant filesystem lookups, not SD speed (2026-09-28)
+
+The `[perf] resource load` phase scaled with the number of `resource.map` LINES (SQ3 954 lines 14.8 s, KQ4 1245
+lines 21.1 s, ~15-17 ms per line at 133 MHz), and the only per-line card work was `detect_odd_sci01`
+(`resource_map.c`) calling `sci_open("resource.00N")` + `close()` for EVERY line to check the volume exists --
+and each `sci_open` is a case-insensitive directory scan, an open, a `getcwd` and a `chdir`. A desktop
+`LD_PRELOAD` shim counting filesystem calls (12 s of KQ4) also found `_scir_load_resource` doing a `getcwd` +
+`chdir` round trip on EVERY resource load although volume loads never change directory (1,590 `getcwd` /
+1,599 `chdir` in 12 s).
+
+Fixes: `detect_odd_sci01` checks each volume once (all platforms, identical result); `_scir_load_resource`
+saves/restores the working directory only when it actually changes it (patch-file chdir, or the uppercase
+`sci_open` fallback) (all platforms, identical result); on the Pico `sci_open` opens directly -- FAT is
+case-insensitive -- keeping its chdir-into-the-path side effect, with the old code as fallback (small gain: most
+resource loads use a plain `open()` first). Desktop shim, KQ4 12 s: `opendir` 1,263 -> 20, `chdir` 1,599 -> 23,
+`getcwd` 1,590 -> 14, resource-file opens unchanged (896).
+
+**Device (SQ3 + sound, 133 MHz): resource load 14,808 -> 2,315 ms**, savegame load and exit clean. That is far
+faster than 360 MHz was before the fix (11.8 s), so the startup-time argument for a higher clock is gone.

@@ -45,6 +45,7 @@ detect_odd_sci01(int fh)
     int files_ok = 1;
     int fsize, resources_nr, tempfh, read_ok;
     char filename[14];
+    unsigned long long volumes_ok = 0; /* bit N: resource.00N exists */
         
     fsize = sci_fd_size(fh);
     if (fsize < 0) {
@@ -60,7 +61,17 @@ detect_odd_sci01(int fh)
 
 	if (read_ok)
 	{	
-		sprintf(filename, "resource.%03i", SCI0_RESFILE_GET_FILE(buf+2));
+		int volume = SCI0_RESFILE_GET_FILE(buf+2);
+
+		/* Check each volume file ONCE. This used to open and close
+		   resource.00N for every map LINE -- 1245 opens of the same 3-4
+		   files for KQ4 -- which on the Pico's SD card (each sci_open is
+		   a directory lookup) was most of the startup "resource load".
+		   The result is identical: a volume either exists or it does not. */
+		if (volume >= 0 && volume < 64 && (volumes_ok >> volume) & 1)
+			continue;
+
+		sprintf(filename, "resource.%03i", volume);
 		tempfh = sci_open(filename, O_RDONLY | O_BINARY);
     
 		if (tempfh == SCI_INVALID_FD) {
@@ -69,6 +80,8 @@ detect_odd_sci01(int fh)
 		}
 
 		close(tempfh);
+		if (volume >= 0 && volume < 64)
+			volumes_ok |= 1ULL << volume;
 	}
     }
 

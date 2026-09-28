@@ -326,7 +326,16 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 	char filename[PATH_MAX];
 	int fh;
 	resource_t backup;
-	char *save_cwd = sci_getcwd();
+	/* The working directory is saved only right before this function changes
+	   it (a patch file's chdir, or the uppercase sci_open fallback, which
+	   chdirs into a path's directory) and restored only then. It used to be
+	   saved and restored on EVERY load, although volume files -- nearly all
+	   loads -- are opened by full path and never change it: on FatFS that was
+	   a getcwd() (which rebuilds the path by walking up the directory tree on
+	   the card) plus a chdir() per resource. Same result, minus that cost. */
+	char *save_cwd = NULL;
+#define SCIR_SAVE_CWD() do { if (!save_cwd) save_cwd = sci_getcwd(); } while (0)
+#define SCIR_RESTORE_CWD() do { if (save_cwd) { chdir(save_cwd); free(save_cwd); save_cwd = NULL; } } while (0)
 
 	memcpy(&backup, res, sizeof(resource_t));
 
@@ -341,6 +350,7 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 
 		/* Get patch file name */
 		patch_sprintfers[mgr->sci_version](filename, res);
+		SCIR_SAVE_CWD();
 		chdir(SCIR_SOURCE(res)->location.dir.name);
 	} else
 		strcpy(filename, SCIR_SOURCE(res)->location.file.name);
@@ -354,6 +364,7 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 			*raiser = toupper(*raiser); /* Uppercasify */
 			++raiser;
 		}
+		SCIR_SAVE_CWD();   /* sci_open chdirs into a path's directory */
 		fh = sci_open(filename, O_RDONLY|O_BINARY);
 	}    /* Try case-insensitively name */
 
@@ -362,8 +373,7 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 		res->data = NULL;
 		res->status = SCI_STATUS_NOMALLOC;
 		res->size = 0;
-		chdir(save_cwd);
-		free(save_cwd);
+		SCIR_RESTORE_CWD();
 		return;
 	}
 
@@ -394,15 +404,15 @@ _scir_load_resource(resource_mgr_t *mgr, resource_t *res, int protect)
 			res->data = NULL;
 			res->status = SCI_STATUS_NOMALLOC;
 			res->size = 0;
-			chdir(save_cwd);
-			free(save_cwd);
+			SCIR_RESTORE_CWD();
 			return;
 		}
 	}
 
 	close(fh);
-	chdir(save_cwd);
-	free(save_cwd);
+	SCIR_RESTORE_CWD();
+#undef SCIR_SAVE_CWD
+#undef SCIR_RESTORE_CWD
 }
 
 resource_t *
