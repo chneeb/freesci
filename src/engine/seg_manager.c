@@ -486,9 +486,15 @@ sm_free_script ( mem_obj_t* mem )
 		mem->data.script.objects_nr = 0;
 	}
 
-	free_int_hash_map(mem->data.script.obj_indices);
+	/* NULL-tolerant: on Pico gamestate_restore pre-frees the outgoing state's
+	   object tables before the parse, and free_int_hash_map dereferences. */
+	if (mem->data.script.obj_indices) {
+		free_int_hash_map(mem->data.script.obj_indices);
+		mem->data.script.obj_indices = NULL;
+	}
 	if (NULL != mem->data.script.code) {
 		sci_free(mem->data.script.code);
+		mem->data.script.code = NULL;
 	}
 }
 

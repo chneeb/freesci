@@ -4866,10 +4866,43 @@ gamestate_restore(state_t *s, char *dirname)
 			mem_obj_t *_m = s->seg_manager.heap[_si];
 			if (!_m)
 				continue;
-			if (_m->type == MEM_OBJ_SCRIPT && _m->data.script.buf) {
-				HEAP_SCRIPT_FREE(_m->data.script.buf);
-				_m->data.script.buf = NULL;
-				_m->data.script.buf_size = 0;
+			if (_m->type == MEM_OBJ_SCRIPT) {
+				script_t *_sc = &_m->data.script;
+				if (_sc->buf) {
+					HEAP_SCRIPT_FREE(_sc->buf);
+					_sc->buf = NULL;
+					_sc->buf_size = 0;
+				}
+				/* Fix 2 (2026-09-28): the script's object tables too. Freed
+				   only after the restored state was built, they left ~40
+				   holes through it (KQ4 census checkpoints 4 -> 5,
+				   docs/pico-memory-model-plan.md). Nothing below reads them:
+				   gamestate_restore uses the outgoing state only for its
+				   sound state, scalars, game_obj, script 0's segment id (the
+				   segment manager's id map, untouched here) and sys_strings.
+				   sm_free_script tolerates the NULLs at the final teardown. */
+				if (_sc->objects) {
+					int _oi;
+					for (_oi = 0; _oi < _sc->objects_nr; _oi++)
+						if (_sc->objects[_oi].variables) {
+							free(_sc->objects[_oi].variables);
+							_sc->objects[_oi].variables = NULL;
+							_sc->objects[_oi].variables_nr = 0;
+						}
+					free(_sc->objects);
+					_sc->objects = NULL;
+					_sc->objects_nr = 0;
+				}
+				if (_sc->obj_indices) {
+					free_int_hash_map(_sc->obj_indices);
+					_sc->obj_indices = NULL;
+				}
+				if (_sc->code) {
+					sci_free(_sc->code);
+					_sc->code = NULL;
+					_sc->code_blocks_nr = 0;
+					_sc->code_blocks_allocated = 0;
+				}
 			} else if (_m->type == MEM_OBJ_STACK && _m->data.stack.entries) {
 				sci_free(_m->data.stack.entries);
 				_m->data.stack.entries = NULL;

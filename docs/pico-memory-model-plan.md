@@ -231,6 +231,24 @@ is the top chunk, about 2 KB bigger. The parse peak shows more gaps (the reader'
 longer have tiny records refilling their holes), gone again by checkpoint 5. What remains is mostly the light
 state freed after the restored state was built (4 -> 5: +40 gaps) -- fix 2's target.
 
+**Fix 2 — DONE 2026-09-28 (device-verified, KQ4 + sound census with checkpoints):** the Pico pre-parse block in
+`gamestate_restore` now also frees each light-state script's `objects`/`variables`, `obj_indices` and `code`
+(NULLing them), next to the buffers, VM stack and LRU it already freed; `sm_free_script` is NULL-tolerant for
+the final teardown. The load and the play afterwards work, so nothing reads the freed tables.
+
+| checkpoint | fix 1 | fix 2 |
+|---|---|---|
+| 1 before teardown | free 40,760, 36 gaps | free 26,880, 17 gaps (different starting heap) |
+| 4 restored, light state alive | 38 gaps, largest 1,040 | 48 gaps, largest 5,728 |
+| 5 done | 78 gaps, largest 5,312 | 64 gaps, largest 5,728 |
+| first room after the load | 67 gaps, largest 6,848, top 19,152 (+12.3 KB) | 69 gaps, largest 8,840, top 15,496 (+8.2 KB) |
+
+A small real gain at checkpoint 5 (the light state's script-table holes are gone); the first-room figures are
+dominated by the different pre-restore heap. What checkpoint 4 -> 5 still frees is the light `state_t` itself
+(`main.c:1175`, 5 KB), segment-manager tables (`seg_manager.c:1164`, 1.7 KB) and its widgets (~5 KB) --
+unavoidable or small. **Summary of the restore work: gaps in the first room after a load 199 -> ~68; this
+approach has reached diminishing returns.**
+
 ### Step 1 — fixed pools for the fixed-size churn (cheap, independent)
 
 pico-286's static-array principle applied to FreeSCI's small, frequent, fixed-size allocations (widgets,
