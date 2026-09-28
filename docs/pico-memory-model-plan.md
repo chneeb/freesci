@@ -215,6 +215,22 @@ instead of 236; (2) free more of the light state BEFORE the parse, as its script
 are -- riskier, since `gamestate_restore` still reads script 0's segment, `sys_strings` and `game_obj` from it
 after the parse.
 
+**Fix 1 — DONE 2026-09-28 (device-verified, KQ4 + sound census with checkpoints):** `_cfsml_register_pointer`
+now stores 256 references per heap chunk under `HAVE_PICO` (one ~1 KB chunk for a typical KQ4 load instead of
+236 separate 8 B blocks), and the free is a loop instead of one stack frame per record.
+
+| checkpoint | before fix 1 | after fix 1 |
+|---|---|---|
+| 3 parse peak | 12 gaps, 36,776 B | 36 gaps, 39,808 B |
+| 4 restored, light state alive | 169 gaps, largest 848 | 38 gaps, largest 1,040 |
+| 5 done | 212 gaps, largest 5,256 | 78 gaps, largest 5,312 |
+| first room after the load | 199 gaps, top 17,320 (+12.3 KB) | 67 gaps, top 19,152 (+12.3 KB) |
+
+A third as many pieces after a load; the largest single gap is unchanged (~5-7 KB) because the contiguous space
+is the top chunk, about 2 KB bigger. The parse peak shows more gaps (the reader's other short-lived strings no
+longer have tiny records refilling their holes), gone again by checkpoint 5. What remains is mostly the light
+state freed after the restored state was built (4 -> 5: +40 gaps) -- fix 2's target.
+
 ### Step 1 — fixed pools for the fixed-size churn (cheap, independent)
 
 pico-286's static-array principle applied to FreeSCI's small, frequent, fixed-size allocations (widgets,

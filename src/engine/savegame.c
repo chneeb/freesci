@@ -216,9 +216,24 @@ _cfsml_error(char *fmt, ...)
 }
 
 
+#ifdef HAVE_PICO
+/* Pico: the reference records are CHUNKED, CFSML_REF_CHUNK per allocation.
+   Upstream heap-allocates one 8 B record per pointer read and frees them all
+   right after the parse; interleaved one by one with the restored objects,
+   they left 169 tiny holes through the new state (KQ4 census checkpoints,
+   docs/pico-memory-model-plan.md) -- the biggest single fragmenter of the
+   clean-heap restore. A typical KQ4 load registers ~236 pointers, i.e. one
+   chunk. Freeing is iterative, which also removes the upstream one-stack-frame-
+   per-record recursion from the 8 KB main stack. */
+#define CFSML_REF_CHUNK 256
+#endif
 static struct _cfsml_pointer_refstruct {
     struct _cfsml_pointer_refstruct *next;
     void *ptr;
+#ifdef HAVE_PICO
+    int n;                          /* used entries in ptrs[] */
+    void *ptrs[CFSML_REF_CHUNK];
+#endif
 } *_cfsml_pointer_references = NULL;
 
 static struct _cfsml_pointer_refstruct **_cfsml_pointer_references_current = &_cfsml_pointer_references;
@@ -229,6 +244,19 @@ static char *_cfsml_last_identifier_retreived = NULL;
 static void
 _cfsml_free_pointer_references_recursively(struct _cfsml_pointer_refstruct *refs, int free_pointers)
 {
+#ifdef HAVE_PICO
+    while (refs) {
+	struct _cfsml_pointer_refstruct *next = refs->next;
+	if (free_pointers) {
+	    int i;
+	    for (i = 0; i < refs->n; i++)
+		free(refs->ptrs[i]);
+	}
+	free(refs);
+	refs = next;
+    }
+    return;
+#endif
     if (!refs)
 	return;
     #ifdef CFSML_DEBUG_MALLOC
@@ -271,6 +299,18 @@ _cfsml_get_current_refpointer()
 
 static void _cfsml_register_pointer(void *ptr)
 {
+#ifdef HAVE_PICO
+    struct _cfsml_pointer_refstruct *head = *_cfsml_pointer_references_current;
+    if (!head || head->n == CFSML_REF_CHUNK) {
+	head = (struct _cfsml_pointer_refstruct*)sci_malloc(sizeof (struct _cfsml_pointer_refstruct));
+	head->next = *_cfsml_pointer_references_current;
+	head->ptr = NULL;
+	head->n = 0;
+	*_cfsml_pointer_references_current = head;
+    }
+    head->ptrs[head->n++] = ptr;
+    return;
+#endif
     struct _cfsml_pointer_refstruct *newref = (struct _cfsml_pointer_refstruct*)sci_malloc(sizeof (struct _cfsml_pointer_refstruct));
     #ifdef CFSML_DEBUG_MALLOC
     SCI_MEMTEST;
