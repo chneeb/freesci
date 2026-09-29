@@ -369,7 +369,7 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 - **SQ3 intro Two Guys panels persist** — NOT fixed by the PSRAM working priority map (2026-09-29), so it is
   colour persistence, not the priority bake as previously recorded: `[V]` off (routing off) makes them disappear, so
   it is the composed-surface invalidation missing how the panels are taken down. Cosmetic, parked. (render)
-- **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints need `[V]` off; hits true
+- **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints now show by default (PSRAM working priority map, 2026-09-29); hits true
   exhaustion (use `[S]` off). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)
 - **KQ4 with sound** now runs (2026-09-27: after the const-table move, and again on `33be492c` with
