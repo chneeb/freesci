@@ -370,7 +370,8 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   restores into composed. (render)
 - **SQ3 intro Two Guys panels persist** — NOT fixed by the PSRAM working priority map (2026-09-29), so it is
   colour persistence, not the priority bake as previously recorded: `[V]` off (routing off) makes them disappear, so
-  it is the composed-surface invalidation missing how the panels are taken down. Cosmetic, parked. (render)
+  it is tied to the composed-surface routing. A desktop trace (2026-09-29) cleared the invalidation rules and points at
+  the order around the picture change / text save-unders; see pico-render.md. Cosmetic, parked. (render)
 - **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints now show by default (PSRAM working priority map, 2026-09-29); plays with
   sound since the 2026-09 memory work (it used to hit true exhaustion). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)

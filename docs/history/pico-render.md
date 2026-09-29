@@ -1333,3 +1333,37 @@ always on; the launch log prints `[gfx] PSRAM working priority map ON` instead o
 persistence is the routed stopUpd draw's COLOUR in the composed surface (`PICO_STATIC_COMPOSED`, widgets.c
 phase-2c invalidation): the panels are taken down in a way none of its three stale cases (moved, resumed
 updating, disposed) catches. Cosmetic; parked. The fix belongs in that invalidation, not in priority.
+
+### "Two Guys" panels: desktop trace of their lifecycle (2026-09-29; parked, cosmetic)
+
+**Method (reproducible, nothing committed):** a desktop build with `-DFSCI_SIM_PICO_STATIC=1` (mirrors the PIO
+stopUpd routing; it needs temporary desktop definitions of `pico_static_view_priority_enabled = 1` and
+`pico_priority_only_static = 0` to link) plus temporary `fprintf(stderr, "[vt] ...")` lines in `widgets.c`: every
+`_gfxwop_dyn_view_draw` (widget pointer, view/loop/cel, moved draw rect, signal), the routed
+`gfxop_draw_cel_static`, and every dyn-view `_gfxwop_basic_free`. Run the SQ3 intro headless for ~200 s
+(`SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`; the desktop pacing varies, so give it time), then apply the three
+phase-2c stale rules (moved / NO_UPDATE cleared / freed) offline to the event stream.
+
+**Findings:**
+- The panels are **view 601, loops 0 and 1**: they zoom in (cels 1-8) and settle at **cel 9**, 60x66 px at
+  (22,-18) and (238,-18), signal `0x4814` (NO_UPDATE set). Like all dynviews their widgets are **recreated every
+  animation cycle** (drawn, then freed right after, often at the same address), so on the Pico a settled panel is
+  re-persisted into the composed surface every frame and invalidated by the free that follows.
+- **The phase-2c rules are not what fails:** applied to the trace, every persisted view is invalidated within about
+  one frame (largest gap 82 trace events), and none is left persisted at the end. Negative `y` is handled correctly
+  by `pico_invalidate_static_region` (rows above the screen are skipped).
+- **The scene ends in this order:** the last panel draws -> two `kDisplay restore_under` -> `kAnimate: PicNotValid`
+  (the picture changes) -> **only then are the panel widgets freed** -> the credit texts are drawn with
+  save-unders (`Saving (30,35) size (195,132)`, `(80,35) size (179,144)`, ...), which overlap the panels' bottom
+  rows (y 35-48).
+
+**Where that points (untested; needs the Pico driver's own event order):** at the picture change
+`pico_set_static_buffer` drops the composed surface (`composed_valid = 0`), so the panels' later frees invalidate
+nothing -- harmless by itself, but every restore after that depends on what the driver rebuilds from. Two
+candidates: (a) a text save-under captures `visual[0]` while it still shows the panels and a later `restore_under`
+pastes them back (fits the original "bands" description: rows 35-48); (b) a BACK restore around the picture change
+brings them back from a composed surface that still held them. `[V]` off avoids both because without the routing the
+panels never enter the composed surface.
+
+**Next step if revisited:** one device run of the SQ3 intro up to the credits with `FSCI_PROBE_GFX` (`[pstat]` static
+buffer swaps, `[pupd]` flush/BACK-restore rects, `[ovl]`), to see which restore brings the panels back.
