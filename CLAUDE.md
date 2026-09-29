@@ -100,7 +100,7 @@ Everything else defaults correctly; the mapped-only options (`PICO_PSRAM_SCRIPTS
 `PICO_WORKING_PRIORITY`) are all ON and each is an A/B switch.
 
 **After ANY shared-file change, rebuild the PIO target and check its `.bss` is unchanged** — that is the
-guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 30,824** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
+guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 30,832** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
 volume cache + fast seek, PSRAM working priority map, measured 2026-09-29; 30,656 before the working map, 30,084 before the volume cache, 29,952 before the packing, 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
 17,608) are from earlier configs, not regressions:
 ```bash
@@ -142,7 +142,7 @@ PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
 `PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); `PICO_LCD_BACKLIGHT=96`; `PICO_VOLUME_CACHE` ON; `PICO_PSRAM_WORKING_PRIORITY` ON; 133 MHz
 (`PICO_SYS_CLOCK_MHZ=360` -- pico-286's High profile, tested once, resource load 14.8 -> 11.8 s on SQ3 -- and `PICO_SYS_CLOCK_MHZ=396` are opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
-itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,824.
+itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,832.
 
 The game chooser shows **no toggles** by default since 2026-09-29: every tested game (SQ3, KQ4, PQ2, Colonel's
 Bequest) runs with sound, the composed surface and static-view priority on, so they are compile-time settings
@@ -378,6 +378,10 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   `PICO_STREAM_METHODS=7` -- intro, restart and a savegame load, no allocation failures). Margin unmeasured;
   re-check if anything grows the heap. **SQ3 savegame
   load with sound ON** works again (2026-09-27, three device runs). (sound)
+- **VM stack out of range when quitting after a savegame load + in-game restart** (SQ3, 2026-09-29): HardFault
+  `UNDEFINSTR` at `run_vm` -- `validate_stack_addr` returned NULL and `PUSH32`/`POP32` dereferenced it (GCC
+  compiles that into a `udf` trap). Now legible on Pico: one `[VM] stack index N out of valid range ...` line and
+  the game ends cleanly. Root cause not found yet; the index in that line is the next clue. (engine)
 - **After a failed game, no further game starts** until power cycle — undiagnosed. (sound)
 - **Dropped notes** — upstream has no OPL voice stealing (`opl2.c`). (sound)
 - **Loudness / shrill drums — DECIDED: kept as is** (2026-09-29). The game's master volume works and

@@ -104,6 +104,32 @@ validate_stack_addr(state_t *s, stack_ptr_t sp)
 	if (sp >= s->stack_base && sp < s->stack_top)
 		return sp;
 
+#ifdef HAVE_PICO
+	/* Out-of-range VM stack access (seen once on device: quitting SQ3 after a
+	   savegame load and an in-game restart). Upstream returns NULL and the
+	   PUSH32/POP32 callers dereference it -- GCC turns that proven NULL
+	   dereference into a trap, i.e. a HardFault. The debugger that the error
+	   flags would invoke has no console here and exit(1)s, which would hang.
+	   Instead: log it once with its context (the print below is gated behind
+	   debug flag 4, so it never reached pico.log), hand back a dummy cell, and
+	   abort the game; run_vm checks script_abort_flag before the next
+	   instruction, so the game ends cleanly back to the chooser. */
+	{
+		static reg_t pico_dummy_stack_cell;
+		static int reported = 0;
+
+		if (!reported) {
+			reported = 1;
+			sciprintf("[VM] stack index %ld out of valid range [0..%ld] (execution stack pos %d, "
+				  "restarting flags 0x%x): ending the game\n",
+				  (long) (sp - s->stack_base), (long) (s->stack_top - s->stack_base - 1),
+				  s->execution_stack_pos, s->restarting_flags);
+		}
+		script_abort_flag = 1;
+		pico_dummy_stack_cell = NULL_REG;
+		return &pico_dummy_stack_cell;
+	}
+#endif
 	script_debug_flag = script_error_flag = 1;
 	if (sci_debug_flags & 4)
 		sciprintf("[VM] Stack index %d out of valid range [%d..%d]\n",
