@@ -109,6 +109,10 @@ extern void pico_connect_engine_priority(gfx_pixmap_t *priority_map,
 					 gfx_pixmap_t *static_priority_map);
 extern void pico_render_background(gfx_driver_t *drv);
 extern unsigned long long pico_perf_us(void);  /* pico_time.c */
+#ifdef PICO_PSRAM_WORKING_PRIORITY
+extern void pico_priority_restore_box(rect_t box);  /* pico_driver.c */
+extern void pico_priority_seed(void);
+#endif
 #if defined(FSCI_PROBE_MEM) && defined(HAVE_PICO)
 /* [mem] largest: the biggest block that could be allocated right now (sbrk
    headroom included) and the session minimum -- the real per-room margin, e.g.
@@ -1644,6 +1648,12 @@ gfxop_clear_box(gfx_state_t *state, rect_t box)
 	if (state->pic_unscaled)
 		gfx_copy_pixmap_box_i(state->priority_map, state->static_priority_map, box);
 #endif
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_WORKING_PRIORITY)
+	/* PIO: the copyback above is a no-op (the maps live in PSRAM, index_data
+	   NULL); reset the PSRAM working priority map from the static map here. */
+	if (state->pic_unscaled)
+		pico_priority_restore_box(box);
+#endif
 
 	_gfxop_scale_rect(&box, state->driver->mode);
 
@@ -2657,6 +2667,9 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	}
 #endif
 	pico_connect_engine_priority(state->priority_map, state->static_priority_map);
+#ifdef PICO_PSRAM_WORKING_PRIORITY
+	pico_priority_seed();   /* working map := the new room's static map */
+#endif
 
 	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors.
 	   Must happen before pico_render_background calls flush_region. */
@@ -2798,6 +2811,9 @@ gfxop_add_to_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	{
 		int ret = _gfxop_set_pic(state);
 		pico_render_background(state->driver);
+#ifdef PICO_PSRAM_WORKING_PRIORITY
+		pico_priority_seed();   /* the overlay may have changed priorities */
+#endif
 		return ret;
 	}
 #else

@@ -121,6 +121,69 @@ void pico_connect_engine_priority(gfx_pixmap_t *priority_map,
 #endif
 }
 
+#ifdef PICO_PSRAM_WORKING_PRIORITY
+/* PIO working priority map, in PSRAM (the desktop/DOS two-map model without the
+   SRAM): the room's decoded priority map (s_shared_priority, PSRAM) is the
+   STATIC map -- background plus kAddToPic picviews -- and this is the per-frame
+   WORKING copy that moving views gate against AND write into, so views occlude
+   each other and a view's priority is transient instead of baked. Reset from
+   the static map for each cleared box (gfxop_clear_box) and whenever a pic is
+   set. Nibble-packed like the static map; 320x200 -> 32,000 B in a fixed slot
+   above the song slots (0x710000 + 8 x 64 KB), outside the per-room arena. */
+#define PICO_WORK_PRI_ADDR 0x790000u
+static int s_work_pri_valid = 0;
+static uint8_t s_wp_pack[(PICO_XSIZE >> 1) + 2];
+
+/* Copy the static priority map into the working map for box (screen coords).
+   Whole bytes are copied; a nibble at either edge that belongs to a pixel
+   OUTSIDE the box is taken from the working map instead, so neighbours keep
+   their current priority. */
+void pico_priority_restore_box(rect_t box)
+{
+    gfx_pixmap_t *m = s_shared_priority;
+    int y, xl, yl, x0, x1;
+
+    if (!s_work_pri_valid || !m)
+        return;
+    xl = m->index_xl;
+    yl = m->index_yl;
+    x0 = box.x < 0 ? 0 : box.x;
+    x1 = box.x + box.xl > xl ? xl : box.x + box.xl;   /* exclusive */
+    if (x0 >= x1)
+        return;
+    for (y = box.y < 0 ? 0 : box.y; y < box.y + box.yl && y < yl; y++) {
+        int p0 = y * xl + x0, p1 = y * xl + x1 - 1;     /* inclusive pixels */
+        int b0 = p0 >> 1, b1 = p1 >> 1, n = b1 - b0 + 1;
+        psram_load(m->psram_addr + (uint32_t)b0, s_wp_pack, (size_t)n);
+        if (p0 & 1) {       /* first byte's low nibble is pixel p0-1: keep it */
+            uint8_t w;
+            psram_load(PICO_WORK_PRI_ADDR + (uint32_t)b0, &w, 1);
+            s_wp_pack[0] = (uint8_t)((s_wp_pack[0] & 0xf0) | (w & 0x0f));
+        }
+        if (!(p1 & 1)) {    /* last byte's high nibble is pixel p1+1: keep it */
+            uint8_t w;
+            psram_load(PICO_WORK_PRI_ADDR + (uint32_t)b1, &w, 1);
+            s_wp_pack[n - 1] = (uint8_t)((s_wp_pack[n - 1] & 0x0f) | (w & 0xf0));
+        }
+        psram_store(PICO_WORK_PRI_ADDR + (uint32_t)b0, s_wp_pack, (size_t)n);
+    }
+}
+
+/* A pic was set: validate the working map against the new static map and seed
+   it completely. Only the nibble-packed 320-wide map is supported; anything
+   else leaves the working map off for the room (the old read-only behaviour). */
+void pico_priority_seed(void)
+{
+    gfx_pixmap_t *m = s_shared_priority;
+
+    s_work_pri_valid = (m && !m->index_data && m->psram_valid && m->nibble_packed
+                        && m->index_xl > 0 && m->index_xl <= PICO_XSIZE
+                        && m->index_yl > 0 && m->index_yl <= PICO_YSIZE);
+    if (s_work_pri_valid)
+        pico_priority_restore_box(gfx_rect(0, 0, m->index_xl, m->index_yl));
+}
+#endif /* PICO_PSRAM_WORKING_PRIORITY */
+
 /* Set by widgets.c around a NO_UPDATE dynview's static-routed draw in priority-only
    mode (PICO_STATIC_VIEW_PRIORITY without PICO_STATIC_VIEW_BAKE): bake the view's
    priority but do NOT persist its color into static_bg (so it can't ghost).  Always
@@ -686,9 +749,29 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
        would make the A/B mean something other than "feature off". */
     int bake_pri = (pico_static_view_priority_enabled
                     && bake_static_pri && psram_pri && priority <= 15);
+#ifdef PICO_PSRAM_WORKING_PRIORITY
+    /* With a working map, a settled stopUpd view's routed static draw no longer
+       bakes its priority permanently: its normal draw writes it into the
+       working map every time it is redrawn, exactly as on desktop. Baking it as
+       well is what left the SQ3 intro's "Two Guys" panels as bands. kAddToPic
+       picviews (not routed) still bake into the static map. */
+    if (s_work_pri_valid && pico_priority_only_static)
+        bake_pri = 0;
+#endif
 #else
     int bake_pri = 0;      /* feature off -> priority map stays the clean background */
     (void)bake_static_pri;
+#endif
+
+    /* Where this draw's priority lives: the static map for STATIC draws (they
+       bake into the clean plate), the working map for everything else. */
+    uint32_t pri_base = psram_pri ? s_shared_priority->psram_addr : 0;
+    int work_pri = 0;      /* 1: gate against AND write into the working map */
+#ifdef PICO_PSRAM_WORKING_PRIORITY
+    if (psram_pri && s_work_pri_valid && !bake_static_pri && priority <= 15) {
+        pri_base = PICO_WORK_PRI_ADDR;
+        work_pri = 1;
+    }
 #endif
 
     /* [pblit] probe: per-sprite occlusion summary (throttled, strip later). */
@@ -723,7 +806,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                     pri_byte0 = pri_pidx >> 1;
                     byteN     = (pri_pidx + xl - 1) >> 1;
                     pri_nbytes = (size_t)(byteN - pri_byte0 + 1);
-                    psram_load(s_shared_priority->psram_addr + (uint32_t)pri_byte0,
+                    psram_load(pri_base + (uint32_t)pri_byte0,
                                s_pri_pack, pri_nbytes);
                     for (int px = 0; px < xl; px++) {
                         int p = pri_pidx + px;
@@ -758,7 +841,15 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                         row_dst[x] = lut[idx];
                         if (row_pri)  /* SRAM working map, when one exists */
                             row_pri[x] = (uint8_t)priority;
-                        else if (bake_pri && pri_loaded
+                        else if (work_pri && pri_loaded) {
+                            /* PSRAM working map: record this view's priority
+                               so later views gate against it (desktop
+                               crossblit writeback). Stored once per row. */
+                            if (s_pri_row[x] != (uint8_t)priority) {
+                                s_pri_row[x] = (uint8_t)priority;
+                                pri_dirty = 1;
+                            }
+                        } else if (bake_pri && pri_loaded
                                  && (int)s_pri_row[x] < priority) {
                             /* Same "draw only lower priority" condition as the
                                desktop _gfxop_draw_priority DRAW_LOOP; the row is
@@ -789,7 +880,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                     *b = (p & 1) ? (uint8_t)((*b & 0x0f) | (v << 4))
                                  : (uint8_t)((*b & 0xf0) | v);
                 }
-                psram_store(s_shared_priority->psram_addr + (uint32_t)pri_byte0,
+                psram_store(pri_base + (uint32_t)pri_byte0,
                             s_pri_pack, pri_nbytes);
             } else {
                 psram_store(pri_addr, s_pri_row, (size_t)xl);
@@ -1251,6 +1342,13 @@ static int pico_draw_pixmap(struct _gfx_driver *drv, gfx_pixmap_t *pxm,
        gets its priority baked (above) but must NOT persist color, or it ghosts. */
     if (buffer == GFX_BUFFER_STATIC && !pico_priority_only_static)
         pico_bake_static_region(S, dest);
+#ifdef PICO_PSRAM_WORKING_PRIORITY
+    /* A picview baked its priority into the static map: carry that box into
+       the working map now, as the desktop static->back propagation would, so
+       views drawn later this frame are gated against it. */
+    if (buffer == GFX_BUFFER_STATIC && !pico_priority_only_static)
+        pico_priority_restore_box(dest);
+#endif
 
 #ifdef FSCI_PROBE_GFX
     /* [pbuf] probe: classify which buffer each cel targets and whether the static

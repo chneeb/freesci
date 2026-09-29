@@ -324,6 +324,17 @@ if(PLATFORM STREQUAL "pico")
     else()
         option(PICO_STATIC_COMPOSED "Pico/PIO: fullscreen static draws -> composed surface" ON)
     endif()
+    # PIO working priority map in PSRAM: the desktop/DOS two-map model (static
+    # clean plate + per-frame working copy) with both maps in PSRAM, so moving
+    # views occlude each other and a settled view's priority is transient
+    # instead of baked. Needs no SRAM. PIO only (the mapped target has real SRAM
+    # maps, PICO_WORKING_PRIORITY). See pico_driver.c PICO_WORK_PRI_ADDR.
+    if(NOT PICO_PSRAM_MAPPED)
+        option(PICO_PSRAM_WORKING_PRIORITY "Pico/PIO: per-frame working priority map in PSRAM" OFF)
+        if(PICO_PSRAM_WORKING_PRIORITY)
+            add_compile_definitions(PICO_PSRAM_WORKING_PRIORITY=1)
+        endif()
+    endif()
     if(PICO_STATIC_VIEW_BAKE)
         add_compile_definitions(PICO_STATIC_VIEW_BAKE=1 PICO_STATIC_VIEW_PRIORITY=1)
     elseif(PICO_STATIC_VIEW_PRIORITY)

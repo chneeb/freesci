@@ -361,11 +361,12 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   after a load, so new permanent buffers must stay under ~20 KB (a 32 KB working priority map does NOT fit).
   A Sierra-style hunk was ruled out (movable share ~15 KB). Remaining lever if needed: restore-by-reboot.
   Details and results: `docs/pico-memory-model-plan.md`. (memory)
-- **PIO dialog bleed / SQ3 door not closing** — composed surface (2c) fixed PQ2; the SQ3 door is baked once and
+- **PIO dialog bleed / SQ3 door not closing** — **SQ3 door FIXED with `-DPICO_PSRAM_WORKING_PRIORITY=ON`** (opt-in,
+  2026-09-29; also lets Colonel's fingerprints show with `[V]` on -- see pico-render.md). Earlier notes: composed surface (2c) fixed PQ2; the SQ3 door is baked once and
   never redrawn, which neither invalidation rule distinguishes from stale. Next idea: mirror save-under
   restores into composed. (render)
-- **SQ3 intro Two Guys panels persist as bands** — accepted; caused by `PICO_STATIC_VIEW_PRIORITY`, real fix is a
-  transient working priority map (no SRAM for it on PIO). (render)
+- **SQ3 intro Two Guys panels persist** — NOT fixed by the PSRAM working priority map (2026-09-29), so it is
+  colour persistence, not the priority bake as previously recorded; suspect the composed-surface invalidation. (render)
 - **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints need `[V]` off; hits true
   exhaustion (use `[S]` off). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)

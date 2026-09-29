@@ -1290,3 +1290,36 @@ move only 27/31 bytes per transaction). Once per room, on top of a ~100ms decode
 `FSCI_PROBE_PERF` before assuming it is free, and keep the rule that invalidation copies a RECT, never the
 screen.
 
+
+---
+
+### PSRAM working priority map (`PICO_PSRAM_WORKING_PRIORITY`, PIO, opt-in) — device results 2026-09-29
+
+The desktop/DOS two-map model with BOTH maps in PSRAM, no SRAM: the room's decoded priority map is the STATIC
+map (background + `kAddToPic` picviews, which still bake into it), and a WORKING copy lives in a fixed PSRAM slot
+at `0x790000` (32,000 B, nibble-packed, above the song slots). Seeded from static whenever a pic or overlay is
+set (`pico_priority_seed`), reset per box in `gfxop_clear_box` (`pico_priority_restore_box`, the desktop's
+`PRECISE_PRIORITY_MAP` copyback point), and a static picview's box is carried over after it bakes. Moving views
+gate against the working map and write their priority into it (`pico_blit_indexed`, the same packed row
+read-modify-write as the static bake), so views occlude each other. The routed static draw of a settled stopUpd
+view keeps sending its COLOUR to the composed surface but no longer bakes PRIORITY (its normal draw writes it
+into the working map each redraw, as on desktop).
+
+The restore's edge-nibble merge was unit-tested against an unpacked reference (2,000 random boxes, 0 mismatches;
+removing either edge merge fails it: 840 / 385 bad). `.bss` +168 B with the option on; the option-off build
+keeps `.bss` identical.
+
+**This is not what the old "prior attempt" was:** the priority bake ("Change A" above) wrote into the ONE PSRAM
+map, permanently; this adds the second, transient map that section's parked notes asked for, in PSRAM instead of
+the SRAM they weighed.
+
+Device, first pass:
+- **SQ3 room 2: FIXED** -- the door now closes after Roger (the long-standing "SQ3 door not closing" open
+  issue), and Roger is still hidden behind the door and motivator.
+- **Colonel's Bequest: fingerprints show with `[V]` ON** -- the toggle is no longer needed for it.
+- Sprite-over-sprite overlap looks right; animation looks smooth (more testing pending).
+- **SQ3 intro "Two Guys" panels: UNCHANGED** -- they still stay up instead of disappearing when the text
+  starts. So the old attribution to `PICO_STATIC_VIEW_PRIORITY`'s priority bake was wrong: it is COLOUR
+  persistence, most likely the routed stopUpd draw's colour in the composed surface not being invalidated by
+  however the panels are taken down. Next test: the same build with `[V]` off (routing off).
+- PQ2 (cars, dialogs, glovebox) not yet tested.
