@@ -380,9 +380,10 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   load with sound ON** works again (2026-09-27, three device runs). (sound)
 - **After a failed game, no further game starts** until power cycle — undiagnosed. (sound)
 - **Dropped notes** — upstream has no OPL voice stealing (`opl2.c`). (sound)
-- **Loudness / shrill drums — PARKED** (2026-09-28) until the memory work is further along. The game's
-  master volume now works and `PICO_PWM_VOLUME` (default 50) sets the output ceiling, but the loudness change
-  is unconfirmed on device; drums alias at 11,025 Hz. Analysis and options in `pico-sound.md`. (sound)
+- **Loudness / shrill drums — DECIDED: kept as is** (2026-09-29). The game's master volume works and
+  `PICO_PWM_VOLUME` (default 50) sets the output ceiling. Drums: offline A/B renders (desktop synth taps + the
+  exact `pico_pwm.c` output stage) and the trade-offs of interpolation / low-pass / a 22,050 Hz synth are in
+  `pico-sound.md`; interpolation or a low-pass would cost almost nothing if revisited. (sound)
 - **Runtime actor-to-actor control writes** are a no-op (`state->control_map` NULL). (misc)
 - **396 MHz on PIO**: soak it before trusting it long-term; it is opt-in (`-DPICO_SYS_CLOCK_MHZ=396`). (clock)
 

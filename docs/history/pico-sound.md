@@ -854,3 +854,49 @@ costs the synth 35-47% CPU vs ~20%, see "Use 11025, not 22050, on PIO" above); (
 synth -- same CPU as C. **Before building any of them:** render the same SQ3 music on desktop to WAV at
 11,025 (as shipped), with A, with A+B, and at 44,100 as a reference, and compare by ear; and if the
 Pimoroni board is at hand, listen there (22,050 Hz) -- clean drums there confirm aliasing.
+
+### DECIDED (2026-09-29) — shrill drums: offline A/B rendered, trade-offs weighed, output stage KEPT AS IS
+
+**How the renders were made (no device needed, reproducible):**
+1. Desktop builds with a temporary tap in `polled.c` `ppf_poll` (wrap it, `fwrite` each returned frame to the
+   file named by an env var): the synth's output before the mixer, which on the Pico reaches the PWM device
+   unchanged. Desktop's mixer resamples to 44.1 kHz stereo, so tapping after it would blur the comparison.
+2. Three variants: the normal desktop build (synth at 44,100 Hz stereo), and two with a temporary
+   `OPL_SIM_RATE` switch in `opl2.c` selecting the Pico's mono one-chip path at 11,025 / 22,050 Hz.
+   `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`, 50 s of the SQ3 intro each; all three captures came out
+   exactly 48.0 s (the tap records only while music plays, so they line up).
+3. A numpy script applied `pico_pwm.c` / `pwm_synth.c` exactly: gain `((s * 128) >> 16) + 128` (50% x level
+   15), clamp to 8-bit, each sample held 4 carrier periods at 44,100 Hz; variants on top of that; everything
+   level-matched to the reference RMS. The tap and the rate switch were never committed.
+
+Listening page (private): https://claude.ai/artifact/HBCauXC2N8LcBYFdGRp1j9 -- seven 30 s versions, switchable
+at the same playhead.
+
+| # | version | energy above 5.5 kHz | above 11 kHz |
+|---|---|---:|---:|
+| 1 | desktop reference (synth 44.1 kHz, 16-bit) | -13.3 dB | -20.8 dB |
+| 2 | **PicoCalc today** (11,025 Hz synth, 8-bit PWM, 4x hold) | **-11.3 dB** | **-15.7 dB** |
+| 3 | A: linear interpolation across the 4 carrier periods | -18.5 dB | -27.5 dB |
+| 4 | B: one-pole 4 kHz low-pass on the PWM levels | -17.5 dB | -25.0 dB |
+| 5 | A + B | -23.5 dB | -33.8 dB |
+| 6 | D: synth at 22,050 Hz, then 8-bit PWM (2x hold) | -10.9 dB | -15.1 dB |
+| 7 | 11,025 Hz synth, ideal playback (no 8-bit, no hold) | -56.7 dB | -61.4 dB |
+
+Today's output carries MORE high-frequency energy than the reference: the fizz of the held samples and 8-bit
+quantisation. The metric cannot see aliasing, which folds below 5.5 kHz into the music; 7 vs 1 by ear is the
+aliasing test. Not modelled: the PicoCalc's filter, amplifier and small speaker (a strong low-pass), so every
+Pico version sounds harsher on headphones than on the device; the versions stay comparable with each other.
+
+**Trade-offs:**
+
+| option | CPU | memory | battery | sound | risk |
+|---|---|---|---|---|---|
+| keep as is | -- | -- | -- | fizz stays | none |
+| A: interpolate in the PWM IRQ | small (a subtract, multiply, shift per IRQ; the IRQ is ~4% CPU at the x4 carrier) | a few bytes | negligible | less fizz; top octave (4-5.5 kHz) a little softer, since linear interpolation is itself a mild low-pass | low; needs one sample of look-ahead (0.09 ms) |
+| B: one-pole low-pass | tiny (one multiply-add per IRQ) | none | negligible | less fizz; duller above ~4 kHz, real treble included | low; cutoff could be a build option |
+| A + B | small | none | negligible | smoothest and dullest | low |
+| D: synth at 22,050 Hz | large: synth 35-47% CPU vs ~20% at 133 MHz (above), lowers the frame rate and starves the feed | ~4 KB more buffer SRAM (a fifth of the ~20 KB budget) | realistically needs 360 MHz | less aliasing, but keeps the fizz | medium; "use 11025, not 22050, on PIO" |
+
+None of A/B fixes aliasing; only D does. **Decision (user, 2026-09-29): keep the output stage as it is.** A and
+B remain the cheap options if it is revisited: a few lines in `pwm_synth.c`'s IRQ behind a build option, no
+SRAM or PSRAM. D is not recommended on PIO at 133 MHz.
