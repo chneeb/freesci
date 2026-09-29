@@ -356,8 +356,11 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 
 ## Pico — open issues
 
-- **PIO memory model** — the fragmentation wall behind most OOMs below is structural (general `malloc`, pinned
-  big blocks). Plan and status: `docs/pico-memory-model-plan.md`; step 0 (census: movable vs pinned share) not run. (memory)
+- **PIO memory model** — largely addressed (2026-09-27..28): ~+47 KB heap for KQ4, savegame-load fragmentation
+  cut ~3x, no OOM in any KQ4/SQ3 run since. Real margin (probe build): ~41 KB contiguous in play, ~25 KB right
+  after a load, so new permanent buffers must stay under ~20 KB (a 32 KB working priority map does NOT fit).
+  A Sierra-style hunk was ruled out (movable share ~15 KB). Remaining lever if needed: restore-by-reboot.
+  Details and results: `docs/pico-memory-model-plan.md`. (memory)
 - **PIO dialog bleed / SQ3 door not closing** — composed surface (2c) fixed PQ2; the SQ3 door is baked once and
   never redrawn, which neither invalidation rule distinguishes from stale. Next idea: mirror save-under
   restores into composed. (render)
