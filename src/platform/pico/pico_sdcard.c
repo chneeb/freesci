@@ -78,6 +78,10 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
         if (redraw) {
             lcd_clear();
             lcd_print_string("Select SCI game:\n");
+#ifdef PICO_CHOOSER_TOGGLES
+            /* Per-launch A/B toggles, off by default since 2026-09-29: every
+               tested game runs with sound, the composed surface and static-view
+               priority on. -DPICO_CHOOSER_TOGGLES=ON brings the menu back. */
 #ifdef PICO_PWM_AUDIO
             lcd_print_string(pico_sound_enabled
                              ? "  [S] sound: ON\n"
@@ -94,6 +98,7 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
                              ? "  [V] static view pri: ON\n"
                              : "  [V] static view pri: off\n");
 #endif
+#endif /* PICO_CHOOSER_TOGGLES */
             lcd_print_string("\n");
             for (int i = 0; i < count; i++) {
                 char line[NAME_LEN + 4];
@@ -114,6 +119,7 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
         } else if (key == 0x0A) {   /* ENTER */
             snprintf(out_path, len, "0:/freesci/%s", names[sel]);
             return true;
+#ifdef PICO_CHOOSER_TOGGLES
 #if (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)) \
     && !defined(PICO_WORKING_PRIORITY) && !defined(PICO_PSRAM_WORKING_PRIORITY)
         } else if (key == 'v' || key == 'V') {
@@ -135,6 +141,7 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
             pico_sound_enabled = !pico_sound_enabled;
             redraw = true;
 #endif
+#endif /* PICO_CHOOSER_TOGGLES */
         } else if (key == 0xB1) {   /* ESC */
             return false;
         }

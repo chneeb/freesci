@@ -390,6 +390,17 @@ if(PLATFORM STREQUAL "pico")
     # Costs an SD remount + chooser redraw.  Safe on both targets: PIO re-inits
     # its PIO state machine, and the mapped QMI init already exits QPI first
     # precisely because a watchdog reset does not power-cycle the PSRAM.
+    # Show the per-launch A/B toggles ([S] sound, [C] composed surface, and [V]
+    # static-view priority in builds without the PSRAM working priority map) in
+    # the game chooser. OFF since 2026-09-29: every tested game (SQ3, KQ4, PQ2,
+    # Colonel's Bequest) runs with all of them on, so they are compile-time
+    # settings again (PICO_PWM_AUDIO, PICO_STATIC_COMPOSED). ON restores the
+    # menu for A/B work without a code change.
+    option(PICO_CHOOSER_TOGGLES "Show the [S]/[C]/[V] A/B toggles in the game chooser" OFF)
+    if(PICO_CHOOSER_TOGGLES)
+        add_compile_definitions(PICO_CHOOSER_TOGGLES=1)
+    endif()
+
     option(PICO_REBOOT_BETWEEN_GAMES "Reboot into the chooser after a game exits" ON)
     if(PICO_REBOOT_BETWEEN_GAMES)
         add_compile_definitions(PICO_REBOOT_BETWEEN_GAMES=1)

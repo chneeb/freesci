@@ -144,10 +144,12 @@ PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO
 (`PICO_SYS_CLOCK_MHZ=360` -- pico-286's High profile, tested once, resource load 14.8 -> 11.8 s on SQ3 -- and `PICO_SYS_CLOCK_MHZ=396` are opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
 itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,824.
 
-The game chooser offers per-launch toggles, so many A/Bs need no rebuild: **`[S]`** sound (off = `-q`),
-**`[C]`** composed surface. (`[V]` static-view priority is gone since 2026-09-29: the PSRAM working priority map
-made it unnecessary -- Colonel's fingerprints show with static views on. It only reappears in a build with
-`-DPICO_PSRAM_WORKING_PRIORITY=OFF`.) The launch log records the combination.
+The game chooser shows **no toggles** by default since 2026-09-29: every tested game (SQ3, KQ4, PQ2, Colonel's
+Bequest) runs with sound, the composed surface and static-view priority on, so they are compile-time settings
+again (`PICO_PWM_AUDIO`, `PICO_STATIC_COMPOSED`, `PICO_PSRAM_WORKING_PRIORITY`). **`-DPICO_CHOOSER_TOGGLES=ON`**
+brings back the per-launch A/B menu: **`[S]`** sound (off = `-q`) and **`[C]`** composed surface, plus **`[V]`**
+static-view priority only in a build with `-DPICO_PSRAM_WORKING_PRIORITY=OFF`. The launch log records the
+states either way.
 
 **Always-on Pico timing (NOT probes -- one line each, negligible cost, no flag needed):**
 
@@ -351,7 +353,7 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 | Persisting static-view **colour** (`PICO_STATIC_VIEW_BAKE`, deleted) | four ghost/overdraw regressions (render) |
 | Save-unders in SRAM | `old_screen` alone is 60,800 B per transition → OOM (pimoroni-mapped) |
 | 4bpp visual buffer | control-pass aux needs 8 bpp; peak gets worse (4bpp-attempt) |
-| Heuristic sound shedding | no free-heap floor separates "about to die" from normal; use `[S]` (sound) |
+| Heuristic sound shedding | no free-heap floor separates "about to die" from normal; build without sound, or `[S]` with `PICO_CHOOSER_TOGGLES` (sound) |
 | PWM carrier-frequency theory of the feep | disproved; it was the idle duty cycle (sound) |
 | 252 MHz by rescaling only the PSRAM divisor | wrong knob — flash timing/vreg/clk_peri were missing (clock) |
 
@@ -369,8 +371,8 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 - **SQ3 intro Two Guys panels persist** — NOT fixed by the PSRAM working priority map (2026-09-29), so it is
   colour persistence, not the priority bake as previously recorded: `[V]` off (routing off) makes them disappear, so
   it is the composed-surface invalidation missing how the panels are taken down. Cosmetic, parked. (render)
-- **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints now show by default (PSRAM working priority map, 2026-09-29); hits true
-  exhaustion (use `[S]` off). (render)
+- **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints now show by default (PSRAM working priority map, 2026-09-29); plays with
+  sound since the 2026-09 memory work (it used to hit true exhaustion). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)
 - **KQ4 with sound** now runs (2026-09-27: after the const-table move, and again on `33be492c` with
   `PICO_STREAM_METHODS=7` -- intro, restart and a savegame load, no allocation failures). Margin unmeasured;
