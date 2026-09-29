@@ -330,7 +330,10 @@ if(PLATFORM STREQUAL "pico")
     # instead of baked. Needs no SRAM. PIO only (the mapped target has real SRAM
     # maps, PICO_WORKING_PRIORITY). See pico_driver.c PICO_WORK_PRI_ADDR.
     if(NOT PICO_PSRAM_MAPPED)
-        option(PICO_PSRAM_WORKING_PRIORITY "Pico/PIO: per-frame working priority map in PSRAM" OFF)
+        # Default ON since 2026-09-29: device-validated on SQ3 (door now closes),
+        # Colonel's Bequest (fingerprints show without [V] off) and PQ2 (cars,
+        # dialogs, glovebox). It also retires the chooser's [V] toggle.
+        option(PICO_PSRAM_WORKING_PRIORITY "Pico/PIO: per-frame working priority map in PSRAM" ON)
         if(PICO_PSRAM_WORKING_PRIORITY)
             add_compile_definitions(PICO_PSRAM_WORKING_PRIORITY=1)
         endif()

@@ -1323,3 +1323,13 @@ Device, first pass:
   persistence, most likely the routed stopUpd draw's colour in the composed surface not being invalidated by
   however the panels are taken down. Next test: the same build with `[V]` off (routing off).
 - PQ2 (cars, dialogs, glovebox) not yet tested.
+
+**Second pass (2026-09-29) -> DEFAULT ON, `[V]` retired.** PQ2 with the working map and `[V]` on: cars occlude,
+dialogs clean, glovebox items visible. With SQ3 and Colonel's Bequest already confirmed, `PICO_PSRAM_WORKING_PRIORITY`
+is now default ON for PIO and the chooser's `[V]` toggle is compiled out with it (static-view handling is
+always on; the launch log prints `[gfx] PSRAM working priority map ON` instead of the `[V]` state).
+
+**"Two Guys" diagnosis:** the same build with `[V]` OFF makes the panels disappear as they should. So the
+persistence is the routed stopUpd draw's COLOUR in the composed surface (`PICO_STATIC_COMPOSED`, widgets.c
+phase-2c invalidation): the panels are taken down in a way none of its three stale cases (moved, resumed
+updating, disposed) catches. Cosmetic; parked. The fix belongs in that invalidation, not in priority.

@@ -100,8 +100,8 @@ Everything else defaults correctly; the mapped-only options (`PICO_PSRAM_SCRIPTS
 `PICO_WORKING_PRIORITY`) are all ON and each is an A/B switch.
 
 **After ANY shared-file change, rebuild the PIO target and check its `.bss` is unchanged** — that is the
-guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 30,656** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
-volume cache + fast seek, measured 2026-09-28; 30,084 before the volume cache, 29,952 before the packing, 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
+guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 30,824** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
+volume cache + fast seek, PSRAM working priority map, measured 2026-09-29; 30,656 before the working map, 30,084 before the volume cache, 29,952 before the packing, 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
 17,608) are from earlier configs, not regressions:
 ```bash
 cmake --build build-pico -j$(nproc) && arm-none-eabi-size build-pico/src/freesci.elf
@@ -140,13 +140,14 @@ grep -E '^(PICO_|FSCI_)[A-Z_]*:BOOL' build-pico/CMakeCache.txt | sort
 and when a default changes, `rm -rf` the dir and re-configure rather than rebuilding in place. The canonical
 PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO_STATIC_VIEW_PRIORITY`,
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
-`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); `PICO_LCD_BACKLIGHT=96`; `PICO_VOLUME_CACHE` ON; 133 MHz
+`PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); `PICO_LCD_BACKLIGHT=96`; `PICO_VOLUME_CACHE` ON; `PICO_PSRAM_WORKING_PRIORITY` ON; 133 MHz
 (`PICO_SYS_CLOCK_MHZ=360` -- pico-286's High profile, tested once, resource load 14.8 -> 11.8 s on SQ3 -- and `PICO_SYS_CLOCK_MHZ=396` are opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
-itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,656.
+itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,824.
 
 The game chooser offers per-launch toggles, so many A/Bs need no rebuild: **`[S]`** sound (off = `-q`),
-**`[C]`** composed surface, **`[V]`** static-view priority (PIO only; Colonel's Bequest needs `[V]` off to show
-its copy-protection fingerprints). The launch log records the combination.
+**`[C]`** composed surface. (`[V]` static-view priority is gone since 2026-09-29: the PSRAM working priority map
+made it unnecessary -- Colonel's fingerprints show with static views on. It only reappears in a build with
+`-DPICO_PSRAM_WORKING_PRIORITY=OFF`.) The launch log records the combination.
 
 **Always-on Pico timing (NOT probes -- one line each, negligible cost, no flag needed):**
 
@@ -361,12 +362,13 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   after a load, so new permanent buffers must stay under ~20 KB (a 32 KB working priority map does NOT fit).
   A Sierra-style hunk was ruled out (movable share ~15 KB). Remaining lever if needed: restore-by-reboot.
   Details and results: `docs/pico-memory-model-plan.md`. (memory)
-- **PIO dialog bleed / SQ3 door not closing** — **SQ3 door FIXED with `-DPICO_PSRAM_WORKING_PRIORITY=ON`** (opt-in,
+- **PIO dialog bleed / SQ3 door not closing** — **SQ3 door FIXED by `PICO_PSRAM_WORKING_PRIORITY`** (default ON since
   2026-09-29; also lets Colonel's fingerprints show with `[V]` on -- see pico-render.md). Earlier notes: composed surface (2c) fixed PQ2; the SQ3 door is baked once and
   never redrawn, which neither invalidation rule distinguishes from stale. Next idea: mirror save-under
   restores into composed. (render)
 - **SQ3 intro Two Guys panels persist** — NOT fixed by the PSRAM working priority map (2026-09-29), so it is
-  colour persistence, not the priority bake as previously recorded; suspect the composed-surface invalidation. (render)
+  colour persistence, not the priority bake as previously recorded: `[V]` off (routing off) makes them disappear, so
+  it is the composed-surface invalidation missing how the panels are taken down. Cosmetic, parked. (render)
 - **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints need `[V]` off; hits true
   exhaustion (use `[S]` off). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)

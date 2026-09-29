@@ -482,12 +482,15 @@ int main(void)
         }
 #endif
 #if (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)) \
-    && !defined(PICO_WORKING_PRIORITY)
+    && !defined(PICO_WORKING_PRIORITY) && !defined(PICO_PSRAM_WORKING_PRIORITY)
         {
             extern int pico_static_view_priority_enabled;
             printf("[gfx] static view priority %s\n",
                    pico_static_view_priority_enabled ? "ON" : "OFF");
         }
+#endif
+#ifdef PICO_PSRAM_WORKING_PRIORITY
+        printf("[gfx] PSRAM working priority map ON\n");
 #endif
         printf("Launching freesci_main\n");
         freesci_main(argc, argv);
