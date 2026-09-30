@@ -1585,39 +1585,44 @@ _gfxwop_container_draw_contents(gfxw_widget_t *widget, gfxw_widget_t *contents)
 		dirty = dirty->next;
 	}
 
-	/* The draw loop is executed twice: Once for normal data, and once for ports. */
+	/* The draw loop is executed twice: Once for normal data, and once for ports.
+	** Widgets are drawn in order, each one in every dirty rectangle before the
+	** next: a painter's order. The loops used to be the other way round (dirty
+	** rectangles outside), which breaks for a child container: it draws all of
+	** its own dirty areas on its first visit, so for every later rectangle the
+	** widgets before it were painted again on top of it. In Jones in the Fast
+	** Lane that hid the walking character (the cast list) under the centre
+	** panel (a DrawCel view before it). */
+	if (!container->dirty)
+		return 0; /* Nothing to draw; leave the dirty flags alone */
+
 	for (draw_ports = 0; draw_ports < 2; draw_ports++) {
 
-		dirty = container->dirty;
+		gfxw_widget_t *seeker = contents;
+		while (seeker && (draw_ports || !GFXW_IS_PORT(seeker))) {
 
-		while (dirty) {
+			if (seeker->flags & GFXW_FLAG_DIRTY) {
 
-			gfxw_widget_t *seeker = contents;
-			while (seeker && (draw_ports || !GFXW_IS_PORT(seeker))) {
-				rect_t small_rect;
-				byte draw_noncontainers;
+				if (GFXW_IS_CONTAINER(seeker)) {
+					/* Draws all of its own dirty rectangles */
+					seeker->draw(seeker, gfx_point(container->zone.x, container->zone.y));
+				} else
+					for (dirty = container->dirty; dirty; dirty = dirty->next) {
+						rect_t small_rect;
 
-				memcpy(&small_rect, &(dirty->rect), sizeof(rect_t));
-				draw_noncontainers = !_gfxop_clip(&small_rect, container->bounds);
-
-				if (seeker->flags & GFXW_FLAG_DIRTY) {
-
-					if (!GFXW_IS_CONTAINER(seeker) && draw_noncontainers) {
+						memcpy(&small_rect, &(dirty->rect), sizeof(rect_t));
+						if (_gfxop_clip(&small_rect, container->bounds))
+							continue;
+						/* Clip zone must be reset for each element, because
+						** we might have descended into containers. */
 						GFX_ASSERT(gfxop_set_clip_zone(gfx_state, small_rect));
-					}
-				/* Clip zone must be reset after each element, because we might
-				** descend into containers.
-				** Doing this is relatively cheap, though. */
-					if (draw_noncontainers || GFXW_IS_CONTAINER(seeker))
 						seeker->draw(seeker, gfx_point(container->zone.x, container->zone.y));
+					}
 
-					if (!dirty->next)
-						seeker->flags &= ~GFXW_FLAG_DIRTY;
-				}
-
-				seeker = seeker->next;
+				seeker->flags &= ~GFXW_FLAG_DIRTY;
 			}
-			dirty = dirty->next;
+
+			seeker = seeker->next;
 		}
 	}
 	/* Remember that the dirty rects should be freed afterwards! */

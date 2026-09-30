@@ -155,6 +155,44 @@ reparentize_primary_widget_lists(state_t *s, gfxw_port_t *newport)
 	}
 }
 
+/* Add a painted widget (DrawCel, Graph line/fill box) to the current port.
+** Sierra's port 0 and the picture share one screen, and the cast is animated
+** over whatever was painted; FreeSCI's port 0 (wm_port) is a separate layer
+** above the picture port, so a VGA game's painting there covered every actor on
+** every redraw (Jones in the Fast Lane's centre panel, a DrawCel, hid the
+** walking character). For VGA games, paint into the picture port instead --
+** same bounds -- in call order, and keep the cast list last, as kAddToPic does.
+** Text (kDisplay) stays in port 0: it is painted over stopped actors, which
+** here are redrawn every frame (Jones' money over the calculator). SCI0 games
+** keep FreeSCI's original layering. */
+static void
+add_painted_widget(state_t *s, gfxw_widget_t *widget)
+{
+	gfxw_port_t *port = s->port ? s->port : s->picture_port;
+
+	if (s->resmgr->sci_version >= SCI_VERSION_01_VGA && port == s->wm_port) {
+		/* ...unless it overlaps an open window: Sierra paints over windows
+		** too, and here windows are ports above the picture port. Jones'
+		** speech bubbles are painted in port 0 over the shop's window. */
+		rect_t abs_bounds = gfx_rect(widget->bounds.x + port->zone.x, widget->bounds.y + port->zone.y,
+					     widget->bounds.xl, widget->bounds.yl);
+		gfxw_widget_t *win;
+		int over_window = 0;
+
+		for (win = GFXWC(s->wm_port)->contents; win; win = win->next)
+			if (GFXW_IS_PORT(win) && gfx_rects_overlap(abs_bounds, win->bounds))
+				over_window = 1;
+
+		if (!over_window)
+			port = s->picture_port;
+	}
+
+	port->add(GFXWC(port), widget);
+	if (port == s->picture_port && s->port != port
+	    && s->dyn_views && s->dyn_views->parent == GFXWC(port))
+		reparentize_primary_widget_lists(s, port);
+}
+
 int
 _find_view_priority(state_t *s, int y)
 {
@@ -603,7 +641,7 @@ kGraph(state_t *s, int funct_nr, int argc, reg_t *argv)
 			  gfxcolor.mask);
 
 		redraw_port = 1;
-		ADD_TO_CURRENT_BG_WIDGETS(GFXW(gfxw_new_line(gfx_point(SKPV(2), SKPV(1)),
+		add_painted_widget(s, GFXW(gfxw_new_line(gfx_point(SKPV(2), SKPV(1)),
 							     gfx_point(SKPV(4), SKPV(3)),
 							     gfxcolor, GFX_LINE_MODE_CORRECT, GFX_LINE_STYLE_NORMAL)));
 
@@ -651,7 +689,7 @@ kGraph(state_t *s, int funct_nr, int argc, reg_t *argv)
 			  SKPV(2), SKPV(1), SKPV(4), SKPV(3), SKPV(6), SKPV_OR_ALT(7, -1), SKPV_OR_ALT(8, -1),
 			  UKPV(5));
 
-		ADD_TO_CURRENT_BG_WIDGETS(gfxw_new_box(s->gfx_state, area, color, color, GFX_BOX_SHADE_FLAT));
+		add_painted_widget(s, GFXW(gfxw_new_box(s->gfx_state, area, color, color, GFX_BOX_SHADE_FLAT)));
 
 	}
 	break;
@@ -3053,7 +3091,7 @@ kDrawCel(state_t *s, int funct_nr, int argc, reg_t *argv)
 #if 0
 	add_to_chrono(s, GFXW(new_view));
 #else
-	ADD_TO_CURRENT_PICTURE_PORT(GFXW(new_view));
+	add_painted_widget(s, GFXW(new_view));
 #endif
 	FULL_REDRAW();
 

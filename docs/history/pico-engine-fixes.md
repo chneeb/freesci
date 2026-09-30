@@ -127,3 +127,15 @@ Found with the scratch key/screenshot harness plus an AddressSanitizer desktop b
 on a real window (user's ASan run), not under the dummy video driver. Pico status is unchanged: VGA games still stop
 at the `gfxop_new_pic` guard. Panel text drawn as dark bars: fixed -- `get_pic_color` now uses the current picture's
 palette for VGA indices (was the static palette 999; colour 99 = dark grey there, panel blue in the picture).
+
+**Walking character hidden in week 1 (2026-09-30).** Two layering bugs:
+- `_gfxwop_container_draw_contents` (`widgets.c`) looped dirty rectangles outside and children inside. A child
+  container (the cast list) draws all its dirty areas on its first visit, so in every later rectangle the widgets
+  before it were painted over it again (trace: panel in rect 1, walker in rects 1-4, panel again in rects 2-4). Now
+  each child is drawn in all dirty rectangles before the next -- painter's order. **Shared with the Pico** (every
+  game); desktop SQ3/KQ4/PQ2/CB screenshots are identical apart from animation timing; device test pending.
+- Jones paints the centre panel with `DrawCel` in port 0, which in FreeSCI is a layer (`wm_port`) above the picture
+  port and its cast. For VGA games only, `add_painted_widget` (`kgraphics.c`) puts `DrawCel` and `Graph` line/box
+  painting from port 0 into the picture port (cast kept last), unless it overlaps an open window (the shop's speech
+  bubble is painted over the shop window). `Display` text stays in port 0: it is painted over stopped actors, which
+  FreeSCI redraws every frame (the money over the calculator vanished otherwise).
