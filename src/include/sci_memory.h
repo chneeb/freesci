@@ -374,6 +374,12 @@ sci_refcount_memdup(void *data, size_t len);
    this — their decompressed data stays resident, so it must not share scratch. */
 #	define PICO_DECOMPRESS_SCRATCH_SIZE 16384
 extern unsigned char *g_pico_decompress_scratch;
+/* One-load lend of a larger buffer (decompress0.c): a VGA pic decompresses into
+   the resident visual[0] instead of a fresh ~55 KB block. Set and cleared by the
+   lender (gfxr_interpreter_calculate_pic); never freed through res->data. */
+extern unsigned char *g_pico_decompress_borrow;
+extern unsigned int g_pico_decompress_borrow_size;
+unsigned char *pico_decompress_alloc(int type, unsigned int size);
 
 /* [arenagrow] raw-malloc probe (FSCI_PROBE_ARENA only).  The sci_* allocators
    self-instrument, but the dominant arena-ratchet drivers are RAW malloc()s

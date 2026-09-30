@@ -232,6 +232,60 @@ void pico_picdec_cache_begin(uint32_t addr, int size) {
     _pdc = &_pdc_inst;
 }
 void pico_picdec_cache_end(void) { _pdc = NULL; }
+
+/* SCI1 (VGA) embedded cel, decoded straight from the PSRAM stream into the
+   pic's visual map. A VGA pic is mostly one embedded bitmap (Jones in the Fast
+   Lane: up to ~55 KB); the desktop path copies it into a buffer, decodes that
+   into a cel pixmap and translates it -- three large SRAM blocks -- only to
+   copy the cel's rows into the visual map. This writes the same pixels with no
+   buffer at all. Matches desktop exactly: gfxr_draw_cel1 (non-mirrored,
+   non-Amiga) into a zeroed xl*yl cel, then _gfx_crossblit_simple of every row
+   to base + row*320 (no clipping), bounded only by the visual map's size.
+   'pos' is the cel's first byte in the pic resource; returns 0 on success. */
+static int
+_pico_draw_embedded_cel1(byte *vis, int vis_size, int base, int pos, int bytesize)
+{
+	int xl = (short) _pdc_ru16(pos);
+	int yl = (short) _pdc_ru16(pos + 2);
+	int color_key = _pdc_rb(pos + 6);
+	int end = pos + bytesize;
+	int pixmap_size = xl * yl;
+	int writepos = 0;
+
+	if (xl <= 0 || yl <= 0)
+		return 1;
+	pos += 8;
+
+#define _EC1_PUT(c) do { int _o = base + (writepos / xl) * 320 + (writepos % xl); \
+		if (_o >= 0 && _o < vis_size) vis[_o] = (c); writepos++; } while (0)
+
+	while (writepos < pixmap_size && pos < end) {
+		int op = _pdc_rb(pos++);
+		int bytes = op & 0x3f;
+
+		if (writepos + bytes > pixmap_size)
+			bytes = pixmap_size - writepos;
+		if (op & 0x80) { /* V1_RLE */
+			int color = color_key; /* V1_RLE_BG: background fill */
+			if (!(op & 0x40)) {
+				if (pos >= end)
+					return 1;
+				color = _pdc_rb(pos++);
+			}
+			while (bytes--)
+				_EC1_PUT(color);
+		} else {
+			if (pos + bytes > end)
+				return 1;
+			while (bytes--)
+				_EC1_PUT(_pdc_rb(pos++));
+		}
+	}
+	while (writepos < pixmap_size) /* the desktop cel is zeroed */
+		_EC1_PUT(0);
+#undef _EC1_PUT
+	return 0;
+}
 #endif /* HAVE_PICO */
 
 gfx_pixmap_color_t gfx_sci0_pic_colors[GFX_SCI0_PIC_COLORS_NR]; /* Initialized during initialization */
@@ -2077,6 +2131,23 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 				p0printf("(%d, %d)\n", posx, posy);
 				pos += 2;
 #ifdef HAVE_PICO
+				/* VGA: decode straight into the visual map, no buffers. Overlaid
+				   pics keep the buffered path below (view_transparentize). */
+				if (_pdc && sci1 && !nodraw && !(flags & DRAWPIC01_FLAG_OVERLAID_PIC)
+				    && static_pal_nr != GFX_SCI1_AMIGA_COLORS_NR) {
+					int _yl = (short) _pdc_ru16(pos + 2);
+
+					if (_yl + sci_titlebar_size > 200) /* the desktop "titlebar hack" */
+						sci_titlebar_size = 0;
+					if (pic->visual_map->index_data)
+						_pico_draw_embedded_cel1(pic->visual_map->index_data,
+									 pic->visual_map->index_xl * pic->visual_map->index_yl,
+									 sci_titlebar_size * 320 + posy * 320 + posx,
+									 pos, bytesize);
+					pos += bytesize;
+					gfx_free_mode(mode);
+					goto end_op_loop;
+				}
 				if (_pdc) {
 					byte *_vd = (byte *)sci_malloc(bytesize);
 					if (_vd) {

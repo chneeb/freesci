@@ -97,8 +97,29 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			       int flags, int default_palette, int nr, void *internal)
 {
 	resource_mgr_t *resmgr = (resource_mgr_t *) state->misc_payload;
-	resource_t *res = scir_find_resource(resmgr, sci_pic, nr, 0);
+	resource_t *res;
 	int need_unscaled = unscaled_pic != NULL;
+#ifdef HAVE_PICO
+	/* A VGA pic is up to ~55 KB decompressed (Jones in the Fast Lane), far
+	   past the 16 KB scratch and the heap's contiguous margin. Lend the
+	   resident visual[0] (gfxop_new_pic has already borrowed it as the decode
+	   buffer) as the decompress target: the data goes to PSRAM and is evicted
+	   below BEFORE the decode reuses the buffer. The loan ends right after the
+	   eviction, or on the early error return. */
+	int pic_sci1 = (state->version >= SCI_VERSION_01_VGA) ? state->version : 0;
+
+	if (pic_sci1 && g_pico_decode_visual_buf) {
+		g_pico_decompress_borrow = g_pico_decode_visual_buf;
+		g_pico_decompress_borrow_size = GFXR_AUX_MAP_SIZE;
+	}
+#  define PICO_END_DECOMPRESS_LOAN() \
+	do { g_pico_decompress_borrow = NULL; g_pico_decompress_borrow_size = 0; } while (0)
+#  define VGA_DESKTOP_PATH 0 /* the Pico branch below handles VGA pics too */
+#else
+#  define PICO_END_DECOMPRESS_LOAN() do { } while (0)
+#  define VGA_DESKTOP_PATH 1
+#endif
+	res = scir_find_resource(resmgr, sci_pic, nr, 0);
 	gfxr_pic0_params_t style, basic_style;
 	
 	basic_style.line_mode = GFX_LINE_MODE_CORRECT;
@@ -109,10 +130,12 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 	style.brush_mode = state->options->pic0_brush_mode;
 	style.pic_port_bounds = state->options->pic_port_bounds;
 
-	if (!res || !res->data)
+	if (!res || !res->data) {
+		PICO_END_DECOMPRESS_LOAN();
 		return GFX_ERROR;
+	}
 
-	if (state->version >= SCI_VERSION_01_VGA) {
+	if (VGA_DESKTOP_PATH && state->version >= SCI_VERSION_01_VGA) {
 		if (need_unscaled)
 		{
 			if (state->version == SCI_VERSION_1_1)
@@ -143,6 +166,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			pico_picdec_cache_begin(_ra, res->size);
 		}
 		scir_evict_resource_data(resmgr, res);
+		PICO_END_DECOMPRESS_LOAN(); /* res->data (maybe visual[0]) is in PSRAM now */
 		scir_free_all_lru(resmgr);
 
 		/* Allocate the visual buffer (64KB).  Two modes:
@@ -264,7 +288,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   is still NULL (control gets its own pass below), so control draws no-op
 		   via the index_data / NULL-buffer guards in the draw helpers. */
 		gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
-				&style, res->id, 0,
+				&style, res->id, pic_sci1,
 				state->static_palette, state->static_palette_entries);
 
 #ifdef FSCI_PROBE_GFX
@@ -356,7 +380,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
 
 			gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
-					&style, res->id, 0,
+					&style, res->id, pic_sci1,
 					state->static_palette, state->static_palette_entries);
 
 			{	/* Offload control to PSRAM; gfxop_scan_bitmask reads it back

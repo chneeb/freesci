@@ -2416,9 +2416,14 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   pico_blit_indexed via pico_render_background).  There is no SCI1 graphics
 	   support on Pico and a VGA game cannot be coerced to EGA (version is detected
 	   from the resource files, not a render toggle).  Halt legibly instead of
-	   HardFaulting.  state->version == resmgr->sci_version (the SCI_VERSION_* enum). */
-	if (state->version >= SCI_VERSION_01_VGA) {
-		pico_oom_report("SCI1/VGA game not supported (SCI0 only)",
+	   HardFaulting.  state->version == resmgr->sci_version (the SCI_VERSION_* enum).
+
+	   Branch pico-sci1: SCI_VERSION_01_VGA (Jones in the Fast Lane) now takes the
+	   Pico decode path too (sci_resmgr.c routes VGA pics through the PSRAM
+	   branch; the embedded bitmap decodes straight into visual[0]). Later
+	   versions still halt: their pic/view formats are not handled. */
+	if (state->version > SCI_VERSION_01_VGA) {
+		pico_oom_report("SCI1/VGA game not supported (SCI0 + SCI01 VGA only)",
 				(unsigned long)state->version,
 				__FILE__, __LINE__, "gfxop_new_pic");
 		/* pico_oom_report halts; not reached. */

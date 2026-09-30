@@ -59,6 +59,15 @@
 
 int decompress0(resource_t *result, int resh, int sci_version);
 int stream_decompress0(resource_t *result, int resh, int sci_version);
+int decompress01(resource_t *result, int resh, int sci_version);
+int pico_stream_decompress01(guint8 *dest, int resh, int method,
+			     unsigned int complength, int size);
+
+/* SCI01 mode (branch pico-sci1): set for a game with a palette 999 resource,
+   i.e. a VGA game whose resource map alone says SCI0 (Jones in the Fast Lane).
+   The game itself then runs decompress01 with SCI_VERSION_01_VGA. */
+static int g_sci01;
+static long g_last_pos[2];
 
 /* Reproduce _scir_load_resource's open+lseek (resource.c ~line 290) for a
    VOLUME-sourced resource, then hand the fd to one decompressor. Patch-file
@@ -91,6 +100,44 @@ load_via(resource_t *res, int version, int use_stream,
 	work.type = res->type;
 
 	lseek(fh, res->file_offset, SEEK_SET);
+	if (g_sci01) {
+		/* Stock decompress01 against what decompress01 does on the Pico for
+		   methods 0/1: read the header, then pico_stream_decompress01 (the 4 KB
+		   window). Other methods run stock on both sides. The fd position
+		   afterwards must also match: the stream reads ahead. */
+		unsigned char hdr[8];
+		long pos_after;
+
+		if (!use_stream)
+			rc = decompress01(&work, fh, SCI_VERSION_01_VGA);
+		else if (read(fh, hdr, 8) == 8) {
+			unsigned int clen = hdr[2] | (hdr[3] << 8);
+			unsigned int dsz = hdr[4] | (hdr[5] << 8);
+			int m = hdr[6] | (hdr[7] << 8);
+
+			if (clen > 4 && (m == 0 || m == 1)) {
+				work.data = malloc(dsz ? dsz : 1);
+				work.size = dsz;
+				rc = pico_stream_decompress01(work.data, fh, m, clen - 4, dsz);
+				if (rc < 0) { /* not streamed in this build */
+					free(work.data); work.data = NULL;
+					lseek(fh, res->file_offset, SEEK_SET);
+					rc = decompress01(&work, fh, SCI_VERSION_01_VGA);
+				} else if (rc) {
+					free(work.data); work.data = NULL;
+				}
+			} else {
+				lseek(fh, res->file_offset, SEEK_SET);
+				rc = decompress01(&work, fh, SCI_VERSION_01_VGA);
+			}
+		} else
+			rc = SCI_ERROR_IO_ERROR;
+		pos_after = lseek(fh, 0, SEEK_CUR);
+		if (getenv("FDPOS"))
+			printf("    %s.%03d %s fd at %ld\n", sci_resource_types[res->type],
+			       res->number, use_stream ? "stream" : "stock ", pos_after);
+		g_last_pos[use_stream] = pos_after;
+	} else
 	rc = use_stream ? stream_decompress0(&work, fh, version)
 			: decompress0(&work, fh, version);
 	close(fh);
@@ -124,6 +171,10 @@ run_game(const char *dir, int *checked_out, int *skipped_out)
 	/* decompress0 is the SCI0 decompressor; on a later-version game the
 	   resmgr dispatches elsewhere (decompress01/1/11) and this comparison
 	   would be meaningless. */
+	g_sci01 = (resmgr->sci_version == SCI_VERSION_0
+		   && scir_test_resource(resmgr, sci_palette, 999));
+	if (g_sci01)
+		printf("  palette 999 present: VGA game, comparing decompress01 (stock vs Pico stream)\n");
 	if (resmgr->sci_version != SCI_VERSION_0) {
 		printf("  skipped: not SCI0 (version %d)\n", resmgr->sci_version);
 		scir_free_resource_manager(resmgr);
@@ -215,6 +266,11 @@ run_game(const char *dir, int *checked_out, int *skipped_out)
 			       "(stock %02x vs stream %02x)\n",
 			       sci_resource_types[res->type], res->number,
 			       ndiff, sa, first, a[first], b[first]);
+			bad++;
+		} else if (g_sci01 && g_last_pos[0] != g_last_pos[1]) {
+			printf("  %s.%03d  FD POSITION differs: stock=%ld stream=%ld\n",
+			       sci_resource_types[res->type], res->number,
+			       g_last_pos[0], g_last_pos[1]);
 			bad++;
 		} else if (ra == 0 && (!a || !b)) {
 			printf("  %s.%03d  one side returned NULL data (stock=%p stream=%p)\n",

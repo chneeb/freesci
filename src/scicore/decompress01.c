@@ -29,6 +29,16 @@
 #include <sci_memory.h>
 #include <sciresource.h>
 
+#ifdef HAVE_PICO
+/* res->data may be the permanent decompress scratch or a lent buffer
+   (decompress0.c): never free those. */
+#  define PICO_DECOMP01_IS_LENT(p) ((p) && ((unsigned char*)(p) == g_pico_decompress_scratch \
+				   || (unsigned char*)(p) == g_pico_decompress_borrow))
+#  define DECOMP01_FREE_DATA(p) do { if (!PICO_DECOMP01_IS_LENT(p)) free(p); } while (0)
+#else
+#  define DECOMP01_FREE_DATA(p) free(p)
+#endif
+
 /***************************************************************************
 * The following code was originally created by Carl Muckenhoupt for his
 * SCI decoder. It has been ported to the FreeSCI environment by Sergey Lapin.
@@ -561,6 +571,50 @@ int decompress01(resource_t *result, int resh, int sci_version)
 		return SCI_ERROR_EMPTY_OBJECT;
 	}
 
+#ifdef HAVE_PICO
+	/* The Pico treatment decompress0 already had. The output comes from
+	   pico_decompress_alloc -- the lent visual[0] for a VGA pic (up to ~55 KB
+	   in Jones in the Fast Lane), the scratch for small pics/views, else a
+	   real allocation -- except for methods 3/4, whose reorder step frees its
+	   input. Methods 0 and 1 read through decompress0's 4 KB window instead
+	   of a flat copy of the whole compressed block, and MUST when the build
+	   streams method 2: decrypt2 then takes a stream descriptor, not a buffer. */
+	if (compressionMethod == 3 || compressionMethod == 4)
+		result->data = (unsigned char*)sci_malloc(result->size);
+	else
+		result->data = pico_decompress_alloc(result->type, result->size);
+	if (!result->data) { /* graceful sound path in pico_decompress_alloc */
+		result->status = SCI_STATUS_NOMALLOC;
+		return SCI_ERROR_DECOMPRESSION_INSANE;
+	}
+#  ifdef PICO_STREAM_DECOMPRESS
+	{
+		extern int pico_stream_decompress01(guint8 *dest, int resh, int method,
+						    unsigned int complength, int size);
+		int rc = pico_stream_decompress01(result->data, resh, compressionMethod,
+						  compressedLength, result->size);
+		if (rc >= 0) {
+			if (rc) {
+				if (!PICO_DECOMP01_IS_LENT(result->data))
+					free(result->data);
+				result->data = NULL;
+				result->status = SCI_STATUS_NOMALLOC;
+				return (rc == SCI_ERROR_IO_ERROR) ? rc : SCI_ERROR_DECOMPRESSION_OVERFLOW;
+			}
+			result->status = SCI_STATUS_ALLOCATED;
+			return 0;
+		}
+	}
+#  endif
+	buffer = (guint8*)sci_malloc_sram(compressedLength);
+	if (read(resh, buffer, compressedLength) != compressedLength) {
+		if (!PICO_DECOMP01_IS_LENT(result->data))
+			free(result->data);
+		result->data = NULL;
+		free(buffer);
+		return SCI_ERROR_IO_ERROR;
+	};
+#else
 	buffer = (guint8*)sci_malloc_sram(compressedLength);
 	result->data = (unsigned char*)sci_malloc(result->size);
 
@@ -569,6 +623,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 		free(buffer);
 		return SCI_ERROR_IO_ERROR;
 	};
+#endif
 
 
 #ifdef _SCI_DECOMPRESS_DEBUG
@@ -585,7 +640,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 0: /* no compression */
 		if (result->size != compressedLength) {
-			free(result->data);
+			DECOMP01_FREE_DATA(result->data);
 			result->data = NULL;
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -597,7 +652,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 1: /* Some huffman encoding */
 		if (decrypt2(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -609,7 +664,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 	case 2: /* ??? */
 		decryptinit3();
 		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -621,7 +676,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 	case 3: 
 		decryptinit3();
 		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -634,7 +689,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 	case 4:
 		decryptinit3();
 		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -648,7 +703,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 		fprintf(stderr,"Resource %s.%03hi: Compression method SCI1/%hi not "
 			"supported!\n", sci_resource_types[result->type], result->number,
 			compressionMethod);
-		free(result->data);
+		DECOMP01_FREE_DATA(result->data);
 		result->data = 0; /* So that we know that it didn't work */
 		result->status = SCI_STATUS_NOMALLOC;
 		free(buffer);

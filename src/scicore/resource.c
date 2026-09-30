@@ -45,9 +45,12 @@
 
 /* On Pico, decompress0 hands the permanent pic/view decompress scratch
    (operations.c) out as res->data; it must never be sci_free'd or the next
-   decode would reuse a freed block.  Every res->data free site guards on this. */
+   decode would reuse a freed block.  Every res->data free site guards on this.
+   The same goes for a lent buffer (g_pico_decompress_borrow: visual[0] during
+   a VGA pic load). */
 #ifdef HAVE_PICO
-#	define PICO_IS_DECOMPRESS_SCRATCH(p) ((unsigned char*)(p) == g_pico_decompress_scratch)
+#	define PICO_IS_DECOMPRESS_SCRATCH(p) ((unsigned char*)(p) == g_pico_decompress_scratch \
+		|| ((p) && (unsigned char*)(p) == g_pico_decompress_borrow))
 #else
 #	define PICO_IS_DECOMPRESS_SCRATCH(p) (0)
 #endif
