@@ -372,8 +372,9 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   colour persistence, not the priority bake as previously recorded: `[V]` off (routing off) makes them disappear, so
   it is tied to the composed-surface routing. A desktop trace (2026-09-29) cleared the invalidation rules and points at
   the order around the picture change / text save-unders; see pico-render.md. Cosmetic, parked. (render)
-- **Colonel's Bequest** — an ENGINE bug (desktop FreeSCI renders the same): dialog box FIXED 2026-09-30 (text controls
-  now erase their rect, `sci_widgets.c`); sticky `kDrawCel` corners still open, awaiting a pico-286 reference photo; fingerprints now show by default (PSRAM working priority map, 2026-09-29); plays with
+- **Colonel's Bequest** — windows FIXED 2026-09-30 (box, frame, sticky corners): the kernel `Graph` (0x70) was a no-op
+  because CB's vocab 999 leaves that slot unnamed -- **KQ4 and PQ2 too**; `vocab_debug.c` now fills unnamed slots from
+  the SCI0 default table. Re-test KQ4/PQ2 dialogs on the device (pico-render.md); fingerprints now show by default (PSRAM working priority map, 2026-09-29); plays with
   sound since the 2026-09 memory work (it used to hit true exhaustion). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)
 - **KQ4 with sound** now runs (2026-09-27: after the const-table move, and again on `33be492c` with
@@ -444,6 +445,7 @@ The FreeSCI gfx pipeline internally treats alpha=0 as opaque and alpha=255 as tr
 
 ## Known pre-existing engine warnings (not regressions)
 - `kNOP: Kernel function 0x71 invoked: unmapped` — SCI0 quirk
+  (0x71 only; `Kernel function [Unknown][70] unmapped` would mean `Graph` is lost -- fixed in `vocab_debug.c`)
 - `Could not map 'vol'/'pri'/etc. to any selector` — selector mapping for this game version
 - `VM: Attempt to use invalid param variable` — SCI script issue in SQ3
 - `Looking up song handle failed` — SCI sound engine edge case

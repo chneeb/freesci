@@ -315,6 +315,26 @@ static char** _vocabulary_get_knames0alt(int *names, resource_t *r)
 }
 
 
+/* Early SCI0 games (Colonel's Bequest) end their kernel name table at
+** TimesCot (0x6f), so the "mystery function" placeholder lands on 0x70 -- the
+** slot of Graph in every SCI0 interpreter -- and all Graph calls (fill box, line,
+** save/restore box) became no-ops. Sierra's interpreter dispatches by number, not
+** by name, so give any unnamed slot the standard SCI0 name when there is one.
+*/
+static char** _vocabulary_fill_unnamed_knames0(char **t, int names)
+{
+	int i;
+
+	for (i = 0; i < names && i < SCI0_KNAMES_DEFAULT_ENTRIES_NR; i++)
+		if (t[i] && !strcmp(t[i], SCRIPT_UNKNOWN_FUNCTION_STRING)
+		    && strcmp(sci0_default_knames[i], SCRIPT_UNKNOWN_FUNCTION_STRING)) {
+			sci_free(t[i]);
+			t[i] = sci_strdup(sci0_default_knames[i]);
+		}
+
+	return t;
+}
+
 static char** vocabulary_get_knames0(resource_mgr_t *resmgr, int* names)
 {
 	char** t;
@@ -336,8 +356,10 @@ static char** vocabulary_get_knames0(resource_mgr_t *resmgr, int* names)
 
 	count=getInt(r->data);
 
-	if (count > 1023)
-		return _vocabulary_get_knames0alt(names, r);
+	if (count > 1023) {
+		t = _vocabulary_get_knames0alt(names, r);
+		return _vocabulary_fill_unnamed_knames0(t, *names);
+	}
 
 	if (count < SCI0_KNAMES_WELL_DEFINED) {
 		empty_to_add = SCI0_KNAMES_WELL_DEFINED - count;
@@ -362,7 +384,7 @@ static char** vocabulary_get_knames0(resource_mgr_t *resmgr, int* names)
 
 	t[count+empty_to_add]=0;
 	*names=count + empty_to_add;
-	return t;
+	return _vocabulary_fill_unnamed_knames0(t, *names);
 }
 
 /*NOTE: Untested*/

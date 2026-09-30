@@ -1368,28 +1368,39 @@ panels never enter the composed surface.
 **Next step if revisited:** one device run of the SQ3 intro up to the credits with `FSCI_PROBE_GFX` (`[pstat]` static
 buffer swaps, `[pupd]` flush/BACK-restore rects, `[ovl]`), to see which restore brings the panels back.
 
-### Colonel's Bequest windows (2026-09-30): same on desktop FreeSCI -- an engine bug, not the Pico port
+### Colonel's Bequest windows (2026-09-30): `Graph` was never called -- an engine bug, not the Pico port
 
-Desktop FreeSCI renders CB's windows exactly like the PicoCalc (ragged black strips behind each text line, no box,
-corner ornaments left behind after the window closes), so this is upstream engine behaviour.
+Symptoms (PicoCalc and desktop FreeSCI alike): ragged black strips behind each text line instead of a box, no frame,
+and the corner ornaments left behind after the window closes.
 
-**How CB draws a window** (desktop trace: `kGraph` / `kDrawCel` / `kNewWindow` / `kDisposeWindow` logged, reached by
-restoring a device savegame from `~/.freesci/CB1/save_0` -- `freesci --gamedir <cb> --run CB1 save_0` -- and a
-temporary SDL-driver harness that types keys and saves screenshots, since the intro's copy protection needs input):
-four `kDrawCel` corner ornaments (view 657, loops 0/1, cels 0/1) about 8 px outside the window's corners, then
-`kNewWindow` with **flags 0x81** (TRANSPARENT + the 0x80 "script draws it" style), foreground 15, background 0. Inside
-it, text and edit controls (`_k_draw_control`). Closing: `kDisposeWindow` only -- no `kGraph` restore. Note: FreeSCI's
-`kNOP` warning has no trailing newline, so a trace line printed right after it gets glued onto its line.
+**Root cause: CB's kernel name table (vocab 999) ends at `TimesCot` (0x6f).** FreeSCI appends its "mystery function"
+placeholder `[Unknown]` after the last name, which put it on 0x70 -- the slot of `Graph` in every SCI0 interpreter.
+So `Graph` mapped to `kNOP` and every call did nothing: the fill box, the eight frame lines (colour 31), save box,
+restore box and redraw box. KQ4 and PQ2 have the same short table (`Kernel function [Unknown][70] unmapped` at
+startup); SQ3 names `Graph` and its placeholder sits on 0x71 as intended. Sierra's interpreter dispatches by number,
+and ScummVM ignores vocab 999 for SCI0 altogether. Fix: `vocabulary_get_knames0` (`vocab_debug.c`) gives any
+`[Unknown]` slot the standard SCI0 name from `sci0_default_knames` when that table has one. Now CB/KQ4/PQ2 report
+`Handled 113/113`, SQ3 is unchanged.
 
-**Fixed: the black box.** With a TRANSPARENT window nothing fills the window itself (FreeSCI agrees with Sierra here);
-the box comes from the text control. Sierra's interpreter (as ScummVM implements it) erases a text/edit control's
-rectangle in the port's background colour before drawing the text; FreeSCI only filled behind each line.
-`_sciw_add_text_to_list` and `sciw_new_edit_control` (`sci_widgets.c`) now add a flat box in that colour first.
-Desktop: CB's description sits on a solid black text block. Regression check: SQ3's `look` dialog and parser line are
-pixel-identical to the old build (a normal window is already filled in the same colour). All platforms; `.bss`
-unchanged.
+How CB draws a window (kernel-call trace, desktop): `SetPort 0`; `Graph` save box, fill box (black) over the frame
+rectangle; four `DrawCel` corners (view 657); eight `Graph` lines; `Graph` update box; `NewWindow` flags 0x81
+(transparent, script-drawn) with the text controls inside. Closing: `SetPort 0`, `Graph` restore box (which also
+frees the corner and line widgets), `Graph` redraw box, `DisposeWindow`. After the fix the desktop render matches a
+screenshot of Sierra's interpreter (filled box, double white frame, ornaments on its corners) and nothing is left on
+screen after closing. FreeSCI's save box is a widget snapshot (serial number + rectangle), not pixels, so it costs
+no SRAM on the Pico. `.bss` unchanged.
 
-**Still open: the corners stay after the window closes.** `kDrawCel` adds them as permanent view widgets to the
-current port (port 0 here), so every redraw paints them again. How Sierra removes them on close (each corner overlaps
-the window rectangle only partly) is not clear from the code; a reference photo of the same moments in pico-286
-(Sierra's own interpreter) should decide the fix. Also compare the gap between the black text block and the corners.
+**Tracing lessons.** The first trace printed inside `kGraph` and therefore saw no calls at all, which read as "the
+script does not use Graph" -- trace at the VM's kernel dispatch (`vm.c`, name + args) instead, which also shows the
+name each slot really got. FreeSCI's `kNOP` warning has no trailing newline, so a trace line printed right after it
+gets glued onto its line. Harness: restore a device savegame (`freesci --gamedir <cb> --run CB1 save_0`, save from
+`~/.freesci/CB1/save_0`) and a temporary SDL-driver hook that types keys and saves screenshots, because CB's intro
+needs copy-protection input.
+
+**Also changed: text and edit controls erase their rectangle first** (`_sciw_add_text_to_list`,
+`sciw_new_edit_control` in `sci_widgets.c`), as Sierra's interpreter does (ScummVM erases the rect in
+`kernelDrawText`); FreeSCI only filled behind each line. Found while chasing the missing box, before the `Graph`
+cause; kept because it is the correct behaviour. SQ3's `look` dialog and parser line are pixel-identical to before.
+
+**Re-test on the device:** KQ4 and PQ2 now execute `Graph` for the first time -- some PQ2 dialog/overlay symptoms
+worked around by the composed surface may have come from the missing restore/redraw boxes.
