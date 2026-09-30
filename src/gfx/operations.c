@@ -310,7 +310,15 @@ _gfxop_grab_pixmap(gfx_state_t *state, gfx_pixmap_t **pxmp, int x, int y,
 				(*pxmp)->data = NULL;
 			}
 #else
-			gfx_pixmap_free_data(*pxmp);
+			/* A grabbed pixmap's data belong to the driver (SDL2 allocates a
+			   surface's pixels itself), so let the driver release them; a plain
+			   free() aborted Jones in the Fast Lane when its cursor grew. */
+			if (((*pxmp)->flags & GFX_PIXMAP_FLAG_INSTALLED)
+			    && (state->driver->capabilities & GFX_CAPABILITY_PIXMAP_REGISTRY)) {
+				state->driver->unregister_pixmap(state->driver, *pxmp);
+				(*pxmp)->flags &= ~GFX_PIXMAP_FLAG_INSTALLED;
+			} else
+				gfx_pixmap_free_data(*pxmp);
 			(*pxmp)->data = NULL;
 #endif
 		}

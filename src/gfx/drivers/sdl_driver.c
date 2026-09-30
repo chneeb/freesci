@@ -830,10 +830,20 @@ sdl_grab_pixmap(struct _gfx_driver *drv, rect_t src, gfx_pixmap_t *pxm,
 		if (sdl_blit_surface(drv, S->visual[1], &srect, temp, &drect))
 			SDLERROR("grab_pixmap:  grab blit failed!\n");
 
+		/* Release what the pixmap held before. After an earlier grab its data are
+		   the old surface's pixels, which SDL2 allocates itself (aligned), so they
+		   must go with SDL_FreeSurface, never free() -- a second grab into the same
+		   pixmap (SCI1 cursors) aborted with "double free or corruption". */
+		if (pxm->internal.info && pxm->internal.handle == SCI_SDL_HANDLE_GRABBED)
+			SDL_FreeSurface((SDL_Surface *) pxm->internal.info);
+		else {
+			if (pxm->internal.info)
+				SDL_FreeSurface((SDL_Surface *) pxm->internal.info);
+			free(pxm->data);
+		}
 		pxm->internal.info = temp;
 		pxm->internal.handle = SCI_SDL_HANDLE_GRABBED;
 		pxm->flags |= GFX_PIXMAP_FLAG_INSTALLED | GFX_PIXMAP_FLAG_EXTERNAL_PALETTE | GFX_PIXMAP_FLAG_PALETTE_SET;
-		free(pxm->data);
 		pxm->data = (byte *) temp->pixels;
 
 		DEBUGPXM("Grabbed surface %p (%dx%d)(%dx%d)\n",
