@@ -526,6 +526,29 @@ static void pico_exit(struct _gfx_driver *drv)
     drv->state = NULL;
 }
 
+/* VGA (SCI01) games: the palette slots are the picture's own 256 colours (set by
+   its SET_PALETTE opcode), or the static palette (palette 999) when it sets
+   none -- exactly what desktop draws the picture with. visual[0] then holds VGA
+   indices directly, and 256-colour cels map through the identity LUT in
+   pico_blit_indexed, as they index the system palette in Sierra's interpreter.
+   Called from gfxop_new_pic in place of pico_setup_sci0_palette. */
+void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int colors_nr)
+{
+    struct _pico_state *ps = (struct _pico_state *)drv->state;
+    if (!ps || !colors) return;
+    for (int i = 0; i < 256; i++) {
+        if (i < colors_nr) {
+            ps->palette[i][0] = colors[i].r;
+            ps->palette[i][1] = colors[i].g;
+            ps->palette[i][2] = colors[i].b;
+        } else
+            ps->palette[i][0] = ps->palette[i][1] = ps->palette[i][2] = 0;
+    }
+#ifdef PICO_LCD_16BIT
+    pico_rebuild_pal565(ps);
+#endif
+}
+
 /* Called from gfxop_new_pic after gfxr_get_pic populates gfx_sci0_pic_colors[].
    Fills ps->palette[0..255] so flush_region produces correct RGB output. */
 void pico_setup_sci0_palette(gfx_driver_t *drv)

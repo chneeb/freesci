@@ -134,6 +134,7 @@ pico_print_largest(const char *when, int nr)
 }
 #endif
 extern void pico_setup_sci0_palette(gfx_driver_t *drv);
+extern void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int colors_nr);
 
 /* Free the permanent decode scratches when a game fully exits to the chooser.
    They are never freed during a game (the whole point of the permanent-scratch
@@ -2684,9 +2685,19 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	pico_priority_seed();   /* working map := the new room's static map */
 #endif
 
-	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors.
-	   Must happen before pico_render_background calls flush_region. */
-	pico_setup_sci0_palette(state->driver);
+	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors
+	   (SCI0) or the picture's own palette (VGA). Must happen before
+	   pico_render_background calls flush_region. */
+	if (state->version >= SCI_VERSION_01_VGA) {
+		gfx_pixmap_t *vm = state->pic ? state->pic->visual_map : NULL;
+
+		if (vm && vm->colors)
+			pico_setup_vga_palette(state->driver, vm->colors, vm->colors_nr);
+		else
+			pico_setup_vga_palette(state->driver, state->static_palette,
+					       state->static_palette_entries);
+	} else
+		pico_setup_sci0_palette(state->driver);
 
 	/* Allocate visual[0] now (the freed 64KB block is available) and render
 	   the background from PSRAM so the room art appears immediately. */

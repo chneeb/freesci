@@ -59,3 +59,20 @@ the lent-buffer pointer and size).
 
 Not done yet: method 2 (`decrypt3`) still reads a flat input (Jones: 240 resources, up to 27.5 KB), the palette is
 still the EGA mapping on the LCD (step 3), VGA views have no PSRAM offload (step 4). Nothing flashed yet.
+
+## Step 3 -- 256-colour palette on the LCD
+
+The driver already works in 256 palette slots (`palette[256][3]`, `pal565` for the 16-bit LCD path) and `visual[0]`
+holds slot numbers; SCI0 fills the slots from the 256 dithered EGA combinations (`pico_setup_sci0_palette`). For VGA
+games `gfxop_new_pic` now calls `pico_setup_vga_palette` with the picture's own 256 colours (its `SET_PALETTE`
+opcode; `gfxr_read_pal1` always returns all 256 entries), or the static palette 999 when it sets none -- what
+desktop draws the picture with. Nothing else needed: `pico_blit_indexed` already uses the identity LUT for
+256-colour pixmaps (VGA cels index the system palette, as in Sierra's interpreter), resolves text/window colours to
+the nearest slot, and takes transparency from each pixmap's own `color_key` (the VGA cel header). `kPalette`
+subfunction 3 (Jones calls it) is unimplemented on desktop too. The picture colours are the ones `visdiff DUMP`
+renders (same pic-palette mapping), which match desktop. `.bss` unchanged (30,840).
+
+Known risk before a device run: VGA views already get the Pico's cel-to-PSRAM offload (it runs after the version
+switch), but a view is decoded completely first -- all cels in SRAM at once, plus the decompressed resource, plus
+decrypt3's flat compressed input. For the largest Jones view (view.711: 27.5 KB compressed, 34.7 KB decompressed)
+that is well past the heap margin; an OOM halts legibly. That is step 4.
