@@ -2017,6 +2017,17 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 			case PIC_SCI1_OPX_SET_PALETTE:
 				p0printf("Set palette @%d\n", pos);
 				pic->visual_map->flags &= ~GFX_PIXMAP_FLAG_EXTERNAL_PALETTE;
+#ifdef HAVE_PICO
+				if (_pdc) {
+					/* The pic lives in PSRAM (resource == NULL): page the
+					   palette into a small buffer; gfxr_read_pal1 copies it. */
+					byte *_pb = (byte *)sci_malloc(SCI1_PALETTE_SIZE);
+					psram_load(_pdc->addr + pos, _pb, SCI1_PALETTE_SIZE);
+					pic->visual_map->colors = gfxr_read_pal1(resid, &pic->visual_map->colors_nr,
+										 _pb, SCI1_PALETTE_SIZE);
+					free(_pb);
+				} else
+#endif
 				pic->visual_map->colors = gfxr_read_pal1(resid, &pic->visual_map->colors_nr,
 									 resource+pos, SCI1_PALETTE_SIZE);
 				pos += SCI1_PALETTE_SIZE;
@@ -2168,8 +2179,8 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 			case PIC_SCI1_OPX_PRIORITY_TABLE_EQDIST:
 			{
-				int first = getInt16(resource + pos);
-				int last = getInt16(resource + pos + 2);
+				int first = (short) _RU16(pos);
+				int last = (short) _RU16(pos + 2);
 				int nr;
 				int *pri_table;
 
