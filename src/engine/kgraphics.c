@@ -2049,21 +2049,22 @@ kEditControl(state_t *s, int funct_nr, int argc, reg_t *argv)
 				PUT_SEL32V(obj, cursor, cursor); /* Write back cursor position */
 			}
 
-		case K_CONTROL_ICON:
-		case K_CONTROL_BOX:
-		case K_CONTROL_BUTTON:
 			if (event.segment) PUT_SEL32V(event, claimed, 1);
 			_k_draw_control(s, obj, 0);
 			return NULL_REG;
 			break;
 
-		case K_CONTROL_TEXT: {
-			int state = GET_SEL32V(obj, state);
-			PUT_SEL32V(obj, state, state | CONTROL_STATE_DITHER_FRAMED);
-			_k_draw_control(s, obj, 0);
-			PUT_SEL32V(obj, state, state);
-		}
-		break;
+		/* Sierra's interpreter only processes edit controls here (as ScummVM
+		** implements it) and ignores every other type. FreeSCI used to redraw
+		** them, in whatever port happened to be current: Jones in the Fast
+		** Lane's menu loop calls EditControl on its icon buttons after
+		** restoring the saved port (port 0), which drew them at their
+		** window-relative coordinates on the full screen. */
+		case K_CONTROL_ICON:
+		case K_CONTROL_BOX:
+		case K_CONTROL_BUTTON:
+		case K_CONTROL_TEXT:
+			break;
 
 		default:
 			SCIkwarn(SCIkWARNING, "Attempt to edit control type %d\n", ct_type);

@@ -107,3 +107,22 @@ SCI1 game shows a clear message instead of a mystery HardFault. Desktop is untou
 **Awaiting device retest** (flash + load Jones → expect the LCD "SCI1/VGA game not supported" halt, not a
 HardFault).
 
+
+## Jones in the Fast Lane on desktop (2026-09-30)
+
+Jones (VGA floppy, interpreter 1.000.060, detected as `SCI_VERSION_01_VGA`) now plays on desktop, keyboard only
+(`--disable-mouse`, arrows + Enter), through character select, goals and the first turns. Three desktop/engine bugs:
+
+- **Cursor save-under freed with `free()`** -- twice. `sdl_grab_pixmap` freed the pixmap's previous data even when it
+  was an earlier grab's SDL surface pixels (SDL2 allocates those itself), and `_gfxop_grab_pixmap` did the same when
+  a larger cursor needed a bigger save-under. SCI0 games have one cursor size, so only SCI1 hit it ("double free or
+  corruption"). Both now release through the driver (`SDL_FreeSurface` / `unregister_pixmap`). The operations.c
+  change is in the non-Pico branch; Pico keeps its own path.
+- **`kEditControl` redrew non-edit controls** in whatever port was current. Sierra's interpreter only processes edit
+  controls there (ScummVM agrees). Jones' menu loop restores the saved port (port 0) before calling it on its icon
+  buttons, so arrow-key navigation drew a second set at window-relative coordinates on the full screen. Now icon/box/
+  button/text are ignored; edit controls still redraw after a key. SQ3/PQ2 look + restore dialogs pixel-identical.
+
+Found with the scratch key/screenshot harness plus an AddressSanitizer desktop build; the second free only showed
+on a real window (user's ASan run), not under the dummy video driver. Pico status is unchanged: VGA games still stop
+at the `gfxop_new_pic` guard. Open on desktop: Jones' speech panels show their text lines as black bars.

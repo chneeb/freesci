@@ -391,6 +391,8 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   `PICO_PWM_VOLUME` (default 50) sets the output ceiling. Drums: offline A/B renders (desktop synth taps + the
   exact `pico_pwm.c` output stage) and the trade-offs of interpolation / low-pass / a 22,050 Hz synth are in
   `pico-sound.md`; interpolation or a low-pass would cost almost nothing if revisited. (sound)
+- **SCI1/VGA on Pico** — not supported (legible halt in `gfxop_new_pic`). Jones in the Fast Lane (VGA, `SCI_VERSION_01_VGA`)
+  plays on DESKTOP since 2026-09-30, keyboard only; a Pico port would start on the Pimoroni target (pico-engine-fixes.md). (engine)
 - **Runtime actor-to-actor control writes** are a no-op (`state->control_map` NULL). (misc)
 - **396 MHz on PIO**: soak it before trusting it long-term; it is opt-in (`-DPICO_SYS_CLOCK_MHZ=396`). (clock)
 
