@@ -372,7 +372,8 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   colour persistence, not the priority bake as previously recorded: `[V]` off (routing off) makes them disappear, so
   it is tied to the composed-surface routing. A desktop trace (2026-09-29) cleared the invalidation rules and points at
   the order around the picture change / text save-unders; see pico-render.md. Cosmetic, parked. (render)
-- **Colonel's Bequest** — dialog fills transparent + sticky corners; fingerprints now show by default (PSRAM working priority map, 2026-09-29); plays with
+- **Colonel's Bequest** — an ENGINE bug (desktop FreeSCI renders the same): dialog box FIXED 2026-09-30 (text controls
+  now erase their rect, `sci_widgets.c`); sticky `kDrawCel` corners still open, awaiting a pico-286 reference photo; fingerprints now show by default (PSRAM working priority map, 2026-09-29); plays with
   sound since the 2026-09 memory work (it used to hit true exhaustion). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)
 - **KQ4 with sound** now runs (2026-09-27: after the const-table move, and again on `33be492c` with

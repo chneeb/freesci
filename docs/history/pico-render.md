@@ -1367,3 +1367,29 @@ panels never enter the composed surface.
 
 **Next step if revisited:** one device run of the SQ3 intro up to the credits with `FSCI_PROBE_GFX` (`[pstat]` static
 buffer swaps, `[pupd]` flush/BACK-restore rects, `[ovl]`), to see which restore brings the panels back.
+
+### Colonel's Bequest windows (2026-09-30): same on desktop FreeSCI -- an engine bug, not the Pico port
+
+Desktop FreeSCI renders CB's windows exactly like the PicoCalc (ragged black strips behind each text line, no box,
+corner ornaments left behind after the window closes), so this is upstream engine behaviour.
+
+**How CB draws a window** (desktop trace: `kGraph` / `kDrawCel` / `kNewWindow` / `kDisposeWindow` logged, reached by
+restoring a device savegame from `~/.freesci/CB1/save_0` -- `freesci --gamedir <cb> --run CB1 save_0` -- and a
+temporary SDL-driver harness that types keys and saves screenshots, since the intro's copy protection needs input):
+four `kDrawCel` corner ornaments (view 657, loops 0/1, cels 0/1) about 8 px outside the window's corners, then
+`kNewWindow` with **flags 0x81** (TRANSPARENT + the 0x80 "script draws it" style), foreground 15, background 0. Inside
+it, text and edit controls (`_k_draw_control`). Closing: `kDisposeWindow` only -- no `kGraph` restore. Note: FreeSCI's
+`kNOP` warning has no trailing newline, so a trace line printed right after it gets glued onto its line.
+
+**Fixed: the black box.** With a TRANSPARENT window nothing fills the window itself (FreeSCI agrees with Sierra here);
+the box comes from the text control. Sierra's interpreter (as ScummVM implements it) erases a text/edit control's
+rectangle in the port's background colour before drawing the text; FreeSCI only filled behind each line.
+`_sciw_add_text_to_list` and `sciw_new_edit_control` (`sci_widgets.c`) now add a flat box in that colour first.
+Desktop: CB's description sits on a solid black text block. Regression check: SQ3's `look` dialog and parser line are
+pixel-identical to the old build (a normal window is already filled in the same colour). All platforms; `.bss`
+unchanged.
+
+**Still open: the corners stay after the window closes.** `kDrawCel` adds them as permanent view widgets to the
+current port (port 0 here), so every redraw paints them again. How Sierra removes them on close (each corner overlaps
+the window rectangle only partly) is not clear from the code; a reference photo of the same moments in pico-286
+(Sierra's own interpreter) should decide the fix. Also compare the gap between the black text block and the corners.

@@ -310,6 +310,16 @@ _sciw_add_text_to_list(gfxw_list_t *list, gfxw_port_t *port, rect_t zone, char *
 		bgcolor = &(port->bgcolor);
 	}
 
+	/* Erase the control's whole rectangle in the background colour first, as
+	   Sierra's interpreter does before drawing a text control. The text widget
+	   only fills the background behind each line, so without this a window that
+	   does not fill itself (Colonel's Bequest's windows are TRANSPARENT and
+	   drawn by the script) shows the room through the gaps. In a normal window
+	   the port is already filled with this colour, so nothing changes there. */
+	if (bgcolor->mask & GFX_MASK_VISUAL)
+		list->add(GFXWC(list), GFXW(gfxw_new_box(port->visual->gfx_state, zone,
+							 *bgcolor, *bgcolor, GFX_BOX_SHADE_FLAT)));
+
 	list->add(GFXWC(list), GFXW(gfxw_new_text(port->visual->gfx_state, zone,
 						  font, text, align, ALIGN_TOP,
 						  *color1, *color2, *bgcolor, flags)));
@@ -405,6 +415,11 @@ sciw_new_edit_control(gfxw_port_t *port, reg_t ID, rect_t zone, char *text, int 
 	gfxw_set_id(GFXW(list), ID.segment, ID.offset);
 	zone.x = 1;
 	zone.y = 1;
+
+	/* Erase the edit field first, as for text controls (_sciw_add_text_to_list). */
+	if (port->bgcolor.mask & GFX_MASK_VISUAL)
+		list->add(GFXWC(list), GFXW(gfxw_new_box(port->visual->gfx_state, zone,
+							 port->bgcolor, port->bgcolor, GFX_BOX_SHADE_FLAT)));
 
 	sci_gettime(&foo, &draw_cursor);
 	draw_cursor = draw_cursor > 500000;
