@@ -296,7 +296,16 @@ get_pic_color(state_t *s, int color)
 
 	if (color == 255)
 		return &white;
-	else if (color < KERNEL_COLORS_NR)
+
+	/* A VGA colour index names an entry of the live palette, which the current
+	   picture sets; the static palette (resource 999) only fills what no picture
+	   has set yet. Jones in the Fast Lane's panel text asks for background 99:
+	   blue in the picture's palette, dark grey in the static one. */
+	if (color >= 0 && s->gfx_state->pic && s->gfx_state->pic->visual_map
+	    && color < s->gfx_state->pic->visual_map->colors_nr)
+		return &(s->gfx_state->pic->visual_map->colors[color]);
+
+	if (color < KERNEL_COLORS_NR)
 		return &(KERNEL_COLOR_PALETTE[color]); else
 		{
 			SCIkwarn(SCIkERROR, "Color index %d out of bounds for pic %d (%d max)",
