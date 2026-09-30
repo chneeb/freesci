@@ -125,4 +125,5 @@ Jones (VGA floppy, interpreter 1.000.060, detected as `SCI_VERSION_01_VGA`) now 
 
 Found with the scratch key/screenshot harness plus an AddressSanitizer desktop build; the second free only showed
 on a real window (user's ASan run), not under the dummy video driver. Pico status is unchanged: VGA games still stop
-at the `gfxop_new_pic` guard. Open on desktop: Jones' speech panels show their text lines as black bars.
+at the `gfxop_new_pic` guard. Panel text drawn as dark bars: fixed -- `get_pic_color` now uses the current picture's
+palette for VGA indices (was the static palette 999; colour 99 = dark grey there, panel blue in the picture).
