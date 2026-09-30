@@ -1402,5 +1402,7 @@ needs copy-protection input.
 `kernelDrawText`); FreeSCI only filled behind each line. Found while chasing the missing box, before the `Graph`
 cause; kept because it is the correct behaviour. SQ3's `look` dialog and parser line are pixel-identical to before.
 
-**Re-test on the device:** KQ4 and PQ2 now execute `Graph` for the first time -- some PQ2 dialog/overlay symptoms
-worked around by the composed surface may have come from the missing restore/redraw boxes.
+**KQ4 and PQ2 are not affected in practice:** their scripts never call `Graph` (disassembly of all 159 / 98 scripts:
+no `callk #Graph`), and restoring their savegames, opening a `look` message and closing it gives pixel-identical
+desktop screenshots with the fix on and off. In CB only scripts 000 and 981 (its window code) call it. So the PQ2
+dialog/overlay work on the composed surface stands; the fix only changes CB.

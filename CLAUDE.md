@@ -373,8 +373,8 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   it is tied to the composed-surface routing. A desktop trace (2026-09-29) cleared the invalidation rules and points at
   the order around the picture change / text save-unders; see pico-render.md. Cosmetic, parked. (render)
 - **Colonel's Bequest** — windows FIXED 2026-09-30 (box, frame, sticky corners): the kernel `Graph` (0x70) was a no-op
-  because CB's vocab 999 leaves that slot unnamed -- **KQ4 and PQ2 too**; `vocab_debug.c` now fills unnamed slots from
-  the SCI0 default table. Re-test KQ4/PQ2 dialogs on the device (pico-render.md); fingerprints now show by default (PSRAM working priority map, 2026-09-29); plays with
+  because CB's vocab 999 leaves that slot unnamed; `vocab_debug.c` now fills unnamed slots from the SCI0 default table
+  (KQ4/PQ2 share the short table but never call `Graph`, so they are unchanged -- pico-render.md); fingerprints now show by default (PSRAM working priority map, 2026-09-29); plays with
   sound since the 2026-09 memory work (it used to hit true exhaustion). (render)
 - **`old_screen` transition garbage** — needs a fixed PSRAM slot outside the bump arena. (render)
 - **KQ4 with sound** now runs (2026-09-27: after the const-table move, and again on `33be492c` with
