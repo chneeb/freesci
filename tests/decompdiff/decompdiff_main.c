@@ -40,6 +40,16 @@
          -Wl,--start-group $LIBS -Wl,--end-group -lSDL2 -lm -lz -lpthread -ldl
      ./decompdiff ~/Downloads/quest/sq3 ~/Downloads/quest/pq2 ~/Downloads/quest/kq4
 
+   SCI01 VGA games (branch pico-sci1): a game with a palette 999 resource is
+   compared as decompress01 -- stock against pico_decompress01_stream (methods
+   0-2 through the window), including the fd position afterwards. That needs a
+   second streaming copy, of decompress01.c, and the PSRAM stub:
+     cp ../../src/scicore/decompress01.c stream_decomp01.c
+     gcc -c <same flags> -DPICO_STREAM_METHODS=7 -include stream01prefix.h \
+         -o stream_decomp01.o stream_decomp01.c
+     ...link as above, adding stream_decomp01.o ../picodiff/psram_stub.c
+     ./decompdiff ~/Downloads/quest/jones
+
    Until the streaming path is written both copies are identical and this
    reports 0 differing -- which is the harness validating itself, exactly as
    visdiff did before the packing work began.
@@ -60,7 +70,7 @@
 int decompress0(resource_t *result, int resh, int sci_version);
 int stream_decompress0(resource_t *result, int resh, int sci_version);
 int decompress01(resource_t *result, int resh, int sci_version);
-int pico_stream_decompress01(guint8 *dest, int resh, int method,
+int pico_decompress01_stream(guint8 *dest, int resh, int method,
 			     unsigned int complength, int size);
 
 /* SCI01 mode (branch pico-sci1): set for a game with a palette 999 resource,
@@ -102,8 +112,9 @@ load_via(resource_t *res, int version, int use_stream,
 	lseek(fh, res->file_offset, SEEK_SET);
 	if (g_sci01) {
 		/* Stock decompress01 against what decompress01 does on the Pico for
-		   methods 0/1: read the header, then pico_stream_decompress01 (the 4 KB
-		   window). Other methods run stock on both sides. The fd position
+		   methods 0-2: read the header, then pico_decompress01_stream (the 4 KB
+		   window; method 2 is decrypt3). Reorder methods 3/4 run stock on both
+		   sides. The fd position
 		   afterwards must also match: the stream reads ahead. */
 		unsigned char hdr[8];
 		long pos_after;
@@ -115,10 +126,10 @@ load_via(resource_t *res, int version, int use_stream,
 			unsigned int dsz = hdr[4] | (hdr[5] << 8);
 			int m = hdr[6] | (hdr[7] << 8);
 
-			if (clen > 4 && (m == 0 || m == 1)) {
+			if (clen > 4 && m >= 0 && m <= 2) {
 				work.data = malloc(dsz ? dsz : 1);
 				work.size = dsz;
-				rc = pico_stream_decompress01(work.data, fh, m, clen - 4, dsz);
+				rc = pico_decompress01_stream(work.data, fh, m, clen - 4, dsz);
 				if (rc < 0) { /* not streamed in this build */
 					free(work.data); work.data = NULL;
 					lseek(fh, res->file_offset, SEEK_SET);

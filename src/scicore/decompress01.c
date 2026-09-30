@@ -26,6 +26,7 @@
 ***************************************************************************/
 /* Reads data from a resource file and stores the result in memory */
 
+#include <stdint.h>
 #include <sci_memory.h>
 #include <sciresource.h>
 
@@ -63,6 +64,18 @@ static gint16 curtoken, endtoken;
 
 
 guint32 gbits(int numbits,  guint8 * data, int dlen);
+
+#ifdef PICO_STREAM_DECOMPRESS
+/* Set while decrypt3 reads its input through decompress0.c's 4 KB window
+   instead of a flat copy of the compressed block (pico_decompress01_stream). */
+static int gbits_stream = 0;
+extern void pico_stream_begin(int fd, unsigned int total);
+extern guint8 pico_stream_byte(unsigned int i);
+extern void pico_stream_end(void);
+#  define GBITS_BYTE(data, i) (gbits_stream ? pico_stream_byte(i) : (data)[(i)])
+#else
+#  define GBITS_BYTE(data, i) ((data)[(i)])
+#endif
 
 void decryptinit3(void)
 {
@@ -161,7 +174,7 @@ guint32 gbits(int numbits,  guint8 * data, int dlen)
 	for(i=(numbits>>3)+1;i>=0;i--)
 		{
 			if (i+place < dlen)
-				bitstring |=data[place+i] << (8*(2-i));
+				bitstring |= GBITS_BYTE(data, place+i) << (8*(2-i));
 		}
 	/*  bitstring = data[place+2] | (long)(data[place+1])<<8
 	    | (long)(data[place])<<16;*/
@@ -524,6 +537,88 @@ byte *view_reorder(byte *inbuffer, int dsize)
 
 
 
+#ifdef PICO_STREAM_DECOMPRESS
+/* Decompress one SCI01 resource body (the 8-byte header already read) with
+   its input streamed through the 4 KB window: methods 0/1 via decompress0.c,
+   methods 2-4 via decrypt3, whose only input access is gbits reading strictly
+   forward (<= 3 bytes past the bit position). The reorder of methods 3/4 is
+   the caller's. Returns -1 if the method is not handled here, else 0 or an
+   SCI_ERROR_* code; leaves the fd where a flat read would have. Not gated on
+   HAVE_PICO so tests/decompdiff can prove it against the stock path. */
+int
+pico_decompress01_stream(guint8 *dest, int resh, int method, unsigned int complength, int size)
+{
+	extern int pico_stream_decompress01(guint8 *dest, int resh, int method,
+					    unsigned int complength, int size);
+	int rc;
+
+	if (method == 0 || method == 1)
+		return pico_stream_decompress01(dest, resh, method, complength, size);
+	if (method < 2 || method > 4)
+		return -1;
+	pico_stream_begin(resh, complength);
+	decryptinit3();
+	gbits_stream = 1;
+	rc = decrypt3(dest, NULL, size, complength) ? SCI_ERROR_DECOMPRESSION_OVERFLOW : 0;
+	gbits_stream = 0;
+	pico_stream_end();
+	return rc;
+}
+
+/* Decompress one SCI01 resource body (header already read) straight into PSRAM
+   at 'addr', staged through 'stage' (stage_size bytes): the output never needs
+   an SRAM copy of its own. Works for method 0 (chunked reads) and method 2,
+   because decrypt3 writes its output strictly forward and keeps all of its
+   state in statics, so it resumes across calls with a smaller 'length'.
+   Returns -1 for a method not handled here, else 0 or an SCI_ERROR_* code;
+   leaves the fd where a flat read would have. */
+int
+pico_decompress01_to_psram(int resh, int method, unsigned int complength, int size,
+			   uint32_t addr, guint8 *stage, int stage_size)
+{
+	extern void psram_store(uint32_t a, const uint8_t *s, size_t n);
+	int done = 0;
+
+	if (method == 0) {
+		long start = lseek(resh, 0, SEEK_CUR);
+
+		if ((int) complength != size)
+			return SCI_ERROR_DECOMPRESSION_OVERFLOW;
+		while (done < size) {
+			int want = size - done, got;
+
+			if (want > stage_size)
+				want = stage_size;
+			got = read(resh, stage, want);
+			if (got <= 0)
+				break;
+			psram_store(addr + done, stage, got);
+			done += got;
+		}
+		lseek(resh, start + complength, SEEK_SET);
+		return (done == size) ? 0 : SCI_ERROR_IO_ERROR;
+	}
+	if (method != 2)
+		return -1;
+
+	pico_stream_begin(resh, complength);
+	decryptinit3();
+	gbits_stream = 1;
+	while (done < size) {
+		int n = size - done;
+
+		if (n > stage_size)
+			n = stage_size;
+		decrypt3(stage, NULL, n, complength);
+		psram_store(addr + done, stage, n);
+		done += n;
+	}
+	gbits_stream = 0;
+	pico_stream_end();
+	return 0;
+}
+#endif
+
 int decompress01(resource_t *result, int resh, int sci_version)
 {
 	guint16 compressedLength, result_size;
@@ -589,9 +684,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 	}
 #  ifdef PICO_STREAM_DECOMPRESS
 	{
-		extern int pico_stream_decompress01(guint8 *dest, int resh, int method,
-						    unsigned int complength, int size);
-		int rc = pico_stream_decompress01(result->data, resh, compressionMethod,
+		int rc = pico_decompress01_stream(result->data, resh, compressionMethod,
 						  compressedLength, result->size);
 		if (rc >= 0) {
 			if (rc) {
@@ -601,6 +694,10 @@ int decompress01(resource_t *result, int resh, int sci_version)
 				result->status = SCI_STATUS_NOMALLOC;
 				return (rc == SCI_ERROR_IO_ERROR) ? rc : SCI_ERROR_DECOMPRESSION_OVERFLOW;
 			}
+			if (compressionMethod == 3)
+				result->data = view_reorder(result->data, result->size);
+			else if (compressionMethod == 4)
+				result->data = pic_reorder(result->data, result->size);
 			result->status = SCI_STATUS_ALLOCATED;
 			return 0;
 		}

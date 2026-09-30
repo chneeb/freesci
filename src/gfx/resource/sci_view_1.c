@@ -30,6 +30,52 @@
 #include <gfx_system.h>
 #include <gfx_resource.h>
 #include <gfx_tools.h>
+#ifdef HAVE_PICO
+#include "psram_alloc.h"
+/* The permanent 32 KB pic-priority decode scratch (operations.c), idle outside
+   pic decode -- borrowed per cel as in sci_view_0.c. */
+extern byte *g_pico_priority_scratch;
+#endif
+
+#if defined(HAVE_PICO) && defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
+#  define PICO_VIEW_TO_PSRAM 1
+/* A VGA view can live in PSRAM instead of SRAM (gfxr_draw_view1_psram,
+   Jones in the Fast Lane: 14 views are 16-35 KB decompressed). The decoder
+   below passes resource pointers around by offset (resource + cel_offset); for
+   a PSRAM view the base pointer is NULL, so a pointer IS its offset and every
+   read goes through a 512-byte cache over the PSRAM copy. Desktop and
+   SRAM-resident views read the pointer directly. */
+#define V1_CACHE 512
+static struct { uint32_t addr; int size; int base; byte buf[V1_CACHE]; } _v1c;
+static int _v1_psram = 0;
+
+static byte
+_v1_rb(unsigned int off)
+{
+	if (off >= (unsigned int) _v1c.size)
+		return 0;
+	if ((int) off < _v1c.base || (int) off >= _v1c.base + V1_CACHE) {
+		int n = _v1c.size - (int) off;
+		if (n > V1_CACHE)
+			n = V1_CACHE;
+		psram_load(_v1c.addr + off, _v1c.buf, n);
+		_v1c.base = (int) off;
+	}
+	return _v1c.buf[off - _v1c.base];
+}
+#  define VRB(p)   (_v1_psram ? _v1_rb((unsigned int)(size_t)(p)) : *(byte *)(p))
+#  define VR16(p)  (_v1_psram ? (gint16)(_v1_rb((unsigned int)(size_t)(p)) | (_v1_rb((unsigned int)(size_t)(p) + 1) << 8)) \
+			      : get_int_16(p))
+#  define VRU16(p) (_v1_psram ? (guint16)(_v1_rb((unsigned int)(size_t)(p)) | (_v1_rb((unsigned int)(size_t)(p) + 1) << 8)) \
+			      : get_uint_16(p))
+#  define VRCOPY(d, p, n) do { if (_v1_psram) { int _k; for (_k = 0; _k < (n); _k++) \
+		(d)[_k] = _v1_rb((unsigned int)(size_t)(p) + _k); } else memcpy((d), (p), (n)); } while (0)
+#else
+#  define VRB(p)   (*(byte *)(p))
+#  define VR16(p)  get_int_16(p)
+#  define VRU16(p) get_uint_16(p)
+#  define VRCOPY(d, p, n) memcpy((d), (p), (n))
+#endif
 
 #define V1_LOOPS_NR_OFFSET 0
 #define V1_MIRROR_MASK 2
@@ -59,7 +105,7 @@ decompress_sci_view(int id, int loop, int cel, byte *resource, byte *dest, int m
 		int linebase = 0;
 
 		while (linebase < pixmap_size && literal_pos < size && runlength_pos < size) {
-			int op = resource[runlength_pos];
+			int op = VRB(resource + runlength_pos);
 			int bytes;
 			int readbytes = 0;
 			int color;
@@ -90,7 +136,7 @@ decompress_sci_view(int id, int loop, int cel, byte *resource, byte *dest, int m
 */			
 			if (op==V1_RLE) 
 			{
-				color = resource[literal_pos];
+				color = VRB(resource + literal_pos);
 				NEXT_LITERAL_BYTE(1);
 			}
 
@@ -113,7 +159,7 @@ decompress_sci_view(int id, int loop, int cel, byte *resource, byte *dest, int m
 					}
 				} else {
 					writepos--;
-					*(dest + writepos) = *(resource + literal_pos);
+					*(dest + writepos) = VRB(resource + literal_pos);
 					NEXT_LITERAL_BYTE(1);
 					
 				}
@@ -127,7 +173,7 @@ decompress_sci_view(int id, int loop, int cel, byte *resource, byte *dest, int m
 	}
         else {
 		while (writepos < pixmap_size && literal_pos < size && runlength_pos < size) {
-			int op = resource[runlength_pos];
+			int op = VRB(resource + runlength_pos);
 			int bytes;
 			int readbytes = 0;
 
@@ -168,13 +214,13 @@ decompress_sci_view(int id, int loop, int cel, byte *resource, byte *dest, int m
 				if (op & V1_RLE_BG)
 					memset(dest + writepos, color_key, bytes);
 				else {
-					int color = resource[literal_pos];
+					int color = VRB(resource + literal_pos);
 
 					NEXT_LITERAL_BYTE(1);
 					memset(dest + writepos, color, bytes);
 				}
 			} else {
-				memcpy(dest + writepos, resource + literal_pos, bytes);
+				VRCOPY(dest + writepos, resource + literal_pos, bytes);
 				NEXT_LITERAL_BYTE(bytes);
 			}
 			writepos += bytes;
@@ -193,7 +239,7 @@ decompress_sci_view_amiga(int id, int loop, int cel, byte *resource, byte *dest,
 	int writepos = mirrored? xl - 1 : 0;
 
 	while (writepos < pixmap_size && pos < size) {
-		int op = resource[pos++];
+		int op = VRB(resource + pos); pos++;
 		int bytes;
 		int color;
 
@@ -242,17 +288,40 @@ decompress_sci_view_amiga(int id, int loop, int cel, byte *resource, byte *dest,
 gfx_pixmap_t *
 gfxr_draw_cel1(int id, int loop, int cel, int mirrored, byte *resource, int size, gfxr_view_t *view, int amiga_game)
 {
-	int xl = get_int_16(resource);
-	int yl = get_int_16(resource + 2);
-	int xhot = (gint8) resource[4];
-	int yhot = (guint8) resource[5];
+	int xl = VR16(resource);
+	int yl = VR16(resource + 2);
+	int xhot = (gint8) VRB(resource + 4);
+	int yhot = (guint8) VRB(resource + 5);
 	int pos = 8;
 	int pixmap_size = xl * yl;
-	gfx_pixmap_t *retval = gfx_pixmap_alloc_index_data(gfx_new_pixmap(xl, yl, id, loop, cel));
-	byte *dest = retval->index_data;
+	gfx_pixmap_t *retval;
+	byte *dest;
 	int decompress_failed;
+#ifdef HAVE_PICO
+	/* A cel of a real view (view != NULL; the pic decoder's embedded-view path
+	   passes NULL and keeps index_data) decodes into the idle 32 KB priority
+	   scratch and goes to PSRAM right after, as in sci_view_0.c: the SRAM peak
+	   is one cel, not the whole view (Jones in the Fast Lane: up to 85 KB of
+	   cels in one view, largest cel 20,496 B). index_data stays NULL so the
+	   error paths never free the scratch. */
+	int dest_is_scratch = 0;
 
-	retval->color_key = resource[6];
+	retval = gfx_new_pixmap(xl, yl, id, loop, cel);
+	if (view && xl > 0 && yl > 0 && pixmap_size <= ((GFXR_AUX_MAP_SIZE + 1) >> 1)
+	    && g_pico_priority_scratch) {
+		dest = g_pico_priority_scratch;
+		memset(dest, 0, pixmap_size);
+		dest_is_scratch = 1;
+	} else {
+		gfx_pixmap_alloc_index_data(retval);
+		dest = retval->index_data;
+	}
+#else
+	retval = gfx_pixmap_alloc_index_data(gfx_new_pixmap(xl, yl, id, loop, cel));
+	dest = retval->index_data;
+#endif
+
+	retval->color_key = VRB(resource + 6);
 	retval->xoffset = (mirrored)? xhot : -xhot;
 	retval->yoffset = -yhot;
 
@@ -283,6 +352,17 @@ gfxr_draw_cel1(int id, int loop, int cel, int mirrored, byte *resource, int size
 		return NULL;
 	}
 
+#ifdef HAVE_PICO
+	if (view) {
+		size_t sz = (size_t) pixmap_size;
+		retval->psram_addr  = psram_alloc(sz);
+		retval->psram_valid = 1;
+		psram_store(retval->psram_addr, dest, sz);
+		if (!dest_is_scratch)
+			free(dest);
+		retval->index_data = NULL;
+	}
+#endif
 	return retval;
 }
 
@@ -290,10 +370,10 @@ static int
 gfxr_draw_loop1(gfxr_loop_t *dest, int id, int loop, int mirrored, byte *resource, int offset, int size, gfxr_view_t *view, int amiga_game)
 {
 	int i;
-	int cels_nr = get_int_16(resource + offset);
+	int cels_nr = VR16(resource + offset);
 
-	if (get_uint_16(resource + offset + 2)) {
-		GFXWARN("View %02x:(%d): Gray magic %04x in loop, expected white\n", id, loop, get_uint_16(resource + offset + 2));
+	if (VRU16(resource + offset + 2)) {
+		GFXWARN("View %02x:(%d): Gray magic %04x in loop, expected white\n", id, loop, VRU16(resource + offset + 2));
 	}
 
 	if (cels_nr * 2 + 4 + offset > size) {
@@ -306,7 +386,7 @@ gfxr_draw_loop1(gfxr_loop_t *dest, int id, int loop, int mirrored, byte *resourc
 	dest->cels = (gfx_pixmap_t**)sci_malloc(sizeof(gfx_pixmap_t *) * cels_nr);
 
 	for (i = 0; i < cels_nr; i++) {
-		int cel_offset = get_uint_16(resource + offset + 4 + (i << 1));
+		int cel_offset = VRU16(resource + offset + 4 + (i << 1));
 		gfx_pixmap_t *cel;
 
 		if (cel_offset >= size) {
@@ -352,9 +432,9 @@ gfxr_draw_view1(int id, byte *resource, int size, gfx_pixmap_color_t *static_pal
 	view->ID = id;
 	view->flags = 0;
 
-	view->loops_nr = resource[V1_LOOPS_NR_OFFSET];
-	palette_offset = get_uint_16(resource + V1_PALETTE_OFFSET);
-	mirror_mask = get_uint_16(resource + V1_MIRROR_MASK);
+	view->loops_nr = VRB(resource + V1_LOOPS_NR_OFFSET);
+	palette_offset = VRU16(resource + V1_PALETTE_OFFSET);
+	mirror_mask = VRU16(resource + V1_MIRROR_MASK);
 
 	if (view->loops_nr * 2 + V1_FIRST_LOOP_OFFSET > size) {
 		GFXERROR("View %04x: Not enough space in resource to accomodate for the claimed %d loops\n", id, view->loops_nr);
@@ -379,8 +459,23 @@ gfxr_draw_view1(int id, byte *resource, int size, gfx_pixmap_color_t *static_pal
 		free(view);
 		return NULL;
 	    }   
-	    if (!(view->colors = gfxr_read_pal1(id, &(view->colors_nr),
-						resource + palette_offset, size - palette_offset))) {
+	    byte *pal_src = resource + palette_offset;
+#ifdef PICO_VIEW_TO_PSRAM
+	    /* PSRAM view: page the palette (to the end of the resource, as the
+	       desktop call reads) into a buffer; gfxr_read_pal1 copies it. */
+	    byte *pal_buf = NULL;
+	    if (_v1_psram) {
+		pal_buf = (byte *) sci_malloc(size - palette_offset);
+		VRCOPY(pal_buf, resource + palette_offset, size - palette_offset);
+		pal_src = pal_buf;
+	    }
+#endif
+	    view->colors = gfxr_read_pal1(id, &(view->colors_nr), pal_src, size - palette_offset);
+#ifdef PICO_VIEW_TO_PSRAM
+	    if (pal_buf)
+		free(pal_buf);
+#endif
+	    if (!view->colors) {
 		GFXERROR("view %04x: Palette reading failed. Aborting...\n", id);
 		free(view);
 		return NULL;
@@ -401,7 +496,7 @@ gfxr_draw_view1(int id, byte *resource, int size, gfx_pixmap_color_t *static_pal
 
 	for (i = 0; i < view->loops_nr; i++) {
 		int error_token = 0;
-		int loop_offset = get_uint_16(resource + V1_FIRST_LOOP_OFFSET + (i << 1));
+		int loop_offset = VRU16(resource + V1_FIRST_LOOP_OFFSET + (i << 1));
 
 		if (loop_offset >= size) {
 			GFXERROR("View %04x:(%d) supposed to be at illegal offset 0x%04x\n", id, i);
@@ -419,6 +514,25 @@ gfxr_draw_view1(int id, byte *resource, int size, gfx_pixmap_color_t *static_pal
 
 	return view;
 }
+
+#ifdef PICO_VIEW_TO_PSRAM
+/* Decode a VGA view whose decompressed resource sits in PSRAM at 'addr'
+   (scir_pico_load_to_psram): the same decoder, reading through the cache. */
+gfxr_view_t *
+gfxr_draw_view1_psram(int id, uint32_t addr, int size, gfx_pixmap_color_t *static_pal,
+		      int static_pal_nr)
+{
+	gfxr_view_t *view;
+
+	_v1c.addr = addr;
+	_v1c.size = size;
+	_v1c.base = -(V1_CACHE + 1);
+	_v1_psram = 1;
+	view = gfxr_draw_view1(id, NULL, size, static_pal, static_pal_nr);
+	_v1_psram = 0;
+	return view;
+}
+#endif
 
 #define V2_HEADER_SIZE 0
 #define V2_LOOPS_NUM 2

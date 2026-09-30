@@ -548,6 +548,14 @@ extern unsigned long long pico_perf_us(void);
 #endif
 
 #ifdef PICO_STREAM_DECOMPRESS
+/* The window for decompress01.c's LZW decoder (decrypt3/gbits), which lives in
+   another file: one stream at a time, like every decompression here. */
+static decomp_stream_t g_ext_stream;
+
+void pico_stream_begin(int fd, unsigned int total) { stream_init(&g_ext_stream, fd, total); }
+guint8 pico_stream_byte(unsigned int i) { return stream_at(&g_ext_stream, i); }
+void pico_stream_end(void) { stream_finish(&g_ext_stream); }
+
 /* decompress01 (SCI01 / VGA resources) through the same window. SCI01 method 0
    is a plain copy and method 1 is this file's Huffman decoder (SCI0 method 2),
    so both reuse the stream machinery above. Returns -1 if the method is not

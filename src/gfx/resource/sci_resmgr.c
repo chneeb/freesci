@@ -499,10 +499,37 @@ gfxr_view_t *
 gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int palette)
 {
 	resource_mgr_t *resmgr = (resource_mgr_t *) state->misc_payload;
-	resource_t *res = scir_find_resource(resmgr, sci_view, nr, 0);
+	resource_t *res = NULL;
 	int resid = GFXR_RES_ID(GFX_RESOURCE_TYPE_VIEW, nr);
-	gfxr_view_t *result;
+	gfxr_view_t *result = NULL;
 
+#if defined(HAVE_PICO) && defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
+#  define PICO_VIEW_TO_PSRAM 1
+#endif
+#ifdef PICO_VIEW_TO_PSRAM
+	/* (PIO only: the mapped target's default heap is PSRAM already.)
+	   VGA views go straight into PSRAM and are decoded from there, so no SRAM
+	   copy of the resource exists (Jones in the Fast Lane: 14 views are
+	   16-35 KB); each cel goes to PSRAM as it is decoded (sci_view_1.c). A
+	   resource the PSRAM loader does not handle falls back to the normal load. */
+	if (state->version == SCI_VERSION_01_VGA || state->version == SCI_VERSION_01_VGA_ODD) {
+		extern int scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
+						   uint32_t *addr, int *size);
+		extern gfxr_view_t *gfxr_draw_view1_psram(int id, uint32_t addr, int size,
+							  gfx_pixmap_color_t *static_pal, int static_pal_nr);
+		uint32_t vaddr;
+		int vsize;
+
+		if (scir_pico_load_to_psram(resmgr, sci_view, nr, &vaddr, &vsize) == 0) {
+			result = gfxr_draw_view1_psram(resid, vaddr, vsize, state->static_palette,
+						       state->static_palette_entries);
+			if (!result)
+				return NULL;
+		}
+	}
+	if (!result) {
+#endif
+	res = scir_find_resource(resmgr, sci_view, nr, 0);
 	if (!res || !res->data)
 		return NULL;
 
@@ -525,6 +552,9 @@ gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int pal
 		result=gfxr_draw_view11(resid, res->data, res->size); 
 		break;
 	}
+#ifdef PICO_VIEW_TO_PSRAM
+	} /* !result: normal load */
+#endif
 
 	if (state->version >= SCI_VERSION_01_VGA)
 	{

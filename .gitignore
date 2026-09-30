@@ -22,3 +22,10 @@ tests/drvdiff/*.ppm
 tests/decompdiff/stream_decomp.c
 tests/decompdiff/stream_decomp.o
 tests/decompdiff/decompdiff
+tests/decompdiff/stream_decomp01.c
+tests/decompdiff/stream_decomp01.o
+# viewdiff harness build products (pico_view1.c is a COPY of sci_view_1.c)
+tests/viewdiff/pico_view1.c
+tests/viewdiff/pico_view1.o
+tests/viewdiff/pico_pixmap.o
+tests/viewdiff/viewdiff

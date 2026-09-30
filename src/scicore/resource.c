@@ -1143,6 +1143,72 @@ scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res)
 	res->status = SCI_STATUS_NOMALLOC;
 }
 
+#if defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
+/* Load a resource's decompressed bytes straight into PSRAM (psram_alloc arena)
+   instead of res->data: for a VGA view of up to ~35 KB that has to be decoded
+   but never needs an SRAM copy (gfxr_draw_view1_psram reads it through a
+   cache). Handles only volume-sourced resources of the SCI01 family (the
+   decompress01 games) that are not already loaded, with method 0 or 2; the
+   output is staged through the idle decompress scratch. Returns 0 and fills
+   *addr/*size, or -1 when not handled -- the caller then loads it normally. */
+int
+scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
+			uint32_t *addr, int *size)
+{
+	extern int pico_decompress01_to_psram(int resh, int method, unsigned int complength,
+					      int size, uint32_t addr, guint8 *stage, int stage_size);
+	extern uint32_t psram_alloc(size_t n);
+	resource_t *res = scir_test_resource(mgr, type, number);
+	char filename[PATH_MAX];
+	guint8 hdr[8];
+	int fh, fh_cached = 0, rc;
+	unsigned int clen, dsz, method, id;
+
+	if (!res || res->status || !g_pico_decompress_scratch
+	    || decompressors[mgr->sci_version] != &decompress01
+	    || SCIR_SOURCE(res)->source_type != RESSOURCE_TYPE_VOLUME)
+		return -1;
+
+	strcpy(filename, SCIR_SOURCE(res)->location.file.name);
+#ifdef SCIR_KEEP_VOLUMES_OPEN
+	fh = scir_volume_open(SCIR_SOURCE(res), filename, &fh_cached);
+#else
+	fh = open(filename, O_RDONLY | O_BINARY);
+#endif
+	if (!IS_VALID_FD(fh))
+		return -1;
+	lseek(fh, res->file_offset, SEEK_SET);
+	if (read(fh, hdr, 8) != 8) {
+		if (!fh_cached)
+			close(fh);
+		return -1;
+	}
+	id = hdr[0] | (hdr[1] << 8);
+	clen = hdr[2] | (hdr[3] << 8);
+	dsz = hdr[4] | (hdr[5] << 8);
+	method = hdr[6] | (hdr[7] << 8);
+	if ((id >> 11) != (unsigned) type || (id & 0x7ff) != (unsigned) number
+	    || clen <= 4 || (method != 0 && method != 2)) {
+		if (!fh_cached)
+			close(fh);
+		return -1;
+	}
+
+	*addr = psram_alloc(dsz);
+	rc = pico_decompress01_to_psram(fh, method, clen - 4, dsz, *addr,
+					g_pico_decompress_scratch, PICO_DECOMPRESS_SCRATCH_SIZE);
+	if (!fh_cached)
+		close(fh);
+	if (rc) {
+		sciprintf("Error %d occured while reading %s.%03d to PSRAM\n",
+			  rc, sci_resource_types[type], number);
+		return -1;
+	}
+	*size = (int) dsz;
+	return 0;
+}
+#endif /* PICO_STREAM_DECOMPRESS && !PICO_PSRAM_MAPPED */
+
 void
 scir_free_all_lru(resource_mgr_t *mgr)
 {

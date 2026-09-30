@@ -76,3 +76,33 @@ Known risk before a device run: VGA views already get the Pico's cel-to-PSRAM of
 switch), but a view is decoded completely first -- all cels in SRAM at once, plus the decompressed resource, plus
 decrypt3's flat compressed input. For the largest Jones view (view.711: 27.5 KB compressed, 34.7 KB decompressed)
 that is well past the heap margin; an OOM halts legibly. That is step 4.
+
+## Step 4 -- views
+
+Measured first (scratch tool over every Jones view, decoded with `gfxr_draw_view1`): 90 views, 752 cels, largest cel
+20,496 B (50 cels > 16 KB, none > 32 KB), all cels of one view up to 85 KB (view 607), decompressed views up to
+34,693 B (14 over 16 KB). So "decode the whole view in SRAM, then offload" could never fit.
+
+- **4a -- LZW input streamed.** `gbits` reads strictly forward (<= 3 bytes past its bit position), so `decrypt3` now
+  reads through decompress0.c's 4 KB window (`pico_stream_begin/_byte/_end`); `pico_decompress01_stream` handles
+  methods 0-4 (reorder of 3/4 by the caller). That removes the last flat compressed-input buffer for Jones (views,
+  scripts, sounds: up to 27.5 KB).
+- **4b -- one cel at a time.** A cel of a real view (`view != NULL`; the pic decoder's embedded path passes NULL and
+  keeps `index_data`) decodes into the idle 32 KB priority scratch and goes to PSRAM immediately, as `sci_view_0.c`
+  already did for SCI0.
+- **4c -- the view never in SRAM.** `decrypt3` writes its output strictly forward and keeps its state in statics, so
+  it resumes across calls: `pico_decompress01_to_psram` decompresses a view straight into the PSRAM arena, staged
+  through the idle 16 KB decompress scratch; `scir_pico_load_to_psram` (resource.c) opens the volume like the normal
+  loader and returns -1 (normal load) for anything it does not handle. `gfxr_draw_view1_psram` runs the unchanged
+  decoder with a NULL base pointer, every read going through a 512-byte cache (`VRB/VR16/VRU16/VRCOPY` macros, direct
+  reads on desktop). PIO only (`PICO_STREAM_DECOMPRESS && !PICO_PSRAM_MAPPED`): the mapped target's heap is PSRAM.
+
+Verified offline with a new harness, `tests/viewdiff` (desktop stock path vs the Pico path over the PSRAM stub): all 90
+Jones views -- decompressed bytes, palette values, and per cel the geometry, hotspot, colour key and every pixel read
+back from PSRAM: 0 mismatches. It needs a Pico-layout pixmap: `gfx_pixmap_t` has trailing psram fields under
+HAVE_PICO (and `resource_t` is packed differently), so only `pico_view1.o` and a tiny `pico_pixmap.c` are HAVE_PICO
+compiles, and `-Wl,--wrap=gfx_new_pixmap` grows each desktop-allocated pixmap to the Pico layout. visdiff and
+decompdiff re-run: unchanged (0 differ across all five games).
+
+`.bss`: PIO 31,396 (+556: the 512-byte view cache and the second stream descriptor); Pimoroni unchanged at 29,624 (the
+PSRAM view path is not compiled there).
