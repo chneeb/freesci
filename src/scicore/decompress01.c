@@ -77,11 +77,50 @@ extern void pico_stream_end(void);
 #  define GBITS_BYTE(data, i) ((data)[(i)])
 #endif
 
+#ifdef HAVE_PICO
+/* The LZW tables (~20.5 KB) are needed only while one resource decompresses.
+   Once the 32 KB pic-priority scratch exists (gfxop_new_pic's first call),
+   they live in it: that scratch is busy only during a pic decode (after the
+   pic's resource is loaded) and a view's per-cel decode (after the view is
+   decompressed), and no LZW decompression runs inside either. Before it exists
+   -- the scripts loaded at game start -- they are a temporary allocation,
+   released after each decompression (decrypt3_release). They used to be a
+   permanent 20.5 KB (Jones in the Fast Lane census, 2026-10-01). */
+extern unsigned char *g_pico_priority_scratch;
+static int lzw_tables_owned = 0;
+
+static void
+decrypt3_release(void)
+{
+	if (lzw_tables_owned) {
+		free(tokens);
+		free(stak);
+		lzw_tables_owned = 0;
+	}
+	tokens = NULL;
+	stak = NULL;
+}
+#else
+#  define decrypt3_release() do { } while (0)
+#endif
+
 void decryptinit3(void)
 {
 	int i;
+#ifdef HAVE_PICO
+	if (g_pico_priority_scratch && !lzw_tables_owned) {
+		tokens = (struct tokenlist *) g_pico_priority_scratch;
+		stak = (gint8 *) (g_pico_priority_scratch + 0x1004 * sizeof(*tokens));
+	}
+	if (!tokens) {
+		tokens = (struct tokenlist*)sci_malloc(0x1004 * sizeof(*tokens));
+		stak = (gint8*)sci_malloc(0x1014);
+		lzw_tables_owned = 1;
+	}
+#else
 	if (!tokens) tokens = (struct tokenlist*)sci_malloc(0x1004 * sizeof(*tokens));
 	if (!stak) stak = (gint8*)sci_malloc(0x1014);
+#endif
 	lastchar = lastbits = bitstring = stakptr = 0;
 	numbits = 9;
 	curtoken = 0x102;
@@ -561,6 +600,7 @@ pico_decompress01_stream(guint8 *dest, int resh, int method, unsigned int comple
 	gbits_stream = 1;
 	rc = decrypt3(dest, NULL, size, complength) ? SCI_ERROR_DECOMPRESSION_OVERFLOW : 0;
 	gbits_stream = 0;
+	decrypt3_release();
 	pico_stream_end();
 	return rc;
 }
@@ -614,6 +654,7 @@ pico_decompress01_to_psram(int resh, int method, unsigned int complength, int si
 		done += n;
 	}
 	gbits_stream = 0;
+	decrypt3_release();
 	pico_stream_end();
 	return 0;
 }
@@ -621,6 +662,7 @@ pico_decompress01_to_psram(int resh, int method, unsigned int complength, int si
 
 int decompress01(resource_t *result, int resh, int sci_version)
 {
+	int rc3;
 	guint16 compressedLength, result_size;
 	guint16 compressionMethod;
 	guint8 *buffer;
@@ -760,7 +802,9 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 2: /* ??? */
 		decryptinit3();
-		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
+		rc3 = decrypt3(result->data, buffer, result->size, compressedLength);
+		decrypt3_release();
+		if (rc3) {
 			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
@@ -772,7 +816,9 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 3: 
 		decryptinit3();
-		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
+		rc3 = decrypt3(result->data, buffer, result->size, compressedLength);
+		decrypt3_release();
+		if (rc3) {
 			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
@@ -785,7 +831,9 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 4:
 		decryptinit3();
-		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
+		rc3 = decrypt3(result->data, buffer, result->size, compressedLength);
+		decrypt3_release();
+		if (rc3) {
 			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;

@@ -553,8 +553,9 @@ if(PLATFORM STREQUAL "pico")
     # gone (device OOM 2026-10-01: 8.5 KB free of 477 KB). Above the budget the
     # least recently used views are freed and re-decoded on demand, into the
     # same PSRAM. SCI0 games are not affected. set() and the define stay
-    # together (see PICO_SONG_MAX_BYTES above).
-    set(PICO_VGA_VIEW_BUDGET "49152" CACHE STRING "SRAM budget for cached decoded VGA views (PIO)")
+    # together (see PICO_SONG_MAX_BYTES above). 48 KB first; 32 KB since the
+    # census at the next OOM showed the cache holding ~38 KB of real SRAM.
+    set(PICO_VGA_VIEW_BUDGET "32768" CACHE STRING "SRAM budget for cached decoded VGA views (PIO)")
     if(NOT PICO_PSRAM_MAPPED)
         add_compile_definitions(GFXR_VIEW_BUDGET=${PICO_VGA_VIEW_BUDGET})
     endif()

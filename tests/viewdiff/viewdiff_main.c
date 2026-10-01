@@ -17,9 +17,12 @@
      gcc -c $CF -DHAVE_PICO=1 -DPICO_STREAM_DECOMPRESS=1 -include viewprefix.h \
          -I. -I../picodiff -o pico_view1.o pico_view1.c
      LIBS=$(find ../../build -name '*.a' | tr '\n' ' ')
-     gcc -c $CF -DHAVE_PICO=1 -o pico_pixmap.o pico_pixmap.c
-     gcc $CF -o viewdiff viewdiff_main.c pico_view1.o pico_pixmap.o \
-         ../picodiff/psram_stub.c ../decompdiff/stream_decomp.o ../decompdiff/stream_decomp01.o \
+     gcc -c $CF -DHAVE_PICO=1 -include stdint.h -o pico_pixmap.o pico_pixmap.c
+     cp ../../src/scicore/decompress01.c pico_decomp01.c   # HAVE_PICO: LZW tables in the scratch
+     gcc -c $CF -DHAVE_PICO=1 -DPICO_STREAM_DECOMPRESS=1 -DPICO_STREAM_METHODS=7 \
+         -include decomp01prefix.h -include stdint.h -o pico_decomp01.o pico_decomp01.c
+     gcc $CF -o viewdiff viewdiff_main.c pico_view1.o pico_pixmap.o pico_decomp01.o \
+         ../picodiff/psram_stub.c ../decompdiff/stream_decomp.o \
          -Wl,--wrap=gfx_new_pixmap \
          -Wl,--start-group $LIBS -Wl,--end-group -lSDL2 -lm -lz -lpthread -ldl
      ./viewdiff ~/Downloads/quest/jones

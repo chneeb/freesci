@@ -172,3 +172,28 @@ iterator (their existing PSRAM path): 1.36 M events, 0 mismatches; all slots rel
 Also from that run: the centre panel is where desktop puts it (black edge row 44, white bar 45-54, blue from 55).
 The real glitch: the bottom-row signs ("EMPLOYMENT OFFICE", "HI-TECH U") drawn twice ~10 px apart, covering the lower
 "1" boxes -- a Pico redraw path restoring background with a title-bar offset. Open.
+
+## Third and fourth device runs: the census at the first failure
+
+Run 3 (SCI1 songs in PSRAM) played much longer, then ran out completely (16 B free). The census build
+(`build-pico-sci1-census`, `-DFSCI_PROBE_MEM_CENSUS=ON`) twice ended in the SCI console instead of an OOM halt: a
+script's data allocation failed and returned NULL (a raw `malloc` path), the script came up empty ("does not have a
+dispatch table") and the next `send` hit the console. So the census now also dumps at the FIRST failed allocation of
+any kind (`census_first_failure` in `pico_mem_census.c`, census builds only).
+
+Board start (room 11 ready): 129-130 KB free, largest 116 KB. At the first failure: 2,680 B free, 436 KB live (+125 KB).
+Growth by site: view cel pixmap structs `gfx_tools.c:200` +29.6 KB (329 cels), scripts `seg_manager.c:242` +20.6 KB,
+LZW tables `decompress01.c:83/84` +20.5 KB (permanent since the first SCI01 LZW decompression), cached resource data
+`decompress0.c:82` 15 KB (within the resource manager's 32 KB LRU), int hash maps +13.5 KB (one 256-bucket map, 1 KB
+of pointers, per loaded script), VM tables +5 KB.
+
+Fixes:
+- The LZW tables live in the 32 KB priority scratch once it exists: it is busy only during a pic decode (after the
+  pic's resource loaded) and a view's per-cel decode (after the view decompressed), and no LZW decompression runs
+  inside either. Before the first pic (scripts at game start) they are a temporary allocation released after each
+  decompression (`decrypt3_release`). -20.5 KB. viewdiff now uses a HAVE_PICO copy of decompress01.c, so its LZW tables
+  sit in the same scratch the cel decode borrows: 90/90 views unchanged.
+- View budget 48 -> 32 KB (`PICO_VGA_VIEW_BUDGET`; existing build dirs need `-DPICO_VGA_VIEW_BUDGET=32768`).
+- Tried and reverted: int hash maps with 32 buckets on the Pico (-~23 KB). Savegames serialise every map's bucket array
+  with the compile-time count (`_cfsml_write/read_int_hash_map_t`), so a save from desktop or an older build (256) would
+  be read past a 32-bucket struct on restore. Would need a rehash on load.

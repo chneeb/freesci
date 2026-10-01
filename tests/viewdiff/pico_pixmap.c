@@ -35,3 +35,11 @@ vd_cel_psram(gfx_pixmap_t *p, uint32_t *addr)
 #include <gfx_resource.h>
 void *vd_view_pal(gfxr_view_t *v) { return v->pico_pal; }
 void *vd_cel_pal(gfx_pixmap_t *p) { return p->pico_pal_insert; }
+
+/* For the HAVE_PICO copy of decompress01.c (pico_decomp01.o): only
+   pico_decompress01_to_psram is exercised, whose LZW tables then live in the
+   priority scratch (viewdiff_main.c's g_pico_priority_scratch). */
+unsigned char *g_pico_decompress_scratch = NULL;
+unsigned char *g_pico_decompress_borrow = NULL;
+unsigned int g_pico_decompress_borrow_size = 0;
+unsigned char *pico_decompress_alloc(int type, unsigned int size) { return (unsigned char *) malloc(size); }

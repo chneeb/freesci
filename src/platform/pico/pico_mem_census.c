@@ -653,12 +653,31 @@ census_sub_size(size_t n)
 	pico_census_total_count--;
 }
 
+/* Dump the census at the FIRST failed allocation, raw ones included. Many
+   callers handle a NULL themselves (script and song loads, the GC's hash map),
+   so a heap that runs out often never reaches pico_oom_report and its dump:
+   Jones in the Fast Lane ran out loading a script and dropped into the SCI
+   console instead (2026-10-01). Once per session; census builds only. */
+static void
+census_first_failure(void)
+{
+	static int dumped = 0;
+
+	if (dumped || census_depth)
+		return;
+	dumped = 1;
+	census_depth++;
+	census_dump_oom();
+	census_depth--;
+}
+
 void *
 __wrap_malloc(size_t size)
 {
 	void *rc = __real_malloc(size);
 	if (!rc) {
 		printf("malloc %u failed to allocate memory\n", (unsigned) size);
+		census_first_failure();
 		return rc;
 	}
 	if (census_depth == 0) {
@@ -678,6 +697,7 @@ __wrap_calloc(size_t count, size_t size)
 	if (!rc) {
 		printf("calloc %u failed to allocate memory\n",
 		       (unsigned) (count * size));
+		census_first_failure();
 		return rc;
 	}
 	census_add_size(malloc_usable_size(rc));
@@ -699,6 +719,7 @@ __wrap_realloc(void *mem, size_t size)
 	census_depth--;
 	if (!rc) {
 		printf("realloc %u failed to allocate memory\n", (unsigned) size);
+		census_first_failure();
 		return rc;  /* original block still live; accounting unchanged */
 	}
 	if (mem)
