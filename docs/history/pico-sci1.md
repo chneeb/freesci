@@ -339,3 +339,21 @@ regression from the same build:
   already returned white for 255). Desktop: menu black on white, selection inverted.
 - Jones' clock red during his turn: not explained yet -- either the garbage inserts above or the view-palette
   conflict (the merge work). Re-check with this build.
+
+## Tenth run: menu fixed; text backgrounds and the clock -- the colour allocator
+
+Menu black on white and the SQ3 dialog fixed on the device. Still wrong in Jones: dialog text backgrounds, and the
+clock stays red for Jones' whole turn. Two allocator problems, both palette-mode only (desktop draws by RGB):
+
+- **The engine allocated over the picture's colours.** `gfx_alloc_color` (from `gfxop_set_color` and every text
+  pixmap install) hands out the first unlocked entry of the driver's mode palette and writes it through
+  `pico_set_palette`. For a VGA game only 0 and 255 were locked (the system colours), so allocations took 1, 2, 3...
+  -- the board's own colours. `pico_setup_vga_palette` now locks all 256 entries as system colours with the
+  picture's RGB, so an allocation always matches an existing entry, as in Sierra's interpreter where every entry
+  belongs to the picture.
+- **VGA kernel colours had no index.** `get_pic_color` hands out the picture's (or static) palette entries, whose
+  `global_index` is UNMAPPED; a Pico fill by such a colour (`pico_map_color`) drew index 255. The entry now carries
+  its own index (a VGA colour IS a palette index); `white` is index 255. This also makes the allocator see these
+  colours as already mapped.
+Desktop Jones (shop dialogs): unchanged, 0 ASan errors. NB on desktop the clock shows a red wedge for the hours
+used, so a red clock may be partly the game's own display -- check whether it fills over the turn.

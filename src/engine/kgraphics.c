@@ -324,7 +324,7 @@ graph_restore_box(state_t *s, reg_t handle)
 #define KERNEL_COLORS_NR s->gfx_state->resstate->static_palette_entries
 #endif
 
-static gfx_pixmap_color_t white = {GFX_COLOR_INDEX_UNMAPPED, 255, 255, 255};
+static gfx_pixmap_color_t white = {255, 255, 255, 255}; /* VGA: system white, index 255 */
 
 gfx_pixmap_color_t *
 get_pic_color(state_t *s, int color)
@@ -339,12 +339,19 @@ get_pic_color(state_t *s, int color)
 	   picture sets; the static palette (resource 999) only fills what no picture
 	   has set yet. Jones in the Fast Lane's panel text asks for background 99:
 	   blue in the picture's palette, dark grey in the static one. */
+	/* The entry also carries its own index: a VGA colour IS a palette index,
+	   and a palette-mode driver (the Pico) fills and draws by global_index --
+	   left UNMAPPED, Jones' dialog text backgrounds came out as index 255. */
 	if (color >= 0 && s->gfx_state->pic && s->gfx_state->pic->visual_map
-	    && color < s->gfx_state->pic->visual_map->colors_nr)
+	    && color < s->gfx_state->pic->visual_map->colors_nr) {
+		s->gfx_state->pic->visual_map->colors[color].global_index = color;
 		return &(s->gfx_state->pic->visual_map->colors[color]);
+	}
 
-	if (color < KERNEL_COLORS_NR)
-		return &(KERNEL_COLOR_PALETTE[color]); else
+	if (color >= 0 && color < KERNEL_COLORS_NR) {
+		KERNEL_COLOR_PALETTE[color].global_index = color;
+		return &(KERNEL_COLOR_PALETTE[color]);
+	} else
 		{
 			SCIkwarn(SCIkERROR, "Color index %d out of bounds for pic %d (%d max)",
 				 color, s->gfx_state->pic_nr, KERNEL_COLORS_NR);

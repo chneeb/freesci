@@ -547,6 +547,22 @@ void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int c
     /* SCI1's system white: entry 255 is white whatever the picture's palette
        holds (kgraphics.c get_pic_color, the title bar and menus). */
     ps->palette[255][0] = ps->palette[255][1] = ps->palette[255][2] = 255;
+    /* The engine's colour allocator (gfx_alloc_color, from gfxop_set_color
+       and every text pixmap install) hands out the first UNLOCKED entry and
+       writes its colour into this palette via pico_set_palette. With only 0
+       and 255 locked that overwrote the picture's own colours 1, 2, 3...
+       (Jones' clock). In a VGA picture every entry belongs to the picture, as
+       in Sierra's interpreter: lock them all as system colours with their
+       current RGB, so an allocation matches an existing entry instead. */
+    if (drv->mode && drv->mode->palette) {
+        gfx_palette_t *mp = drv->mode->palette;
+        for (int i = 0; i < 256 && i < mp->max_colors_nr; i++) {
+            mp->colors[i].r = ps->palette[i][0];
+            mp->colors[i].g = ps->palette[i][1];
+            mp->colors[i].b = ps->palette[i][2];
+            mp->colors[i].lockers = GFX_COLOR_SYSTEM;
+        }
+    }
 #ifdef PICO_LCD_16BIT
     pico_rebuild_pal565(ps);
 #endif
