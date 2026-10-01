@@ -37,9 +37,18 @@
 #  undef HASH
 #endif
 
-#define HASH_MAX DCS_REGT_HASH_MAX
+#ifdef SCI_COMPACT_HASHMAPS
+/* PIO Pico: the GC builds two of these per run and the second one was the
+   allocation that failed in Jones in the Fast Lane (2,060 B). Never saved.
+   128 buckets, hash 0..127: apply_to_* (hashmap.c) skips bucket HASH_MAX,
+   exactly as the original's 0x1ff never reaches bucket 512. */
+#  define HASH_MAX 128
+#  define HASH(x) (((x.segment << 3) | x.offset) & 0x7f)
+#else
+#  define HASH_MAX DCS_REGT_HASH_MAX
+#  define HASH(x) (((x.segment << 3) | x.offset) & 0x1ff)
+#endif
 #define COMP(x, y) compare_reg_t(x, y)
-#define HASH(x) (((x.segment << 3) | x.offset) & 0x1ff)
 #undef MUST_FREE
 
 #include "hashmap.h"

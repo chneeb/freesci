@@ -287,3 +287,34 @@ frame re-decoded from SD. Eviction is back to the plain 32 KB budget (as before 
 the arena goes to the heap. No code path keeps a cel pointer across another `gfxr_get_view` (only the mouse
 pointer, which is never evicted) and the census writes no tags into blocks, so the garbled faces are suspected to
 be a side effect of the thrashing -- unconfirmed, to re-check on the next run.
+
+## Eighth run: the GC's maps -- compact hash maps (PIO)
+
+With the eviction fix Jones ran much longer, then during Jones' turn the GC's second temporary map failed
+(`new_reg_t_hash_map`, calloc 2,060 with 1,872 free; the earlier `malloc 12` failures were its nodes, absorbed by the
+reclaim-and-retry). Pure exhaustion: the census at the previous failure had one 144-byte gap. The steady state on
+the board leaves too little room for the GC's peak.
+
+`SCI_COMPACT_HASHMAPS` (PIO only, CMake, next to the view budget):
+- **int hash maps 256 -> 32 buckets.** Every loaded script has one (its object indices) plus the segment manager's
+  script-number map; 1 KB of buckets each. The test saves held 16-23 such maps (SQ3 16, KQ4 18, PQ2 19, CB 21, Jones
+  23), so ~14-21 KB of heap back in every game. The memory hash `(x ^ x >> 3) & 31` is a function of `x & 0xff`
+  alone, so the savegame FORMAT is unchanged: the writer gathers each of the 256 format chains out of its one memory
+  bucket (no allocation) and writes it, the reader appends each chain to its memory bucket (buckets zeroed first --
+  the reader mallocs the map and the stock code relied on reading all 256 slots). Hand edits in the generated
+  savegame.c, noted in savegame.cfsml.
+- **reg_t (GC) maps 512 -> 128 buckets**, never saved; the failing allocation shrinks 2,060 -> 524 B.
+- Both keep the original shape `hash 0..N-1` in `N+1` buckets: `apply_to_*_hash_map` loops `i < HASH_MAX` and would
+  silently skip a used last bucket -- for the GC that would free live objects.
+
+Offline (desktop builds with and without `-DSCI_COMPACT_HASHMAPS=1`, ASan, scratch hooks for restore->save and a
+mid-game save):
+- First-generation re-saves of the SQ3, KQ4, PQ2 and CB savegames and a mid-game Jones save: compact == stock, byte
+  for byte. Second generation (256->32, 32->256, 32->32) == stock re-saving its own save; stock itself changes song
+  handles on a re-save, so that is the right baseline.
+- Restore + play on with the compact build: all four SCI0 games back in their rooms and answering `look`; Jones from
+  the start into week 2; 0 ASan errors.
+- Found on the way, NOT caused by this: on desktop an in-game restart with a "tee" song iterator active hits the
+  debug breakpoint in `songit_tee_death_notification` (iterator.c:1894, "Missed breakpoint") and the process dies.
+  The stock build does it on a forced restart (a scratch hook calling `kRestartGame` at 70 s). Not investigated.
+`.bss` PIO unchanged (31,456); Pimoroni and desktop untouched.

@@ -567,6 +567,10 @@ if(PLATFORM STREQUAL "pico")
         # allocate it.
         add_compile_definitions(GFXR_VIEW_BUDGET=${PICO_VGA_VIEW_BUDGET}
                                 PICO_VIEW_ARENA=${PICO_VGA_VIEW_BUDGET})
+        # Script object-index maps with 32 buckets instead of 256 (~1 KB per
+        # loaded script) and GC maps with 128 instead of 512; the savegame
+        # format is unchanged (int_hashmap.h, savegame.c).
+        add_compile_definitions(SCI_COMPACT_HASHMAPS=1)
     endif()
 
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
