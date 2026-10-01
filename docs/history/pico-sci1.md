@@ -357,3 +357,31 @@ clock stays red for Jones' whole turn. Two allocator problems, both palette-mode
   colours as already mapped.
 Desktop Jones (shop dialogs): unchanged, 0 ASan errors. NB on desktop the clock shows a red wedge for the hours
 used, so a red clock may be partly the game's own display -- check whether it fills over the turn.
+
+## Eleventh run: the clock stays red -- Sierra's save-unders of stopped views (engine, desktop too)
+
+Device: dialogs and speech bubbles correct now; the clock is red from the start of Jones' turn, and from week 2 on for
+the player too, never refreshing. Desktop showed the same, so this was traced there (scratch probes, none kept):
+
+- The clock is one stopped view, `timeKeep` (view 270, signal 0x5914: frozen, no update, fixed priority). Its cel
+  shows the hours used; the cels are cumulative wedges, 0/0 fully transparent, 6/0 mostly red. Every hour the script
+  ALSO `DrawCel`s the same cel at the same place.
+- FreeSCI keeps every DrawCel as a widget and repaints it every frame, so at a new week `timeKeep` correctly went back
+  to 0/0 but the week's DrawCel widgets (up to 6/0) were still painted over it.
+- In Sierra's Animate (as ScummVM implements it, from memory: GfxAnimate::update) a no-update view keeps the screen
+  bits under it; when the update subalgorithm runs on a picture that was not just drawn, those bits are restored --
+  erasing everything painted over the view since -- and saved again before it is redrawn. That restore is what wipes
+  the stamps. FreeSCI had no save-unders for dynamic views at all (`_k_redraw_view_list` only cleared flags).
+- FreeSCI's `pic_not_valid` doubles as the counter `_k_prepare_view_list` bumps per view needing an update; Sierra
+  keeps the real flag apart. At the week change the real flag was 0 (+1 from timeKeep's force update): Sierra restores.
+
+Fix (kgraphics.c, all games): `_k_redraw_view_list` restores a no-update view's save-under unless the REAL flag
+(captured before `_k_prepare_view_list`) is 1, and records a new one for every shown no-update view after the flag
+pass. In widget terms a save-under is a snapshot of the view's rectangle and the restore a snapshot restore: widgets
+created inside it since then are freed (dynamic views and windows are immune). Records are per object in a 32-slot
+table, dropped on DrawPic and on a state change (restore). `.bss` +260 on all targets (PIO 31,716).
+
+Desktop checks: Jones into week 2 -- the clock resets and shows only the new wedge. Regression: SQ3, KQ4, PQ2 and CB
+restored and played with the same keys against a baseline binary, screenshots every 10 s: SQ3 and PQ2 pixel-identical;
+KQ4 and CB differ only where the walking character stopped (timing; two runs of the same binary differ the same way);
+0 ASan errors. NB CB's "sticky kDrawCel corners" may be this mechanism too -- re-check.

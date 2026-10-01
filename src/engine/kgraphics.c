@@ -1546,6 +1546,8 @@ pico_mem_breakdown(state_t *s, int nr)
 }
 #endif
 
+static void _k_underbits_clear_all(void);
+
 reg_t
 kDrawPic(state_t *s, int funct_nr, int argc, reg_t *argv)
 {
@@ -1594,6 +1596,7 @@ kDrawPic(state_t *s, int funct_nr, int argc, reg_t *argv)
 		GFX_ASSERT(gfxop_new_pic(s->gfx_state, pic_nr, 1, palette));
 	}
 
+	_k_underbits_clear_all(); /* the save-unders belong to the old picture */
 	gfxw_widget_kill_chrono(s->visual, 0);
 	s->wm_port->widfree(GFXW(s->wm_port));
 	s->picture_port->widfree(GFXW(s->picture_port));
@@ -2811,8 +2814,104 @@ _k_raise_topmost_in_view_list(state_t *s, gfxw_list_t *list, gfxw_dyn_view_t *vi
 }
 
 
+/* Save-unders of no-update views, in widget terms.
+**
+** In Sierra's Animate a no-update ("stopped") view keeps the screen bits
+** under it (underBits). Whenever the update subalgorithm runs on a picture
+** that was not just drawn, the bits are put back first -- erasing everything
+** painted over the view since -- and saved again before the view is redrawn.
+** FreeSCI keeps painted things (DrawCel, boxes, text) as widgets instead of
+** pixels, so the equivalent of "put the bits back" is freeing the widgets
+** created inside the view's rectangle since the save: a snapshot restore.
+** Jones in the Fast Lane needs it: its clock is a stopped view whose cel
+** shows the hours used, and every hour is also DrawCel'd onto the screen;
+** at a new week the view goes back to an empty cel and the restore is what
+** wipes the old wedges. Without it they stayed red for the rest of the game.
+** Records are per object; they are dropped when a picture is drawn (Sierra
+** frees the bits then) and whenever the game state changes (restore). */
+#define UNDERBITS_SLOTS 32
+static struct { reg_t obj; gfxw_snapshot_t *snap; } s_underbits[UNDERBITS_SLOTS];
+static state_t *s_underbits_state = NULL;
+
 static void
-_k_redraw_view_list(state_t *s, gfxw_list_t *list)
+_k_underbits_clear_all(void)
+{
+	int i;
+
+	for (i = 0; i < UNDERBITS_SLOTS; i++) {
+		if (s_underbits[i].snap)
+			free(s_underbits[i].snap);
+		s_underbits[i].snap = NULL;
+		s_underbits[i].obj = NULL_REG;
+	}
+}
+
+static int
+_k_underbits_slot(state_t *s, reg_t obj, int create)
+{
+	int i, free_slot = -1;
+
+	if (s_underbits_state != s) {
+		_k_underbits_clear_all();
+		s_underbits_state = s;
+	}
+	for (i = 0; i < UNDERBITS_SLOTS; i++) {
+		if (s_underbits[i].snap && REG_EQ(s_underbits[i].obj, obj))
+			return i;
+		if (!s_underbits[i].snap && free_slot < 0)
+			free_slot = i;
+	}
+	return create ? free_slot : -1;
+}
+
+/* The view's rectangle in screen coordinates, as gfxw_widget_matches_snapshot
+** sees a widget: its bounds plus its port's origin. */
+static rect_t
+_k_underbits_area(state_t *s, gfxw_dyn_view_t *view)
+{
+	rect_t area = view->bounds;
+	gfxw_widget_t *port = s->dyn_views ? GFXW(s->dyn_views->parent) : NULL;
+
+	if (port) {
+		area.x += port->bounds.x;
+		area.y += port->bounds.y;
+	}
+	return area;
+}
+
+static void
+_k_underbits_save(state_t *s, gfxw_dyn_view_t *view)
+{
+	int slot = _k_underbits_slot(s, make_reg(view->ID, view->subID), 1);
+
+	if (slot < 0)
+		return; /* table full: this view just keeps FreeSCI's old behaviour */
+	if (s_underbits[slot].snap)
+		free(s_underbits[slot].snap);
+	s_underbits[slot].obj = make_reg(view->ID, view->subID);
+	s_underbits[slot].snap = gfxw_make_snapshot(s->visual, _k_underbits_area(s, view));
+}
+
+static void
+_k_underbits_restore(state_t *s, gfxw_dyn_view_t *view, int restore)
+{
+	int slot = _k_underbits_slot(s, make_reg(view->ID, view->subID), 0);
+
+	if (slot < 0)
+		return;
+	if (restore)
+		gfxw_restore_snapshot(s->visual, s_underbits[slot].snap);
+	free(s_underbits[slot].snap);
+	s_underbits[slot].snap = NULL;
+	s_underbits[slot].obj = NULL_REG;
+}
+
+/* real_pic_not_valid: s->pic_not_valid before _k_prepare_view_list counted
+** the views that need an update into it. Sierra keeps the two apart: the
+** count decides whether this subalgorithm runs, the real flag whether the
+** save-unders are restored (1 means a picture was just drawn). */
+static void
+_k_redraw_view_list(state_t *s, gfxw_list_t *list, int real_pic_not_valid)
 {
 	gfxw_dyn_view_t *view = (gfxw_dyn_view_t *) list->contents;
 	while (view) {
@@ -2821,6 +2920,9 @@ _k_redraw_view_list(state_t *s, gfxw_list_t *list)
 
 		/* step 1 of subalgorithm */
 		if (view->signal & _K_VIEW_SIG_FLAG_NO_UPDATE) {
+			if (!(view->signal & _K_VIEW_SIG_FLAG_REMOVE))
+				_k_underbits_restore(s, view, real_pic_not_valid != 1);
+
 			if (view->signal & _K_VIEW_SIG_FLAG_FORCE_UPDATE)
 				view->signal &= ~_K_VIEW_SIG_FLAG_FORCE_UPDATE;
 
@@ -2853,6 +2955,12 @@ _k_redraw_view_list(state_t *s, gfxw_list_t *list)
 
 		view = (gfxw_dyn_view_t *) view->next;
 	}
+
+	/* Save the background of every no-update view that will be shown (Sierra
+	** does this right before it draws them). */
+	for (view = (gfxw_dyn_view_t *) list->contents; view; view = (gfxw_dyn_view_t *) view->next)
+		if ((view->signal & (_K_VIEW_SIG_FLAG_NO_UPDATE | _K_VIEW_SIG_FLAG_HIDDEN)) == _K_VIEW_SIG_FLAG_NO_UPDATE)
+			_k_underbits_save(s, view);
 }
 
 
@@ -3703,6 +3811,7 @@ kAnimate(state_t *s, int funct_nr, int argc, reg_t *argv)
 	int cycle = (KP_ALT(1, NULL_REG)).offset;
 	list_t *cast_list = NULL;
 	int open_animation = 0;
+	int real_pic_not_valid;
 
 
 	process_sound_events(s); /* Take care of incoming events (kAnimate is called semi-regularly) */
@@ -3748,11 +3857,12 @@ kAnimate(state_t *s, int funct_nr, int argc, reg_t *argv)
 		}
 
 		SCIkdebug(SCIkGRAPHICS, "Handling Dynviews (..step 9 inclusive):\n");
+		real_pic_not_valid = s->pic_not_valid;
 		_k_prepare_view_list(s, templist, _K_MAKE_VIEW_LIST_CALC_PRIORITY);
 
 		if (s->pic_not_valid) {
 			SCIkdebug(SCIkGRAPHICS, "PicNotValid=%d -> Subalgorithm:\n");
-			_k_redraw_view_list(s, templist);
+			_k_redraw_view_list(s, templist, real_pic_not_valid);
 		}
 
 		_k_update_signals_in_view_list(s->dyn_views, templist);
