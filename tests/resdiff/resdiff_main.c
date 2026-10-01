@@ -10,7 +10,9 @@
    scripts interleaved with pics, views and PSRAM view loads in a scrambled
    order and checks that every script read returns exactly the recorded bytes
    and that a displaced script was really evicted (data NULL) before its
-   reload. Exit 1 on any mismatch.
+   reload. Each script is also checked across a full cache flush
+   (scir_free_all_lru, what pico_reclaim_heap does when an allocation fails)
+   right after loading it. Exit 1 on any mismatch.
 
    BUILD (desktop build first; the Pico copies are self-contained, so nothing
    needs renaming -- the desktop libscicore members are never pulled in):
@@ -41,6 +43,7 @@ unsigned char *g_pico_priority_scratch;
 unsigned long long pico_perf_us(void) { return 0; }
 void pico_io_enable_fastseek(int fd) { (void) fd; }
 void scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res);
+void scir_free_all_lru(resource_mgr_t *mgr);
 int scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
 			    uint32_t addr, unsigned int max_size, int *size);
 
@@ -52,7 +55,7 @@ int
 main(int argc, char **argv)
 {
 	resource_mgr_t *mgr;
-	int nr, i, scripts = 0, checks = 0, evictions = 0, bad = 0, others = 0;
+	int nr, i, scripts = 0, checks = 0, evictions = 0, bad = 0, others = 0, flushes = 0;
 	int order[MAXN], n = 0;
 
 	if (argc < 2) { fprintf(stderr, "usage: %s <gamedir>\n", argv[0]); return 2; }
@@ -88,6 +91,14 @@ main(int argc, char **argv)
 		if (!r || !r->data || r->size != (unsigned) refsize[s] || memcmp(r->data, ref[s], refsize[s])) {
 			printf("  script %d: wrong bytes on read %d\n", s, i); bad++; continue;
 		}
+		/* pico_reclaim_heap's cache flush in the middle of using it -- what a
+		   failed allocation during script_instantiate triggers (device
+		   2026-10-01): the script must keep its bytes. */
+		scir_free_all_lru(mgr);
+		flushes++;
+		if (!r->data || memcmp(r->data, ref[s], refsize[s])) {
+			printf("  script %d: lost its data to the cache flush (read %d)\n", s, i); bad++; continue;
+		}
 		if (kind == 0) {        /* a view: pico_decompress_alloc may hand it the scratch */
 			while (other < MAXN && !scir_test_resource(mgr, sci_view, other)) other++;
 			if (other < MAXN && (o = scir_find_resource(mgr, sci_view, other, 0))) {
@@ -122,7 +133,7 @@ main(int argc, char **argv)
 			printf("  script %d: wrong bytes after reload (read %d)\n", s, i); bad++;
 		}
 	}
-	printf("\n== %d scripts, %d reads, %d scratch takeovers, %d evictions of the owning script, %d mismatches ==\n",
-	       scripts, checks, others, evictions, bad);
+	printf("\n== %d scripts, %d reads, %d cache flushes mid-use, %d scratch takeovers, %d evictions of the owning script, %d mismatches ==\n",
+	       scripts, checks, flushes, others, evictions, bad);
 	return bad != 0;
 }

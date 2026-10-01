@@ -219,3 +219,18 @@ New harness `tests/resdiff`: the Pico resource manager itself (resource.c, resou
 decompressors, all HAVE_PICO, no renaming needed) on the desktop. Jones: every script recorded, then 3 scrambled rounds
 interleaving pic, view and PSRAM-view loads: 414 script reads, 97 real takeovers of the scratch, 97 evictions of the
 owning script, 0 mismatches. `.bss` PIO 31,440.
+
+## Sixth run: the script came up as garbage -- the cache flush evicted it mid-copy
+
+Jones played much longer (1.2 M VM steps vs 196 K), then "Script 0xd2 does not have a dispatch table" and the SCI
+console. The `malloc 3974 failed` just before was NOT the failure: `sci_malloc` (`pico_sram_alloc`) runs
+`pico_reclaim_heap` and retries, and the retry succeeded. But the reclaim flushes the resource cache
+(`scir_free_all_lru`), and the script being instantiated was in it -- in the decompress scratch, as its owner. The
+flush set its `data` to NULL (freeing nothing), the segment allocation's retry succeeded, and `script_instantiate`
+copied from NULL: garbage. `scir_free_all_lru` now leaves entries in the scratch enqueued (they free nothing; the next
+user of the scratch evicts them). `_scir_free_old_resources` (trim after a load) is unchanged: it counts scratch
+entries in `memory_lru`, so skipping them would need the accounting changed, and during instantiation the only load is
+the script itself, protected as the newest entry.
+
+resdiff now also flushes the cache right after each script load and checks the bytes: with the previous resource.c
+207/207 reads lost their data (the device bug, reproduced offline); now 0/207.

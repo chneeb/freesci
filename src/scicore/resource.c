@@ -1229,13 +1229,26 @@ scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
 void
 scir_free_all_lru(resource_mgr_t *mgr)
 {
-	while (mgr->lru_last) {
-		resource_t *goner = mgr->lru_last;
-		_scir_remove_from_lru(mgr, goner); /* sets status = ALLOCATED */
-		if (!PICO_IS_DECOMPRESS_SCRATCH(goner->data))
+	resource_t *goner = mgr->lru_last;
+
+	while (goner) {
+		resource_t *prev = SCIR_LRU_PREV(mgr, goner);
+
+		/* An entry in the decompress scratch frees nothing, and it may be in
+		   use right now: an SCI01 script owns the scratch while
+		   script_instantiate copies it, and that copy's own segment
+		   allocation is what triggers this flush (pico_reclaim_heap). Evicting
+		   it NULLed res->data under the copy -- the script came up as garbage
+		   ("does not have a dispatch table"; Jones in the Fast Lane, device
+		   2026-10-01). It stays enqueued; the next user of the scratch evicts
+		   it (pico_scratch_take). */
+		if (!PICO_IS_DECOMPRESS_SCRATCH(goner->data)) {
+			_scir_remove_from_lru(mgr, goner); /* sets status = ALLOCATED */
 			sci_free(goner->data);
-		goner->data = NULL;
-		goner->status = SCI_STATUS_NOMALLOC;
+			goner->data = NULL;
+			goner->status = SCI_STATUS_NOMALLOC;
+		}
+		goner = prev;
 	}
 }
 #endif

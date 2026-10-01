@@ -39,3 +39,4 @@ tests/songdiff/songdiff
 tests/resdiff/p_*.c
 tests/resdiff/*.o
 tests/resdiff/resdiff
+tests/resdiff/resdiff_old
