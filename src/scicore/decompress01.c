@@ -718,7 +718,18 @@ int decompress01(resource_t *result, int resh, int sci_version)
 	   streams method 2: decrypt2 then takes a stream descriptor, not a buffer. */
 	if (compressionMethod == 3 || compressionMethod == 4)
 		result->data = (unsigned char*)sci_malloc(result->size);
-	else
+	else if (result->type == sci_script && g_pico_decompress_scratch
+		 && result->size <= PICO_DECOMPRESS_SCRATCH_SIZE) {
+		/* A script is copied into its segment when instantiated and read
+		   only right after a load, so it does not need a heap block of its
+		   own: decompress it into the scratch and own the scratch until the
+		   next user takes it (pico_scratch_take). Jones in the Fast Lane's
+		   scripts reach 10.7 KB, and that transient block is what a
+		   fragmented heap could not find (device OOM 2026-10-01). */
+		pico_scratch_take();
+		result->data = g_pico_decompress_scratch;
+		g_pico_scratch_owner = result;
+	} else
 		result->data = pico_decompress_alloc(result->type, result->size);
 	if (!result->data) { /* graceful sound path in pico_decompress_alloc */
 		result->status = SCI_STATUS_NOMALLOC;

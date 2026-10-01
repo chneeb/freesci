@@ -783,6 +783,20 @@ _scir_free_resource_sources(resource_source_t *rss)
 	}
 }
 
+#ifdef HAVE_PICO
+/* Evicts the SCI01 script resource that holds the decompress scratch, when the
+   next user takes the scratch (decompress0.c pico_scratch_take). */
+static resource_mgr_t *s_scratch_mgr = NULL;
+void scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res);
+
+static void
+pico_scratch_evict(resource_t *res)
+{
+	if (s_scratch_mgr)
+		scir_evict_resource_data(s_scratch_mgr, res);
+}
+#endif
+
 resource_mgr_t *
 scir_new_resource_manager(char *dir, int version,
 			  char allow_patches, int max_memory)
@@ -916,6 +930,10 @@ scir_new_resource_manager(char *dir, int version,
 	chdir(caller_cwd);
 	free(caller_cwd);
 
+	#ifdef HAVE_PICO
+	s_scratch_mgr = mgr;
+	g_pico_scratch_evict = pico_scratch_evict;
+#endif
 	return mgr;
 }
 
@@ -1193,6 +1211,7 @@ scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
 		return -1;
 	}
 
+	pico_scratch_take(); /* the scratch is the staging buffer below */
 	rc = pico_decompress01_to_psram(fh, method, clen - 4, dsz, addr,
 					g_pico_decompress_scratch, PICO_DECOMPRESS_SCRATCH_SIZE);
 	if (!fh_cached)

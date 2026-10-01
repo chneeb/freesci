@@ -197,3 +197,25 @@ Fixes:
 - Tried and reverted: int hash maps with 32 buckets on the Pico (-~23 KB). Savegames serialise every map's bucket array
   with the compile-time count (`_cfsml_write/read_int_hash_map_t`), so a save from desktop or an older build (256) would
   be read past a 32-bucket struct on restore. Would need a rehash on load.
+
+## Fifth run: fragmentation -- scripts stop taking heap blocks
+
+One full round of normal play, then the opponent's turn failed: `malloc 6628` in `pico_decompress_alloc` with 48 KB free
+in total -- fragmentation this time (earlier `calloc 2060` and two `malloc 4332` had failed too). The failing block is
+the transient copy of a resource the generic path allocates, a script: Jones' scripts reach 10.7 KB and the opponent's
+turn loads new ones.
+
+A script's resource is copied into its segment on instantiation (`sm_mcpy_in_out` in `script_instantiate_sci0`), and
+every consumer (instantiation, the class-table scan, the version scan, savegame restore, `sm_set_script_size`) reads it
+right after loading it, with no other load in between. So in `decompress01` an SCI01 script that fits is decompressed
+into the 16 KB decompress scratch and becomes its OWNER (`g_pico_scratch_owner`); the next user of the scratch -- a
+small pic/view decompress (`pico_decompress_alloc`) or the PSRAM view staging (`scir_pico_load_to_psram`) -- calls
+`pico_scratch_take`, which evicts the owner (`scir_evict_resource_data`, installed by the resource manager) if it still
+points there; its next access reloads it. All resource-data free sites already skip the scratch. Text resources are NOT
+included: `kFormat` can look up a second text while still using the first. SCI0 games are untouched (decompress0 never
+hands a script the scratch; with no owner, `pico_scratch_take` is a no-op).
+
+New harness `tests/resdiff`: the Pico resource manager itself (resource.c, resource_map.c, resource_patch.c and the
+decompressors, all HAVE_PICO, no renaming needed) on the desktop. Jones: every script recorded, then 3 scrambled rounds
+interleaving pic, view and PSRAM-view loads: 414 script reads, 97 real takeovers of the scratch, 97 evictions of the
+owning script, 0 mismatches. `.bss` PIO 31,440.

@@ -47,6 +47,24 @@
 unsigned char *g_pico_decompress_borrow = NULL;
 unsigned int g_pico_decompress_borrow_size = 0;
 
+/* A script resource can hold the decompress scratch between loads
+   (decompress01: scripts are copied into their segment on instantiation and
+   read only right after a load, so a resident copy is not needed). Whoever
+   takes the scratch next evicts that owner first -- the owner's next access
+   simply reloads it. resource.c installs the evictor. */
+resource_t *g_pico_scratch_owner = NULL;
+void (*g_pico_scratch_evict)(resource_t *res) = NULL;
+
+void
+pico_scratch_take(void)
+{
+	resource_t *o = g_pico_scratch_owner;
+
+	g_pico_scratch_owner = NULL;
+	if (o && o->data == g_pico_decompress_scratch && g_pico_scratch_evict)
+		g_pico_scratch_evict(o);
+}
+
 unsigned char *
 pico_decompress_alloc(int type, unsigned int size)
 {
@@ -55,8 +73,10 @@ pico_decompress_alloc(int type, unsigned int size)
 		return g_pico_decompress_borrow;
 	if ((type == sci_pic || type == sci_view)
 	    && g_pico_decompress_scratch
-	    && size <= PICO_DECOMPRESS_SCRATCH_SIZE)
+	    && size <= PICO_DECOMPRESS_SCRATCH_SIZE) {
+		pico_scratch_take();
 		return g_pico_decompress_scratch;
+	}
 	/* Sound is non-essential: on the SRAM-tight Pico its resource may not find
 	   a contiguous block.  Use raw malloc so OOM returns NULL (the caller fails
 	   the song load and the game keeps running silently) instead of sci_malloc's

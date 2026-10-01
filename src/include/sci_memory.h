@@ -380,6 +380,11 @@ extern unsigned char *g_pico_decompress_scratch;
 extern unsigned char *g_pico_decompress_borrow;
 extern unsigned int g_pico_decompress_borrow_size;
 unsigned char *pico_decompress_alloc(int type, unsigned int size);
+/* Scratch ownership for SCI01 script resources (decompress0.c). */
+struct _resource_struct;
+extern struct _resource_struct *g_pico_scratch_owner;
+extern void (*g_pico_scratch_evict)(struct _resource_struct *res);
+void pico_scratch_take(void);
 
 /* [arenagrow] raw-malloc probe (FSCI_PROBE_ARENA only).  The sci_* allocators
    self-instrument, but the dominant arena-ratchet drivers are RAW malloc()s

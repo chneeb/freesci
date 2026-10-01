@@ -35,3 +35,7 @@ tests/viewdiff/pico_decomp01.o
 tests/songdiff/pico_iterator.c
 tests/songdiff/pico_iterator.o
 tests/songdiff/songdiff
+# resdiff harness build products (p_*.c are COPIES of src/scicore files)
+tests/resdiff/p_*.c
+tests/resdiff/*.o
+tests/resdiff/resdiff
