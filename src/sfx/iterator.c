@@ -122,6 +122,28 @@ song_byte(base_song_iterator_t *self, int i)
 	if (self->psram_addr == PSRAM_SONG_NONE)
 		return self->data[i];
 
+	if (self->ways > 1) {
+		/* SCI1: one small window per recently read track */
+		const int w = PICO_SONG_WIN / PICO_SONG_WAYS;
+		int k, base, len;
+
+		for (k = 0; k < PICO_SONG_WAYS; k++)
+			if (i >= self->way_base[k] && i < self->way_base[k] + self->way_fill[k])
+				return self->win[k * w + i - self->way_base[k]];
+		base = i & ~(w - 1);
+		if (base < 0 || base >= (int) self->size)
+			return 0;
+		len = w;
+		if (base + len > (int) self->size)
+			len = (int) self->size - base;
+		k = self->way_next;
+		self->way_next = (k + 1) % PICO_SONG_WAYS;
+		psram_load(self->psram_addr + base, self->win + k * w, len);
+		self->way_base[k] = base;
+		self->way_fill[k] = len;
+		return self->win[k * w + i - base];
+	}
+
 	if (i < self->win_base || i >= self->win_base + self->win_fill) {
 		int base = i & ~(PICO_SONG_WIN - 1);
 		int len = PICO_SONG_WIN;
@@ -841,8 +863,10 @@ static int sci0_to_sci1_device_map[][2] = {
 	{0xff, 0xff},
 }; /* Maps bit number to device ID */
 
-#define SONGDATA(x) self->data[offset + (x)]
-#define SCI1_CHANDATA(off) self->data[channel->offset + (off)]
+#define SONGDATA(x) PSONG_BYTE(self, offset + (x))
+#define SCI1_CHANDATA(off) PSONG_BYTE(self, channel->offset + (off))
+/* 16-bit little-endian read through the accessor (a parked song has no data) */
+#define SONGDATA16(at) (PSONG_BYTE(self, (at)) | (PSONG_BYTE(self, (at) + 1) << 8))
 
 static int
 _sci1_sample_init(sci1_song_iterator_t *self, int offset)
@@ -939,12 +963,12 @@ _sci1_song_init(sci1_song_iterator_t *self)
 
 		CHECK_FOR_END_ABSOLUTE(offset + 4);
 
-		track_offset = getUInt16(self->data + offset);
-		end = getUInt16(self->data + offset + 2);
+		track_offset = SONGDATA16(offset);
+		end = SONGDATA16(offset + 2);
 
 		CHECK_FOR_END_ABSOLUTE(track_offset - 1);
 
-		if (self->data[track_offset] == 0xfe) {
+		if (PSONG_BYTE(self, track_offset) == 0xfe) {
 			if (_sci1_sample_init(self, track_offset))
 				return 1; /* Error */
 		} else {
@@ -955,13 +979,13 @@ _sci1_song_init(sci1_song_iterator_t *self)
 				break; /* Scan for remaining samples */
 			} else {
 				int channel_nr
-					= self->data[track_offset] & 0xf;
+					= PSONG_BYTE(self, track_offset) & 0xf;
 				song_iterator_channel_t *channel =
 					&(self->channels[self->channels_nr++]);
 
-				if (self->data[track_offset] & 0xf0)
+				if (PSONG_BYTE(self, track_offset) & 0xf0)
 					printf("Channel %d has mapping bits %02x\n", 
-					       channel_nr, self->data[track_offset] & 0xf0);
+					       channel_nr, PSONG_BYTE(self, track_offset) & 0xf0);
 
 				_base_init_channel(channel,
 						   channel_nr,
@@ -1067,7 +1091,7 @@ _sci1_dump_state(sci1_song_iterator_t *self)
 			else
 				sciprintf(" ");
 
-			sciprintf("%02x", self->data[self->channels[i].offset+j]);
+			sciprintf("%02x", PSONG_BYTE(self, self->channels[i].offset+j));
 
 			if (j == 0)
 				sciprintf("<");
@@ -1262,6 +1286,11 @@ _sci1_handle_message(sci1_song_iterator_t *self,
 			memcpy(mem, self, tsize);
 			samplep = &(mem->next_sample);
 
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_SONGS)
+			if (mem->psram_addr != PSRAM_SONG_NONE)
+				psram_song_incref(mem->psram_addr); /* as in the SCI0 clone */
+			else
+#endif
 			sci_refcount_incref(mem->data);
 
 			mem->delay_remaining += delta;
@@ -2022,6 +2051,33 @@ songit_next(song_iterator_t **it, unsigned char *buf, int *result, int mask)
 
 
 
+#if defined(HAVE_PICO) && defined(PICO_PSRAM_SONGS)
+/* Does an SCI1 song carry a digital sample on any device's track list? (A
+   sample track starts with 0xfe; see _sci1_song_init.) Read from the SRAM copy
+   before the song is parked; any doubt counts as "yes" (keep it in SRAM). */
+static int
+_sci1_song_has_samples(unsigned char *data, unsigned int size)
+{
+	unsigned int off = (data[0] == 0xf0) ? 8 : 0;
+
+	while (off < size && data[off] != 0xff) {       /* device blocks */
+		off++;
+		while (off < size && data[off] != 0xff) {   /* track entries */
+			unsigned int track;
+
+			if (off + 5 >= size)
+				return 1;
+			track = data[off + 2] | (data[off + 3] << 8);
+			if (track >= size || data[track] == 0xfe)
+				return 1;
+			off += 6;
+		}
+		off++;
+	}
+	return off >= size; /* no terminator: malformed, keep in SRAM */
+}
+#endif
+
 song_iterator_t *
 songit_new(unsigned char *data, unsigned int size, int type, songit_id_t id)
 {
@@ -2094,21 +2150,29 @@ songit_new(unsigned char *data, unsigned int size, int type, songit_id_t id)
 	it->psram_addr = PSRAM_SONG_NONE;
 	it->win_base = 0;
 	it->win_fill = 0;
+	it->ways = 1;
+	it->way_next = 0;
+	for (i = 0; i < PICO_SONG_WAYS; i++)
+		it->way_base[i] = it->way_fill[i] = 0;
 
 	/* Park a large MIDI song in PSRAM instead of duplicating it in SRAM.
 	   Embedded-PCM songs (data[0] == 2) are excluded: _sci0_get_pcm_data
 	   hands the buffer straight to sfx_iterator_make_feed, which needs a real
 	   address.  Measured, every PCM song is small and every song big enough
 	   to matter is MIDI, so the exclusion costs nothing in practice.
-	   SCI0 only -- SCI1 reads self->data directly all over. */
-	if (type == SCI_SONG_ITERATOR_TYPE_SCI0
-	    && size > PICO_PSRAM_SONG_MIN
-	    && data[0] != 2) {
+	   SCI1 songs too (Jones in the Fast Lane: up to 46.7 KB each, otherwise
+	   all in SRAM), unless they carry a digital sample: _sci1_get_pcm hands
+	   the sample's address to the mixer, which needs SRAM. */
+	if (size > PICO_PSRAM_SONG_MIN
+	    && ((type == SCI_SONG_ITERATOR_TYPE_SCI0 && data[0] != 2)
+		|| (type == SCI_SONG_ITERATOR_TYPE_SCI1 && !_sci1_song_has_samples(data, size)))) {
 		unsigned int slot = psram_song_alloc(size);
 
 		if (slot != PSRAM_SONG_NONE) {
 			psram_store(slot, data, size);
 			it->psram_addr = slot;
+			if (type == SCI_SONG_ITERATOR_TYPE_SCI1)
+				it->ways = PICO_SONG_WAYS;
 			it->data = NULL;
 			it->size = size;
 			it->init((song_iterator_t *) it);

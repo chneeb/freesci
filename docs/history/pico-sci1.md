@@ -144,3 +144,31 @@ same addresses and bytes). The PSRAM stub allocator rounded to 8 bytes, unlike t
 re-decode relies on the real bump pointer. Eviction stress: desktop ASan build with a budget of 8000 B, 3.7 min of
 Jones: 50,667 evictions, 0 ASan errors, all screens correct; SQ3/CB/KQ4/PQ2 saves under the same build: 0 errors, 0
 evictions. visdiff/decompdiff unchanged. `.bss` PIO 31,424, Pimoroni 29,624.
+
+## Second device run (2026-10-01): HardFault, then SCI1 songs into PSRAM
+
+**HardFault** at `pico_blit_indexed` (`pico_driver.c:706`, BFAR 0x70000000): the palette-insert loop followed a
+pixmap's `pico_pal_insert` (offset 88 of the 92-byte ARM `gfx_pixmap_t`) to garbage. Every pixmap is zeroed by
+`gfx_new_pixmap` and every object was rebuilt after the field was added, so this is a real overwrite. The blit now
+range-checks the pointer (SRAM heap, even, n <= 256), logs the pixmap once (`[pal] bad insert ptr ...`) and draws
+without the insert. The next run logged it: a TEXT pixmap (ID ffffffff, 245x12, 3 colours, font flags) whose last
+byte was 0x70 -- looks like a one-byte overrun of a palette colour component by Pico-only code (desktop ASan never saw
+it). Still open.
+
+**OOM again** (`malloc 10672` for the largest script, 55 KB free but fragmented; 12/136/4332-byte failures earlier,
+during music). PSRAM songs (`PICO_PSRAM_SONGS`) only parked SCI0 songs; SCI1 songs (Jones: up to 46.7 KB) were full
+SRAM copies. Now `songit_new` parks SCI1 songs above `PICO_PSRAM_SONG_MIN` too, unless a track list carries a digital
+sample (`_sci1_song_has_samples`: a 0xfe track; `_sci1_get_pcm` hands the sample's address to the mixer). SCI1's
+direct reads (`SONGDATA`, `SCI1_CHANDATA`, track table, dump) go through `PSONG_BYTE`; the SCI1 clone takes a slot
+reference like SCI0's; cleanup already went through `_sci0_cleanup`. SCI1 reads up to 16 tracks at interleaved
+offsets, so a parked SCI1 song splits the 64-byte window into 4 x 16-byte ways (round-robin); SCI0 keeps its single
+window.
+
+New harness `tests/songdiff`: every song through the stock iterator and through a HAVE_PICO + PICO_PSRAM_SONGS copy
+of iterator.c (stub PSRAM slots), 8 device play masks each, event streams compared step by step. Jones: 34 songs, 272
+runs, 57,667 events, sounds 6 (46,715 B) and 100 (18,164 B) parked, 0 mismatches. SQ3/KQ4/PQ2/CB through the SCI0
+iterator (their existing PSRAM path): 1.36 M events, 0 mismatches; all slots released afterwards.
+
+Also from that run: the centre panel is where desktop puts it (black edge row 44, white bar 45-54, blue from 55).
+The real glitch: the bottom-row signs ("EMPLOYMENT OFFICE", "HI-TECH U") drawn twice ~10 px apart, covering the lower
+"1" boxes -- a Pico redraw path restoring background with a title-bar offset. Open.

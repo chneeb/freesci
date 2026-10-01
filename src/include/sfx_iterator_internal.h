@@ -95,11 +95,19 @@ typedef struct {
    PCM song measured (largest 9,774 -- see the PCM note in iterator.c) but well
    below the songs that actually hurt (30-59 KB). */
 #  define PICO_PSRAM_SONG_MIN 8192
+/* SCI1 songs read up to 16 tracks at interleaved offsets, so a parked SCI1
+   song splits win[] into PICO_SONG_WAYS windows of PICO_SONG_WIN/PICO_SONG_WAYS
+   bytes, replaced round-robin (ways == 1: the single SCI0 window). */
+#  define PICO_SONG_WAYS 4
 #  define PICO_SONG_PSRAM_FIELDS							\
 	unsigned int psram_addr;   /* PSRAM_SONG_NONE => data is a real pointer */ \
 	int win_base;								\
 	int win_fill;								\
-	unsigned char win[PICO_SONG_WIN];
+	unsigned char win[PICO_SONG_WIN];					\
+	int ways;                  /* 1 (SCI0) or PICO_SONG_WAYS (SCI1) */	\
+	int way_next;								\
+	int way_base[PICO_SONG_WAYS];						\
+	int way_fill[PICO_SONG_WAYS];
 #else
 #  define PICO_SONG_PSRAM_FIELDS
 #endif

@@ -701,7 +701,25 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
        e.g. Jones in the Fast Lane's player buttons, which were white where the
        town board's palette has white. A few hundred byte writes per cel; not
        cached by pointer, as a freed view's list can be reused by another. */
-    if (pxm->pico_pal_insert) {
+    if (pxm->pico_pal_insert
+        && ((uintptr_t)pxm->pico_pal_insert < 0x20000000u
+            || (uintptr_t)pxm->pico_pal_insert >= 0x20082000u
+            || ((uintptr_t)pxm->pico_pal_insert & 1)
+            || ((const gfx_pal_insert_t *)pxm->pico_pal_insert)->n > 256)) {
+        /* Not an SRAM heap address: the pixmap is not a live VGA view cel
+           (a stale or overwritten pixmap reached the blit -- device HardFault
+           2026-10-01, BFAR 0x70000000). Name it once and draw without the
+           insert instead of faulting. */
+        static int s_bad_insert_logged = 0;
+        if (!s_bad_insert_logged) {
+            s_bad_insert_logged = 1;
+            sciprintf("[pal] bad insert ptr %p in pixmap %p: ID %06x loop %d cel %d %dx%d "
+                      "index %dx%d flags %04x handle %d colors %d psram %d\n",
+                      pxm->pico_pal_insert, (void *)pxm, pxm->ID, pxm->loop, pxm->cel,
+                      pxm->xl, pxm->yl, pxm->index_xl, pxm->index_yl, pxm->flags,
+                      pxm->internal.handle, pxm->colors_nr, pxm->psram_valid);
+        }
+    } else if (pxm->pico_pal_insert) {
         const gfx_pal_insert_t *pi = (const gfx_pal_insert_t *)pxm->pico_pal_insert;
         for (int k = 0; k < pi->n; k++) {
             uint8_t idx = pi->e[k][0];

@@ -29,3 +29,7 @@ tests/viewdiff/pico_view1.c
 tests/viewdiff/pico_view1.o
 tests/viewdiff/pico_pixmap.o
 tests/viewdiff/viewdiff
+# songdiff harness build products (pico_iterator.c is a COPY of iterator.c)
+tests/songdiff/pico_iterator.c
+tests/songdiff/pico_iterator.o
+tests/songdiff/songdiff
