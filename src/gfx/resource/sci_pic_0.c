@@ -2135,10 +2135,9 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 				   pics keep the buffered path below (view_transparentize). */
 				if (_pdc && sci1 && !nodraw && !(flags & DRAWPIC01_FLAG_OVERLAID_PIC)
 				    && static_pal_nr != GFX_SCI1_AMIGA_COLORS_NR) {
-					int _yl = (short) _pdc_ru16(pos + 2);
-
-					if (_yl + sci_titlebar_size > 200) /* the desktop "titlebar hack" */
-						sci_titlebar_size = 0;
+					/* Drawn at the titlebar offset; rows past the visual
+					   map are dropped by the bounded writer -- the clip of the
+					   buffered path below (no "titlebar hack" any more). */
 					if (pic->visual_map->index_data)
 						_pico_draw_embedded_cel1(pic->visual_map->index_data,
 									 pic->visual_map->index_xl * pic->visual_map->index_yl,
@@ -2197,10 +2196,24 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 				} else
 					view->colors = embedded_view_colors;
 
-				/* Hack to prevent overflowing the visual map buffer.
-				   Yes, this does happen otherwise. */
-				if (view->index_yl + sci_titlebar_size > 200)
-					sci_titlebar_size = 0;
+				/* A cel taller than the space below the titlebar used to
+				   switch the titlebar offset OFF for the rest of the pic
+				   (to keep the copy inside the buffer). Jones in the Fast
+				   Lane's town board is a 319x199 cel at row 0, so the whole
+				   board -- visual, priority and control -- moved up 10 rows
+				   while views kept the picture port's offset: everything
+				   on it sat 10 px low. Sierra's interpreter (as ScummVM
+				   implements it) draws at the port top and clips at the
+				   screen bottom; so does this now (embedded_rows). Never
+				   triggered by SQ3/KQ4/PQ2/CB. */
+				{
+					int embedded_rows = 200 - sci_titlebar_size - posy;
+					if (embedded_rows > view->index_yl)
+						embedded_rows = view->index_yl;
+					if (embedded_rows < 0)
+						embedded_rows = 0;
+					view->index_yl = embedded_rows;
+				}
 
 				gfx_xlate_pixmap(view, mode, GFX_XLATE_FILTER_NONE);
 

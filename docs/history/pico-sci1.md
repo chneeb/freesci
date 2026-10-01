@@ -234,3 +234,14 @@ the script itself, protected as the newest entry.
 
 resdiff now also flushes the cache right after each script load and checks the bytes: with the previous resource.c
 207/207 reads lost their data (the device bug, reproduced offline); now 0/207.
+
+## Board 10 rows too high -- the "titlebar hack" (desktop too)
+
+User report: the marble, the clock and the centre panel's content sat too low on the town board. Desktop FreeSCI showed
+the same, so the earlier comparison against desktop proved nothing. Cause: pic 11 opens with a 319x199 embedded cel at
+row 0; 199 + the 10-row titlebar > 200, and `gfxr_draw_pic01`'s "titlebar hack" then set the titlebar offset to 0 for
+the REST of the pic -- the whole board (visual, priority, control) drew 10 rows higher than the picture port the views
+are placed in. Sierra's interpreter (as ScummVM implements it) draws at the port top and clips at the screen bottom. The
+hack is replaced by clipping (`embedded_rows` in the buffered path; the Pico direct decoder already drops writes past
+the buffer). It never fired in SQ3/KQ4/PQ2/CB (checked over all their pics), so only such pics change. visdiff: Pico ==
+desktop on all five games. The duplicate bottom-row signs on the device were very likely the same 10-row offset.
