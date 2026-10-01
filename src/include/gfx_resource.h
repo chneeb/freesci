@@ -116,6 +116,10 @@ typedef struct {
 	gfxr_loop_t *loops;
 
 	int translation[GFX_SCI0_IMAGE_COLORS_NR];
+#ifdef HAVE_PICO
+	gfx_pal_insert_t *pico_pal; /* VGA: used palette entries; colors is then the
+				       shared static palette (sci_view_1.c) */
+#endif
 } gfxr_view_t;
 
 

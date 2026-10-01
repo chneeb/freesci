@@ -255,6 +255,9 @@ gfxr_draw_view0(int id, byte *resource, int size, int palette)
 	}
 
 	view = (gfxr_view_t*)sci_malloc(sizeof(gfxr_view_t));
+#ifdef HAVE_PICO
+	view->pico_pal = NULL;
+#endif
 	view->ID = id;
 
 	view->loops_nr = resource[V0_LOOPS_NR_OFFSET];

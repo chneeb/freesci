@@ -1144,20 +1144,19 @@ scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res)
 }
 
 #if defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
-/* Load a resource's decompressed bytes straight into PSRAM (psram_alloc arena)
-   instead of res->data: for a VGA view of up to ~35 KB that has to be decoded
+/* Load a resource's decompressed bytes straight into PSRAM at 'addr' (a fixed
+   staging slot of max_size bytes) instead of res->data: for a VGA view of up to ~35 KB that has to be decoded
    but never needs an SRAM copy (gfxr_draw_view1_psram reads it through a
    cache). Handles only volume-sourced resources of the SCI01 family (the
    decompress01 games) that are not already loaded, with method 0 or 2; the
    output is staged through the idle decompress scratch. Returns 0 and fills
-   *addr/*size, or -1 when not handled -- the caller then loads it normally. */
+   *size, or -1 when not handled -- the caller then loads it normally. */
 int
 scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
-			uint32_t *addr, int *size)
+			uint32_t addr, unsigned int max_size, int *size)
 {
 	extern int pico_decompress01_to_psram(int resh, int method, unsigned int complength,
 					      int size, uint32_t addr, guint8 *stage, int stage_size);
-	extern uint32_t psram_alloc(size_t n);
 	resource_t *res = scir_test_resource(mgr, type, number);
 	char filename[PATH_MAX];
 	guint8 hdr[8];
@@ -1188,14 +1187,13 @@ scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
 	dsz = hdr[4] | (hdr[5] << 8);
 	method = hdr[6] | (hdr[7] << 8);
 	if ((id >> 11) != (unsigned) type || (id & 0x7ff) != (unsigned) number
-	    || clen <= 4 || (method != 0 && method != 2)) {
+	    || clen <= 4 || (method != 0 && method != 2) || dsz > max_size) {
 		if (!fh_cached)
 			close(fh);
 		return -1;
 	}
 
-	*addr = psram_alloc(dsz);
-	rc = pico_decompress01_to_psram(fh, method, clen - 4, dsz, *addr,
+	rc = pico_decompress01_to_psram(fh, method, clen - 4, dsz, addr,
 					g_pico_decompress_scratch, PICO_DECOMPRESS_SCRATCH_SIZE);
 	if (!fh_cached)
 		close(fh);

@@ -122,6 +122,14 @@ typedef struct { /* gfx_mode_t: Graphics mode description */
 
 #define GFX_COLOR_INDEX_UNMAPPED -1
 
+#ifdef HAVE_PICO
+/* The used entries of a VGA view's palette: n x {index, r, g, b}. */
+typedef struct {
+	unsigned short n;
+	unsigned char e[][4];
+} gfx_pal_insert_t;
+#endif
+
 typedef struct { /* gfx_pixmap_color_t: Pixmap-specific color entries */
 	int global_index; /* Global index color or GFX_COLOR_INDEX_UNMAPPED. */
 	guint8 r, g, b; /* Real color */
@@ -342,6 +350,10 @@ typedef struct { /* gfx_pixmap_t: Pixel map */
 	uint32_t psram_addr;  /* PSRAM byte address of index_data when offloaded */
 	uint8_t  psram_valid; /* 1 when psram_addr holds live PSRAM data for index_data */
 	void    *pico_reg_next; /* live-pixmap registry link (gfx_tools.c), diagnostic only */
+	/* VGA view cels: the view's used palette entries (gfx_pal_insert_t), written
+	   into the LCD palette when the cel is drawn, as Sierra's SCI1 interpreter
+	   inserts a view's palette. Owned by the view; NULL otherwise. */
+	void    *pico_pal_insert;
 #endif
 
 } gfx_pixmap_t;

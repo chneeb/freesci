@@ -32,6 +32,7 @@
 #include <gfx_driver.h>
 #include <gfx_resmgr.h>
 #include <gfx_state_internal.h>
+#include <sciresource.h> /* SCI_VERSION_01_VGA (GFXR_VIEW_BUDGET) */
 #ifdef HAVE_PICO
 #include "psram_alloc.h"
 #include <stdio.h>
@@ -548,6 +549,109 @@ gfxr_add_to_pic(gfx_resstate_t *state, int old_nr, int new_nr, int maps, int fla
 }
 
 
+#ifdef GFXR_VIEW_BUDGET
+/* ---- VGA view cache budget ------------------------------------------------
+   Decoded views stay cached until the next picture is drawn. A VGA game that
+   keeps one picture up (Jones in the Fast Lane: the town board, all game) would
+   grow the cache until the heap is gone, so above GFXR_VIEW_BUDGET bytes the
+   least recently used views are freed; gfxr_get_view re-decodes them on demand
+   (on the Pico into the same PSRAM, sci_resmgr.c). Never evicted: the view just
+   requested, and the one holding the current mouse-pointer cel (the only cel
+   pixmap anything keeps across calls). Only for SCI01 VGA and later; the SCI0
+   path is unchanged. */
+gfx_pixmap_t *g_gfxr_pointer_pixmap = NULL;
+static unsigned int g_gfxr_view_clock = 0;
+
+static unsigned int
+gfxr_view_bytes(gfxr_view_t *v)
+{
+	unsigned int b = sizeof(gfxr_view_t) + v->loops_nr * sizeof(gfxr_loop_t);
+	int l, c;
+
+	for (l = 0; l < v->loops_nr; l++)
+		for (c = 0; c < v->loops[l].cels_nr; c++) {
+			gfx_pixmap_t *p = v->loops[l].cels[c];
+			b += sizeof(gfx_pixmap_t) + sizeof(gfx_pixmap_t *);
+			if (p && p->index_data)
+				b += p->index_xl * p->index_yl;
+		}
+#ifdef HAVE_PICO
+	if (v->pico_pal)
+		b += sizeof(gfx_pal_insert_t) + 4 * v->pico_pal->n;
+#endif
+	return b;
+}
+
+static int
+gfxr_view_holds_pointer(gfxr_view_t *v)
+{
+	int l, c;
+
+	if (!g_gfxr_pointer_pixmap)
+		return 0;
+	for (l = 0; l < v->loops_nr; l++)
+		for (c = 0; c < v->loops[l].cels_nr; c++)
+			if (v->loops[l].cels[c] == g_gfxr_pointer_pixmap)
+				return 1;
+	return 0;
+}
+
+struct gfxr_budget_scan {
+	int keep;              /* view number never to evict */
+	unsigned long total;
+	int oldest_nr;
+	unsigned int oldest_use;
+	gfx_driver_t *driver;
+};
+
+static void *
+gfxr_budget_scan_func(sbtree_t *tree, const int key, const void *value, void *args)
+{
+	struct gfxr_budget_scan *b = (struct gfxr_budget_scan *) args;
+	gfx_resource_t *res = (gfx_resource_t *) value;
+
+	if (!res || !res->unscaled_data.view)
+		return (void *) value;
+	b->total += res->bytes;
+	if (key != b->keep && (b->oldest_nr < 0 || res->last_use < b->oldest_use)
+	    && !gfxr_view_holds_pointer(res->unscaled_data.view)) {
+		b->oldest_nr = key;
+		b->oldest_use = res->last_use;
+	}
+	return (void *) value;
+}
+
+static void *
+gfxr_budget_evict_func(sbtree_t *tree, const int key, const void *value, void *args)
+{
+	struct gfxr_budget_scan *b = (struct gfxr_budget_scan *) args;
+
+	if (value && key == b->oldest_nr) {
+		gfxr_free_resource(b->driver, (gfx_resource_t *) value, GFX_RESOURCE_TYPE_VIEW);
+		return NULL;
+	}
+	return (void *) value;
+}
+
+static void
+gfxr_enforce_view_budget(gfx_resstate_t *state, sbtree_t *tree, int keep)
+{
+	for (;;) {
+		struct gfxr_budget_scan b;
+
+		b.keep = keep;
+		b.total = 0;
+		b.oldest_nr = -1;
+		b.oldest_use = 0;
+		b.driver = state->driver;
+		sbtree_foreach(tree, (void *) &b, gfxr_budget_scan_func);
+		if (b.total <= GFXR_VIEW_BUDGET || b.oldest_nr < 0)
+			return;
+		sbtree_foreach(tree, (void *) &b, gfxr_budget_evict_func);
+	}
+}
+#endif /* GFXR_VIEW_BUDGET */
+
 gfxr_view_t *
 gfxr_get_view(gfx_resstate_t *state, int nr, int *loop, int *cel, int palette)
 {
@@ -585,10 +689,19 @@ gfxr_get_view(gfx_resstate_t *state, int nr, int *loop, int *cel, int palette)
 
 		res->mode = hash;
 		res->unscaled_data.view = view;
+#ifdef GFXR_VIEW_BUDGET
+		res->bytes = gfxr_view_bytes(view);
+		res->last_use = ++g_gfxr_view_clock;
+		if (state->version >= SCI_VERSION_01_VGA)
+			gfxr_enforce_view_budget(state, tree, nr);
+#endif
 
 	} else {
 		res->lock_sequence_nr = state->tag_lock_counter; /* Update lock counter */
 		view = res->unscaled_data.view;
+#ifdef GFXR_VIEW_BUDGET
+		res->last_use = ++g_gfxr_view_clock;
+#endif
 	}
 
 	if (*loop < 0)

@@ -35,6 +35,31 @@
 /* The permanent 32 KB pic-priority decode scratch (operations.c), idle outside
    pic decode -- borrowed per cel as in sci_view_0.c. */
 extern byte *g_pico_priority_scratch;
+
+/* Re-decoding a view that the VGA view cache evicted (resmgr.c) puts its cels
+   back where they were in PSRAM instead of growing the arena: decoding is
+   deterministic, so the cels come out in the same order with the same sizes.
+   sci_resmgr.c sets the cursor around the decode. */
+#if defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
+static uint32_t s_cel_reuse_cursor;
+static int s_cel_reuse = 0;
+
+void pico_view_cels_reuse(uint32_t base) { s_cel_reuse_cursor = base; s_cel_reuse = 1; }
+uint32_t pico_view_cels_reuse_end(void) { s_cel_reuse = 0; return s_cel_reuse_cursor; }
+
+static uint32_t
+pico_cel_psram_alloc(size_t sz)
+{
+	if (s_cel_reuse) {
+		uint32_t a = s_cel_reuse_cursor;
+		s_cel_reuse_cursor += (uint32_t) sz;
+		return a;
+	}
+	return psram_alloc(sz);
+}
+#else
+#  define pico_cel_psram_alloc(sz) psram_alloc(sz)
+#endif
 #endif
 
 #if defined(HAVE_PICO) && defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
@@ -82,6 +107,7 @@ _v1_rb(unsigned int off)
 #define V1_PALETTE_OFFSET 6
 #define V1_FIRST_LOOP_OFFSET 8
 
+#define V1_PAL_START 260 /* sci_pal_1.c PALETTE_START: first of 256 4-byte entries */
 #define V1_RLE 0x80 /* run-length encode? */
 #define V1_RLE_BG 0x40 /* background fill */
 
@@ -328,6 +354,9 @@ gfxr_draw_cel1(int id, int loop, int cel, int mirrored, byte *resource, int size
 	if (view) {
 		retval->colors = view->colors;
 		retval->colors_nr = view->colors_nr;
+#ifdef HAVE_PICO
+		retval->pico_pal_insert = view->pico_pal;
+#endif
 	}
 		
 	retval->flags |= GFX_PIXMAP_FLAG_EXTERNAL_PALETTE;
@@ -355,7 +384,7 @@ gfxr_draw_cel1(int id, int loop, int cel, int mirrored, byte *resource, int size
 #ifdef HAVE_PICO
 	if (view) {
 		size_t sz = (size_t) pixmap_size;
-		retval->psram_addr  = psram_alloc(sz);
+		retval->psram_addr  = pico_cel_psram_alloc(sz);
 		retval->psram_valid = 1;
 		psram_store(retval->psram_addr, dest, sz);
 		if (!dest_is_scratch)
@@ -429,6 +458,9 @@ gfxr_draw_view1(int id, byte *resource, int size, gfx_pixmap_color_t *static_pal
 	}
 
 	view = (gfxr_view_t*)sci_malloc(sizeof(gfxr_view_t));
+#ifdef HAVE_PICO
+	view->pico_pal = NULL;
+#endif
 	view->ID = id;
 	view->flags = 0;
 
@@ -452,6 +484,36 @@ gfxr_draw_view1(int id, byte *resource, int size, gfx_pixmap_color_t *static_pal
 		}
 */
 
+#ifdef HAVE_PICO
+	/* The Pico draws 256-colour cels through the identity LUT into the LCD's
+	   palette slots, so a view does not need its own 2 KB colour table: keep
+	   only its USED entries (byte 0 of each 4-byte entry), which
+	   pico_blit_indexed writes into the palette when a cel is drawn -- as
+	   Sierra's SCI1 interpreter inserts a view's palette -- and point colors at
+	   the shared static palette. */
+	if (palette_offset > 0 && static_pal && static_pal_nr == 256
+	    && palette_offset + V1_PAL_START + 256 * 4 <= size) {
+		int c, n = 0;
+		byte *pe = resource + palette_offset + V1_PAL_START;
+
+		for (c = 0; c < 256; c++)
+			if (VRB(pe + c * 4))
+				n++;
+		view->pico_pal = (gfx_pal_insert_t *) sci_malloc(sizeof(gfx_pal_insert_t) + 4 * n);
+		view->pico_pal->n = n;
+		for (c = 0, n = 0; c < 256; c++)
+			if (VRB(pe + c * 4)) {
+				view->pico_pal->e[n][0] = c;
+				view->pico_pal->e[n][1] = VRB(pe + c * 4 + 1);
+				view->pico_pal->e[n][2] = VRB(pe + c * 4 + 2);
+				view->pico_pal->e[n][3] = VRB(pe + c * 4 + 3);
+				n++;
+			}
+		view->colors = static_pal;
+		view->colors_nr = static_pal_nr;
+		view->flags |= GFX_PIXMAP_FLAG_EXTERNAL_PALETTE;
+	} else
+#endif
 	if (palette_offset > 0)
 	{
 	    if (palette_offset > size) {

@@ -379,6 +379,16 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 
 			gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
 
+			/* The first pass already built the pic's priority band table
+			   (pic->internal, SCI01 priority-table opcodes); this pass builds
+			   the same one again. Drop the first so the decoder does not log
+			   "pic->internal is not NULL; possible memory corruption" twice
+			   per VGA pic. */
+			if (scaled_pic->internal) {
+				free(scaled_pic->internal);
+				scaled_pic->internal = NULL;
+			}
+
 			gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
 					&style, res->id, pic_sci1,
 					state->static_palette, state->static_palette_entries);
@@ -495,6 +505,55 @@ gfxr_palettize_view(gfxr_view_t *view, gfx_pixmap_color_t *source, int source_en
 gfxr_view_t *
 gfxr_draw_view11(int id, byte *resource, int size);
 
+#if defined(HAVE_PICO) && defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
+/* Where each VGA view's cels went in the PSRAM arena, so a view the cache
+   evicted (resmgr.c, GFXR_VIEW_BUDGET) is re-decoded into the same place. An
+   entry is valid only while the arena has not been rewound since (psram_epoch:
+   every picture change frees all views and resets the arena anyway). Heap,
+   allocated on the first VGA view: SCI0 games never pay for it. */
+#define PICO_VIEW_PSRAM_SLOTS 64
+static struct pico_view_psram { int nr; uint32_t base, size, epoch; } *s_view_psram = NULL;
+static int s_view_psram_next = 0;
+extern void pico_view_cels_reuse(uint32_t base);
+extern uint32_t pico_view_cels_reuse_end(void);
+
+static int
+pico_view_psram_lookup(int nr)
+{
+	int i;
+
+	if (!s_view_psram)
+		return -1;
+	for (i = 0; i < PICO_VIEW_PSRAM_SLOTS; i++)
+		if (s_view_psram[i].nr == nr && s_view_psram[i].epoch == psram_epoch())
+			return i;
+	return -1;
+}
+
+static void
+pico_view_psram_record(int nr, uint32_t base, uint32_t size)
+{
+	int i, slot = -1;
+
+	if (!s_view_psram) {
+		s_view_psram = (struct pico_view_psram *) sci_malloc(sizeof(*s_view_psram) * PICO_VIEW_PSRAM_SLOTS);
+		for (i = 0; i < PICO_VIEW_PSRAM_SLOTS; i++)
+			s_view_psram[i].nr = -1;
+	}
+	for (i = 0; i < PICO_VIEW_PSRAM_SLOTS && slot < 0; i++) /* a free or stale slot first */
+		if (s_view_psram[i].nr < 0 || s_view_psram[i].epoch != psram_epoch())
+			slot = i;
+	if (slot < 0) { /* all live: replace round-robin (that view then grows the arena once more) */
+		slot = s_view_psram_next;
+		s_view_psram_next = (s_view_psram_next + 1) % PICO_VIEW_PSRAM_SLOTS;
+	}
+	s_view_psram[slot].nr = nr;
+	s_view_psram[slot].base = base;
+	s_view_psram[slot].size = size;
+	s_view_psram[slot].epoch = psram_epoch();
+}
+#endif
+
 gfxr_view_t *
 gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int palette)
 {
@@ -514,15 +573,28 @@ gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int pal
 	   resource the PSRAM loader does not handle falls back to the normal load. */
 	if (state->version == SCI_VERSION_01_VGA || state->version == SCI_VERSION_01_VGA_ODD) {
 		extern int scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
-						   uint32_t *addr, int *size);
+						   uint32_t addr, unsigned int max_size, int *size);
 		extern gfxr_view_t *gfxr_draw_view1_psram(int id, uint32_t addr, int size,
 							  gfx_pixmap_color_t *static_pal, int static_pal_nr);
-		uint32_t vaddr;
 		int vsize;
 
-		if (scir_pico_load_to_psram(resmgr, sci_view, nr, &vaddr, &vsize) == 0) {
-			result = gfxr_draw_view1_psram(resid, vaddr, vsize, state->static_palette,
+		if (scir_pico_load_to_psram(resmgr, sci_view, nr, PSRAM_VIEW_STAGE_ADDR,
+					    PSRAM_VIEW_STAGE_SIZE, &vsize) == 0) {
+			int slot = pico_view_psram_lookup(nr);
+			uint32_t base = psram_alloc(0); /* the arena top: this decode's cels start here */
+
+			if (slot >= 0)
+				pico_view_cels_reuse(s_view_psram[slot].base);
+			result = gfxr_draw_view1_psram(resid, PSRAM_VIEW_STAGE_ADDR, vsize, state->static_palette,
 						       state->static_palette_entries);
+			if (slot >= 0) {
+				uint32_t end = pico_view_cels_reuse_end();
+				if (end - s_view_psram[slot].base != s_view_psram[slot].size)
+					sciprintf("[view] %d re-decoded to %lu bytes, recorded %lu\n", nr,
+						  (unsigned long)(end - s_view_psram[slot].base),
+						  (unsigned long)s_view_psram[slot].size);
+			} else if (result)
+				pico_view_psram_record(nr, base, psram_alloc(0) - base);
 			if (!result)
 				return NULL;
 		}

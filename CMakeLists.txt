@@ -546,6 +546,19 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(PICO_SONG_MAX_BYTES=${PICO_SONG_MAX_BYTES})
     endif()
 
+    # Upper bound on the SRAM held by cached decoded VGA views (PIO only;
+    # resmgr.c gfxr_get_view). Views stay cached until the next picture is
+    # drawn, and Jones in the Fast Lane keeps one picture (the town board) up
+    # for the whole game, so without a bound the cache grows until the heap is
+    # gone (device OOM 2026-10-01: 8.5 KB free of 477 KB). Above the budget the
+    # least recently used views are freed and re-decoded on demand, into the
+    # same PSRAM. SCI0 games are not affected. set() and the define stay
+    # together (see PICO_SONG_MAX_BYTES above).
+    set(PICO_VGA_VIEW_BUDGET "49152" CACHE STRING "SRAM budget for cached decoded VGA views (PIO)")
+    if(NOT PICO_PSRAM_MAPPED)
+        add_compile_definitions(GFXR_VIEW_BUDGET=${PICO_VGA_VIEW_BUDGET})
+    endif()
+
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)

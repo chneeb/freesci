@@ -29,3 +29,9 @@ vd_cel_psram(gfx_pixmap_t *p, uint32_t *addr)
 	*addr = p->psram_addr;
 	return p->psram_valid;
 }
+
+/* The VGA palette-insert list of a view (gfxr_view_t is longer under HAVE_PICO)
+   and of a cel. */
+#include <gfx_resource.h>
+void *vd_view_pal(gfxr_view_t *v) { return v->pico_pal; }
+void *vd_cel_pal(gfx_pixmap_t *p) { return p->pico_pal_insert; }

@@ -68,7 +68,16 @@ typedef struct gfx_resource_struct {
 		gfxr_pic_t *pic;
 	} unscaled_data;
 
+#ifdef GFXR_VIEW_BUDGET
+	unsigned int last_use; /* VGA view cache: LRU stamp (resmgr.c gfxr_get_view) */
+	unsigned int bytes;    /* VGA view cache: estimated SRAM held by the view */
+#endif
 } gfx_resource_t;
+
+#ifdef GFXR_VIEW_BUDGET
+/* The current mouse-pointer cel (operations.c): its view is never evicted. */
+extern gfx_pixmap_t *g_gfxr_pointer_pixmap;
+#endif
 
 
 struct _gfx_options;

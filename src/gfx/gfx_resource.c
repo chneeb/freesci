@@ -61,6 +61,10 @@ gfxr_free_view(gfx_driver_t *driver, gfxr_view_t *view)
 
 	if (view->colors && !(view->flags & GFX_PIXMAP_FLAG_EXTERNAL_PALETTE))
 		free(view->colors);
+#ifdef HAVE_PICO
+	if (view->pico_pal)
+		free(view->pico_pal);
+#endif
 
 	if (view->loops) {
 		for (i = 0; i < view->loops_nr; i++)

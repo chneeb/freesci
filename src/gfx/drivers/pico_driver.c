@@ -695,6 +695,25 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                   int bake_static_pri) /* 1: also write this cel's priority into the
                                           PSRAM priority map (GFX_BUFFER_STATIC only) */
 {
+    /* A VGA view cel inserts its view's used palette entries into the LCD
+       palette before it is drawn, as Sierra's SCI1 interpreter does (ScummVM
+       "insert" mode): its pixels then index colours that are really there,
+       e.g. Jones in the Fast Lane's player buttons, which were white where the
+       town board's palette has white. A few hundred byte writes per cel; not
+       cached by pointer, as a freed view's list can be reused by another. */
+    if (pxm->pico_pal_insert) {
+        const gfx_pal_insert_t *pi = (const gfx_pal_insert_t *)pxm->pico_pal_insert;
+        for (int k = 0; k < pi->n; k++) {
+            uint8_t idx = pi->e[k][0];
+            ps->palette[idx][0] = pi->e[k][1];
+            ps->palette[idx][1] = pi->e[k][2];
+            ps->palette[idx][2] = pi->e[k][3];
+        }
+#ifdef PICO_LCD_16BIT
+        pico_rebuild_pal565(ps);
+#endif
+    }
+
     int xl = src.xl, yl = src.yl;
     /* color_key is an int (-1 == GFX_PIXMAP_COLOR_KEY_NONE); test has_alpha on the
        int BEFORE narrowing to a byte.  Truncating -1 to a byte yields 255, which

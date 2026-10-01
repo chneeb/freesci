@@ -106,3 +106,41 @@ decompdiff re-run: unchanged (0 differ across all five games).
 
 `.bss`: PIO 31,396 (+556: the 512-byte view cache and the second stream descriptor); Pimoroni unchanged at 29,624 (the
 PSRAM view path is not compiled there).
+
+## First device run (2026-10-01) and fixes
+
+Jones started and the intro played in the right colours (picture palettes). Two problems in play:
+
+**Wrong colours, e.g. the player-number buttons white.** Every Jones view has its own palette (90 of 90, ~134 used
+entries each; a third differ from the town board's -- views 1/2: 48/39). Sierra's SCI1 interpreter inserts a view's
+USED entries (byte 0 of each 4-byte entry) into the system palette when it draws the view (ScummVM's "insert" for
+early SCI1); the Pico only had the picture's palette, so a cel index that is white in the board's palette came out
+white. Desktop never showed it: it is true-colour and draws every pixmap through its own palette. Fix: a VGA view keeps
+only its used entries as a compact `gfx_pal_insert_t` (`view->pico_pal`, ~0.5 KB instead of a 2 KB colour table;
+`colors` points at the shared static palette), each cel carries a pointer to it (`pico_pal_insert`), and
+`pico_blit_indexed` writes the entries into the palette slots before drawing the cel.
+
+**OOM twice** (captured: `calloc 2060` in `new_reg_t_hash_map`, free 8,496 B of 477 KB -- exhaustion, not
+fragmentation). Decoded views stay cached until the next picture, and Jones keeps the town board up all game. Desktop
+count: 15 live views after a short session, ~74 KB at 2 KB palette + 132 B per Pico cel struct, heading for 250-280
+KB with all 90. Fix: `GFXR_VIEW_BUDGET` (CMake `PICO_VGA_VIEW_BUDGET`, default 49152, PIO only) -- after decoding a
+VGA view, `gfxr_get_view` frees the least recently used cached views while the estimated total is above the budget;
+never the view just requested nor the one holding the mouse-pointer cel (the only cel pixmap anything keeps across
+calls; `g_gfxr_pointer_pixmap`). A re-decoded view puts its cels back where they were in PSRAM (deterministic decode;
+a 64-entry heap table of base/size per view, valid while `psram_epoch()` is unchanged), so eviction does not grow the
+arena. The budget is a guess until a probe build measures the real headroom.
+
+Found while there: the PSRAM arena had no upper bound and is not rewound while a picture stays up, and step 4c put
+each view's decompressed copy in it. The copy now goes to a fixed 64 KB staging slot (`PSRAM_VIEW_STAGE_ADDR`
+0x7A0000, above the working priority map), and `psram_alloc` halts legibly ("PSRAM arena full") before the parse
+scratch at 0x700000 instead of overwriting the song slots. The duplicate "pic->internal is not NULL; possible memory
+corruption" per VGA picture was the control pass rebuilding the priority-band table -- it is dropped before that pass
+now. The `gfx_free_color` "unused color index" errors are the Pico's 8-bit mode palette refcounting a 256-colour
+picture with duplicate RGB values; no memory involved, same path as SCI0, left alone.
+
+Offline: viewdiff now passes the static palette and checks every insert list against the desktop palette's used
+entries (90/90), that each cel carries its view's list, and re-decodes each view into its first PSRAM location (90/90
+same addresses and bytes). The PSRAM stub allocator rounded to 8 bytes, unlike the device -- fixed, since the
+re-decode relies on the real bump pointer. Eviction stress: desktop ASan build with a budget of 8000 B, 3.7 min of
+Jones: 50,667 evictions, 0 ASan errors, all screens correct; SQ3/CB/KQ4/PQ2 saves under the same build: 0 errors, 0
+evictions. visdiff/decompdiff unchanged. `.bss` PIO 31,424, Pimoroni 29,624.

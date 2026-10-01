@@ -1903,6 +1903,9 @@ _gfxop_set_pointer(gfx_state_t *state, gfx_pixmap_t *pxm)
 
 	if (draw_new) {
 		state->mouse_pointer = pxm;
+#ifdef GFXR_VIEW_BUDGET
+		g_gfxr_pointer_pixmap = pxm;
+#endif
 		DRAW_POINTER;
 		_gfxop_get_pointer_bounds(state, &pointer_bounds);
 	}
