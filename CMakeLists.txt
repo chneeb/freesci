@@ -66,6 +66,11 @@ elseif(PLATFORM STREQUAL "pico")
         "LINKER:--wrap=calloc"
         "LINKER:--wrap=realloc"
         "LINKER:--wrap=free")
+    if(NOT PICO_PSRAM_MAPPED)
+        # PIO: the VGA view arena (view_arena.c) answers malloc_usable_size for
+        # its own blocks, so the live-byte and census accounting can stay as is.
+        target_link_options(pico_malloc INTERFACE "LINKER:--wrap=malloc_usable_size")
+    endif()
 
     # Make USB-CDC stdout non-blocking: default is a 500 ms per-write wait when the
     # host has enumerated the port but nothing is draining it (PicoCalc is
@@ -557,7 +562,11 @@ if(PLATFORM STREQUAL "pico")
     # census at the next OOM showed the cache holding ~38 KB of real SRAM.
     set(PICO_VGA_VIEW_BUDGET "32768" CACHE STRING "SRAM budget for cached decoded VGA views (PIO)")
     if(NOT PICO_PSRAM_MAPPED)
-        add_compile_definitions(GFXR_VIEW_BUDGET=${PICO_VGA_VIEW_BUDGET})
+        # The views live in an arena of the same size, allocated once from the
+        # clean heap on the first VGA picture (view_arena.c); SCI0 games never
+        # allocate it.
+        add_compile_definitions(GFXR_VIEW_BUDGET=${PICO_VGA_VIEW_BUDGET}
+                                PICO_VIEW_ARENA=${PICO_VGA_VIEW_BUDGET})
     endif()
 
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)

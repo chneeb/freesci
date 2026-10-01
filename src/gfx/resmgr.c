@@ -38,6 +38,13 @@
 #include <stdio.h>
 #include <pico/stdlib.h>
 #endif
+#ifdef PICO_VIEW_ARENA
+#include "view_arena.h"
+/* Free space the arena must offer before the next view decode: the largest
+   view's metadata in Jones in the Fast Lane (view 0: 13 loops, 145 cels) is
+   15,878 bytes. A view that still does not fit spills to the heap. */
+#define GFXR_VIEW_ARENA_HEADROOM 16384
+#endif
 
 #undef TIME_PICDRAWING
 
@@ -645,8 +652,17 @@ gfxr_enforce_view_budget(gfx_resstate_t *state, sbtree_t *tree, int keep)
 		b.oldest_use = 0;
 		b.driver = state->driver;
 		sbtree_foreach(tree, (void *) &b, gfxr_budget_scan_func);
-		if (b.total <= GFXR_VIEW_BUDGET || b.oldest_nr < 0)
+		if (b.oldest_nr < 0)
 			return;
+#ifdef PICO_VIEW_ARENA
+		/* also keep room for the next decode in the arena */
+		if (b.total <= GFXR_VIEW_BUDGET
+		    && (!view_arena_base() || view_arena_largest() >= GFXR_VIEW_ARENA_HEADROOM))
+			return;
+#else
+		if (b.total <= GFXR_VIEW_BUDGET)
+			return;
+#endif
 		sbtree_foreach(tree, (void *) &b, gfxr_budget_evict_func);
 	}
 }
@@ -671,13 +687,32 @@ gfxr_get_view(gfx_resstate_t *state, int nr, int *loop, int *cel, int palette)
 	res = (gfx_resource_t *) sbtree_get(tree, nr);
 
 	if (!res || res->mode != hash) {
+#ifdef PICO_VIEW_ARENA
+		/* VGA views are decoded into the view arena (view_arena.h; the decode
+		   itself opens the window, sci_resmgr.c). Allocated on the first VGA
+		   view, while the heap is still clean; SCI0 games never get one. */
+		static int arena_tried = 0;
+		if (state->version >= SCI_VERSION_01_VGA && !arena_tried) {
+			void *m = malloc(PICO_VIEW_ARENA);
+			arena_tried = 1; /* a failure is logged once; views then use the heap */
+			if (m)
+				view_arena_init(m, PICO_VIEW_ARENA);
+			sciprintf("[view] arena %d bytes %s\n", PICO_VIEW_ARENA, m ? "allocated" : "NOT allocated");
+		}
+#endif
 		view = gfxr_interpreter_get_view(state, nr, state->misc_payload, palette);
 
 		if (!view)
 			return NULL;
 
 		if (!res) {
+#ifdef PICO_VIEW_ARENA
+			g_view_arena_active = state->version >= SCI_VERSION_01_VGA;
+#endif
 			res = (gfx_resource_t*)sci_malloc(sizeof(gfx_resource_t));
+#ifdef PICO_VIEW_ARENA
+			g_view_arena_active = 0;
+#endif
 			res->scaled_data.view = NULL;
 			res->ID = GFXR_RES_ID(restype, nr);
 			res->lock_sequence_nr = state->tag_lock_counter;

@@ -30,6 +30,9 @@
 #include <gfx_widgets.h>
 #include <gfx_resmgr.h>
 #include <gfx_options.h>
+#ifdef PICO_VIEW_ARENA
+#include "view_arena.h"
+#endif
 #ifdef HAVE_PICO
 #include "psram_alloc.h"
 #include <pico/stdlib.h>
@@ -585,8 +588,14 @@ gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int pal
 
 			if (slot >= 0)
 				pico_view_cels_reuse(s_view_psram[slot].base);
+#ifdef PICO_VIEW_ARENA
+			g_view_arena_active = 1; /* the view's blocks go to the arena (resmgr.c) */
+#endif
 			result = gfxr_draw_view1_psram(resid, PSRAM_VIEW_STAGE_ADDR, vsize, state->static_palette,
 						       state->static_palette_entries);
+#ifdef PICO_VIEW_ARENA
+			g_view_arena_active = 0;
+#endif
 			if (slot >= 0) {
 				uint32_t end = pico_view_cels_reuse_end();
 				if (end - s_view_psram[slot].base != s_view_psram[slot].size)
@@ -617,7 +626,13 @@ gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int pal
 	case SCI_VERSION_01_VGA_ODD:
 	case SCI_VERSION_1_EARLY:
 	case SCI_VERSION_1_LATE:
+#ifdef PICO_VIEW_ARENA
+		g_view_arena_active = 1;
+#endif
 		result=gfxr_draw_view1(resid, res->data, res->size, state->static_palette, state->static_palette_entries); 
+#ifdef PICO_VIEW_ARENA
+		g_view_arena_active = 0;
+#endif
 		break;
 	case SCI_VERSION_1_1:
 	case SCI_VERSION_32:

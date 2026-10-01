@@ -40,3 +40,5 @@ tests/resdiff/p_*.c
 tests/resdiff/*.o
 tests/resdiff/resdiff
 tests/resdiff/resdiff_old
+# viewarena allocator stress test binary
+tests/viewarena/viewarena

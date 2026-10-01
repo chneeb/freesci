@@ -48,6 +48,12 @@ void psram_load(uint32_t a, uint8_t *d, size_t n);
 
 byte *g_pico_priority_scratch;   /* what the device allocates at boot */
 
+/* The HAVE_PICO decompress01.c lends SCI01 scripts the decompress scratch and
+   records the owner; both live in decompress0.c's HAVE_PICO part, which the
+   desktop stream_decomp.o does not have. viewdiff decodes no scripts. */
+resource_t *g_pico_scratch_owner = NULL;
+void pico_scratch_take(void) { g_pico_scratch_owner = NULL; }
+
 /* pico_pixmap.c (a HAVE_PICO compile): the pixmap wrap and this accessor. */
 int vd_cel_psram(gfx_pixmap_t *p, uint32_t *addr);
 void *vd_view_pal(gfxr_view_t *v);

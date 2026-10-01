@@ -245,3 +245,37 @@ are placed in. Sierra's interpreter (as ScummVM implements it) draws at the port
 hack is replaced by clipping (`embedded_rows` in the buffered path; the Pico direct decoder already drops writes past
 the buffer). It never fired in SQ3/KQ4/PQ2/CB (checked over all their pics), so only such pics change. visdiff: Pico ==
 desktop on all five games. The duplicate bottom-row signs on the device were very likely the same 10-row offset.
+
+## Seventh run: exhaustion after the titlebar fix -- the view arena
+
+With the titlebar fix Jones played longer, then `reg_t_hash_map_check_value` failed on `malloc 12` with 16 bytes
+free: the heap was used up, not fragmented (an earlier run with older firmware had `sm_initialise_script` fail on 6,840
+bytes with 42 KB free, fragmentation). The view cache is the big churner on a game that keeps one picture up all game:
+every decode and every budget eviction is a few hundred small blocks (`gfxr_view_t`, loops, cel pointer arrays,
+92-byte pixmaps, the palette insert list) scattered through the heap between long-lived script and VM blocks.
+
+Per-view metadata on ARM (sizes + 8-byte malloc headers, measured with a scratch tool): view 501 3,010 B, 340 4,894,
+609 5,622, 751 6,074, 270 6,606, and view 0 (13 loops, 145 cels) 15,878 B.
+
+**The view arena** (`src/platform/pico/view_arena.{c,h}`, PIO only, `PICO_VIEW_ARENA` = `PICO_VGA_VIEW_BUDGET`, 32 KB):
+one SRAM block, allocated on the first VGA view while the heap is still clean (SCI0 games never allocate it), with a
+first-fit allocator inside (8-byte headers, lazy coalescing). While a view is decoded (`g_view_arena_active`, set
+around `gfxr_draw_view1_psram`/`gfxr_draw_view1` in sci_resmgr.c and the `gfx_resource_t` allocation in resmgr.c)
+`__wrap_malloc`/`__wrap_calloc` serve from the arena first and fall back to the heap when nothing fits;
+`__wrap_free`/`__wrap_realloc` route by ownership like the mapped target's PSRAM heap; the PIO link also wraps
+`malloc_usable_size` so `g_sci_live_bytes` and the census keep working on arena blocks. The budget eviction
+(`gfxr_enforce_view_budget`) now also evicts LRU views until the arena has 16 KB contiguous (`GFXR_VIEW_ARENA_HEADROOM`,
+the largest view) for the next decode. The census build prints the arena state at the first failed allocation.
+`.bss` PIO 31,440 -> 31,456; Pimoroni unchanged (29,648).
+
+Offline:
+- `tests/viewarena` -- randomised stress against a reference model (5 seeds, ~1.1 M operations each, under
+  ASan/UBSan): payload integrity, alignment, byte accounting, `largest` vs the recomputed largest free run, "an
+  allocation fails only if it does not fit", and a view-shaped workload (groups of 20-320 blocks freed LRU with the
+  16 KB headroom rule). Three mutated allocators (overlapping split, too-small remainder, lost coalescing) all fail it.
+  Under ASan the arena poisons free payloads, so a use-after-free inside it is still reported.
+- `viewdiff` routed through a 32 KB arena (scratch shim wrapping malloc/free and `gfxr_draw_view1_psram`): 90 views,
+  752 cels, both decodes of each view, 0 mismatches, chain intact. (viewdiff needed two stubs for the script-scratch
+  ownership symbols, which live in decompress0.c's HAVE_PICO part.)
+- Desktop Jones under ASan with the same routing (shim; `GFXR_VIEW_BUDGET=8000`, a 20 KB arena so it runs full),
+  the eviction key script for 225 s: 1.59 M arena allocations and frees, 0 ASan errors, chain checked on every free.

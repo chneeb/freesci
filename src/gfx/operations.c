@@ -60,6 +60,9 @@ dirty_probe_on(void)
 #endif
 #ifdef HAVE_PICO
 #include "psram_alloc.h"
+#ifdef PICO_VIEW_ARENA
+#include "view_arena.h"
+#endif
 #include <malloc.h>
 #include <sciresource.h>
 #include <pico/stdlib.h>
@@ -153,6 +156,15 @@ pico_reset_decode_scratches(void)
 		free(g_pico_decompress_scratch);
 		g_pico_decompress_scratch = NULL;
 	}
+#ifdef PICO_VIEW_ARENA
+	/* The VGA view arena (resmgr.c) -- only once nothing in it is live; a
+	   block still in use would otherwise be freed into the heap later. */
+	if (view_arena_base() && view_arena_largest() == (PICO_VIEW_ARENA & ~7) - 8) {
+		void *m = view_arena_base();
+		view_arena_init(NULL, 0);
+		free(m);
+	}
+#endif
 }
 #endif
 

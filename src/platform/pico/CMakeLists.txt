@@ -16,6 +16,7 @@ else()
     set(PSRAM_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/psram/psram_spi.c
         ${CMAKE_CURRENT_SOURCE_DIR}/psram_alloc.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/view_arena.c
     )
 endif()
 

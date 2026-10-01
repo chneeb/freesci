@@ -71,6 +71,79 @@ extern int   psram_heap_owns(const void *p);
 #	define PSRAM_REALLOC_IF_OWNED(p, n) ((void)0)
 #endif
 
+#ifdef PICO_VIEW_ARENA
+/* --- The VGA view arena (PIO; view_arena.h) ----------------------------------
+   While a view is being decoded (g_view_arena_active, set by gfxr_get_view)
+   every malloc/calloc is served from the arena first and falls back to the
+   heap when the arena has no fitting block. free/realloc route by ownership,
+   like the mapped target's PSRAM heap above, because the view's blocks are
+   released through every path (gfxr_free_view, raw free, sci_free). Arena
+   blocks are never counted in the census histogram; their site registrations
+   (sci_memory.c) are dropped on free like any other. */
+#include "view_arena.h"
+
+static void *
+view_arena_try(size_t n)
+{
+	return g_view_arena_active ? view_arena_alloc(n) : NULL;
+}
+
+/* realloc of an arena block: in place when it fits, else move (to the arena
+   while a decode is active, else to the heap). */
+static void *
+view_arena_realloc(void *p, size_t n)
+{
+	void *q;
+	size_t old = view_arena_usable(p);
+
+	if (n == 0) {
+		view_arena_free(p);
+		return NULL;
+	}
+	if (n <= old)
+		return p;
+	q = view_arena_try(n);
+	if (!q)
+		q = __real_malloc(n);
+	if (!q) {
+		printf("realloc %u failed to allocate memory\n", (unsigned) n);
+		return NULL; /* p stays valid, as realloc promises */
+	}
+	memcpy(q, p, old);
+	view_arena_free(p);
+	return q;
+}
+#	define VIEW_ARENA_MALLOC(n) \
+		do { void *_va = view_arena_try(n); if (_va) return _va; } while (0)
+#	define VIEW_ARENA_CALLOC(c, n) \
+		do { if ((n) == 0 || (c) <= (size_t)-1 / (n)) { \
+			void *_va = view_arena_try((c) * (n)); \
+			if (_va) { memset(_va, 0, (c) * (n)); return _va; } } } while (0)
+#	define VIEW_ARENA_REALLOC_IF_OWNED(p, n) \
+		do { if (view_arena_owns(p)) return view_arena_realloc((p), (n)); } while (0)
+#	define VIEW_ARENA_OWNS(p) view_arena_owns(p)
+#else
+#	define VIEW_ARENA_MALLOC(n)              ((void)0)
+#	define VIEW_ARENA_CALLOC(c, n)           ((void)0)
+#	define VIEW_ARENA_REALLOC_IF_OWNED(p, n) ((void)0)
+#	define VIEW_ARENA_OWNS(p)                0
+#endif
+
+#ifndef PICO_PSRAM_MAPPED
+/* PIO links with --wrap=malloc_usable_size (top-level CMakeLists.txt), so the
+   live-byte and census accounting that calls it on every block keeps working
+   for arena blocks. Heap blocks pass straight through. */
+extern size_t __real_malloc_usable_size(void *ptr);
+
+size_t
+__wrap_malloc_usable_size(void *ptr)
+{
+	if (VIEW_ARENA_OWNS(ptr))
+		return view_arena_usable(ptr);
+	return __real_malloc_usable_size(ptr);
+}
+#endif
+
 /* Largest block the allocator can hand out right now, by bisection with the
    REAL allocator (so no "malloc N failed" noise and no census accounting).
    Includes what the heap can still grow into via sbrk -- it is literally "would
@@ -667,6 +740,11 @@ census_first_failure(void)
 		return;
 	dumped = 1;
 	census_depth++;
+#ifdef PICO_VIEW_ARENA
+	if (view_arena_base())
+		printf("[view] arena: %u bytes free, largest %u\n",
+		       (unsigned) view_arena_free_bytes(), (unsigned) view_arena_largest());
+#endif
 	census_dump_oom();
 	census_depth--;
 }
@@ -674,7 +752,9 @@ census_first_failure(void)
 void *
 __wrap_malloc(size_t size)
 {
-	void *rc = __real_malloc(size);
+	void *rc;
+	VIEW_ARENA_MALLOC(size);
+	rc = __real_malloc(size);
 	if (!rc) {
 		printf("malloc %u failed to allocate memory\n", (unsigned) size);
 		census_first_failure();
@@ -691,6 +771,7 @@ void *
 __wrap_calloc(size_t count, size_t size)
 {
 	void *rc;
+	VIEW_ARENA_CALLOC(count, size);
 	census_depth++;
 	rc = __real_calloc(count, size);  /* may call __wrap_malloc (suppressed) */
 	census_depth--;
@@ -710,6 +791,16 @@ __wrap_realloc(void *mem, size_t size)
 {
 	size_t oldb;
 	PSRAM_REALLOC_IF_OWNED(mem, size);
+	if (mem && VIEW_ARENA_OWNS(mem)) {
+		void *moved;
+		census_site_deregister(mem); /* the sci layer re-registers the result */
+		moved = view_arena_realloc(mem, size);
+		if (moved && !VIEW_ARENA_OWNS(moved)) /* moved out to the heap */
+			census_add_size(malloc_usable_size(moved));
+		else if (!moved && size)
+			census_first_failure();
+		return moved;
+	}
 	oldb = mem ? malloc_usable_size(mem) : 0;
 	void *rc;
 	if (mem)
@@ -733,6 +824,11 @@ void
 __wrap_free(void *mem)
 {
 	PSRAM_FREE_IF_OWNED(mem);
+	if (mem && VIEW_ARENA_OWNS(mem)) {
+		census_site_deregister(mem);
+		view_arena_free(mem);
+		return;
+	}
 	if (mem && census_depth == 0)
 		census_sub_size(malloc_usable_size(mem));
 	if (mem)
@@ -759,7 +855,9 @@ void census_checkpoint(const char *tag) { (void)tag; }
 void *
 __wrap_malloc(size_t size)
 {
-	void *rc = __real_malloc(size);
+	void *rc;
+	VIEW_ARENA_MALLOC(size);
+	rc = __real_malloc(size);
 	if (!rc)
 		printf("malloc %u failed to allocate memory\n", (unsigned) size);
 	return rc;
@@ -768,7 +866,9 @@ __wrap_malloc(size_t size)
 void *
 __wrap_calloc(size_t count, size_t size)
 {
-	void *rc = __real_calloc(count, size);
+	void *rc;
+	VIEW_ARENA_CALLOC(count, size);
+	rc = __real_calloc(count, size);
 	if (!rc)
 		printf("calloc %u failed to allocate memory\n",
 		       (unsigned) (count * size));
@@ -780,6 +880,7 @@ __wrap_realloc(void *mem, size_t size)
 {
 	void *rc;
 	PSRAM_REALLOC_IF_OWNED(mem, size);
+	VIEW_ARENA_REALLOC_IF_OWNED(mem, size);
 	rc = __real_realloc(mem, size);
 	if (!rc)
 		printf("realloc %u failed to allocate memory\n", (unsigned) size);
@@ -790,6 +891,10 @@ void
 __wrap_free(void *mem)
 {
 	PSRAM_FREE_IF_OWNED(mem);
+	if (VIEW_ARENA_OWNS(mem)) {
+		view_arena_free(mem);
+		return;
+	}
 	__real_free(mem);
 }
 
