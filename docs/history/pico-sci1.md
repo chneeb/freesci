@@ -279,3 +279,11 @@ Offline:
   ownership symbols, which live in decompress0.c's HAVE_PICO part.)
 - Desktop Jones under ASan with the same routing (shim; `GFXR_VIEW_BUDGET=8000`, a 20 KB arena so it runs full),
   the eviction key script for 225 s: 1.59 M arena allocations and frees, 0 ASan errors, chain checked on every free.
+
+**Headroom rule removed (same day).** The first census run with the arena: Jones moved very slowly, and the faces
+were sometimes garbled with random colours. The eviction that kept 16 KB free in the arena thrashed: view 0 alone
+is 15.9 KB, so with it cached almost any second view pushed the free space under 16 KB and evicted a view the next
+frame re-decoded from SD. Eviction is back to the plain 32 KB budget (as before the arena); a view that does not fit
+the arena goes to the heap. No code path keeps a cel pointer across another `gfxr_get_view` (only the mouse
+pointer, which is never evicted) and the census writes no tags into blocks, so the garbled faces are suspected to
+be a side effect of the thrashing -- unconfirmed, to re-check on the next run.

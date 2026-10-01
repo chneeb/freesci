@@ -40,10 +40,6 @@
 #endif
 #ifdef PICO_VIEW_ARENA
 #include "view_arena.h"
-/* Free space the arena must offer before the next view decode: the largest
-   view's metadata in Jones in the Fast Lane (view 0: 13 loops, 145 cels) is
-   15,878 bytes. A view that still does not fit spills to the heap. */
-#define GFXR_VIEW_ARENA_HEADROOM 16384
 #endif
 
 #undef TIME_PICDRAWING
@@ -652,17 +648,12 @@ gfxr_enforce_view_budget(gfx_resstate_t *state, sbtree_t *tree, int keep)
 		b.oldest_use = 0;
 		b.driver = state->driver;
 		sbtree_foreach(tree, (void *) &b, gfxr_budget_scan_func);
-		if (b.oldest_nr < 0)
+		/* Budget only. Evicting further to keep the arena's free space for the
+		   next decode made Jones thrash on the device (view 0 alone is 15.9 KB:
+		   every frame evicted a view the next frame re-decoded); a view that
+		   does not fit the arena goes to the heap instead. */
+		if (b.total <= GFXR_VIEW_BUDGET || b.oldest_nr < 0)
 			return;
-#ifdef PICO_VIEW_ARENA
-		/* also keep room for the next decode in the arena */
-		if (b.total <= GFXR_VIEW_BUDGET
-		    && (!view_arena_base() || view_arena_largest() >= GFXR_VIEW_ARENA_HEADROOM))
-			return;
-#else
-		if (b.total <= GFXR_VIEW_BUDGET)
-			return;
-#endif
 		sbtree_foreach(tree, (void *) &b, gfxr_budget_evict_func);
 	}
 }
