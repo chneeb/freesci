@@ -544,6 +544,9 @@ void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int c
         } else
             ps->palette[i][0] = ps->palette[i][1] = ps->palette[i][2] = 0;
     }
+    /* SCI1's system white: entry 255 is white whatever the picture's palette
+       holds (kgraphics.c get_pic_color, the title bar and menus). */
+    ps->palette[255][0] = ps->palette[255][1] = ps->palette[255][2] = 255;
 #ifdef PICO_LCD_16BIT
     pico_rebuild_pal565(ps);
 #endif

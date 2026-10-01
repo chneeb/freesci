@@ -317,6 +317,51 @@ _sci1_alloc_system_colors(state_t *s)
 	gfxop_set_system_color(s->gfx_state, &black);
 }
 
+/* The 16 EGA colours for a VGA game. The interpreter itself still draws with
+   them -- the title bar and its menus are black on ega_colors[15] -- and they
+   were left all zero (black) for VGA, so Jones in the Fast Lane's menu was
+   black on black. Black and white are SCI1's fixed system colours 0 and 255;
+   the others are the nearest entries of the static palette. Both the colour
+   and its index are set: desktop draws the RGB, the Pico the index. */
+static void
+_sci1_alloc_ega_colors(state_t *s)
+{
+	gfx_pixmap_color_t *pal = s->gfx_state->resstate->static_palette;
+	int pal_nr = s->gfx_state->resstate->static_palette_entries;
+	int i, j;
+
+	for (i = 0; i < 16; i++) {
+		int r = gfx_sci0_image_colors[sci0_palette][i].r;
+		int g = gfx_sci0_image_colors[sci0_palette][i].g;
+		int b = gfx_sci0_image_colors[sci0_palette][i].b;
+		int best = (i == 15) ? 255 : 0;
+
+		if (pal && i != 0 && i != 15) {
+			int best_d = -1;
+			for (j = 1; j < pal_nr && j < 255; j++) {
+				int dr = pal[j].r - r, dg = pal[j].g - g, db = pal[j].b - b;
+				int d = dr * dr + dg * dg + db * db;
+				if (best_d < 0 || d < best_d) {
+					best_d = d;
+					best = j;
+				}
+			}
+		}
+		if (pal && best < pal_nr && i != 0 && i != 15) {
+			r = pal[best].r;
+			g = pal[best].g;
+			b = pal[best].b;
+		} /* 0 and 255 are black and white whatever the palette resource holds */
+		s->ega_colors[i].visual.global_index = best;
+		s->ega_colors[i].visual.r = r;
+		s->ega_colors[i].visual.g = g;
+		s->ega_colors[i].visual.b = b;
+		s->ega_colors[i].alpha = 0;
+		s->ega_colors[i].priority = s->ega_colors[i].control = 0;
+		s->ega_colors[i].mask = GFX_MASK_VISUAL;
+	}
+}
+
 int
 _reset_graphics_input(state_t *s)
 {
@@ -346,6 +391,7 @@ _reset_graphics_input(state_t *s)
 			  gfxr_read_pal1_amiga(&s->gfx_state->resstate->static_palette_entries, f);
 			fclose(f);
 			_sci1_alloc_system_colors(s);
+			_sci1_alloc_ega_colors(s);
 		} else {
 			resource = scir_find_resource(s->resmgr, sci_palette, 999, 1);
 			if (resource) {
@@ -358,6 +404,7 @@ _reset_graphics_input(state_t *s)
 					  gfxr_read_pal11(999, &s->gfx_state->resstate->static_palette_entries, 
 							    resource->data, resource->size); 
 				_sci1_alloc_system_colors(s);
+				_sci1_alloc_ega_colors(s);
 				scir_unlock_resource(s->resmgr, resource, sci_palette, 999);
 			} else
 				sciprintf("Couldn't find the default palette!\n");
@@ -403,22 +450,12 @@ _reset_graphics_input(state_t *s)
 	s->iconbar_port = gfxw_new_port(s->visual, NULL, gfx_rect(0, 0, 320, 200), s->ega_colors[0], transparent);
 	s->iconbar_port->flags |= GFXW_FLAG_NO_IMPLICIT_SWITCH;
 
-	if (s->resmgr->sci_version >= SCI_VERSION_01_VGA)
-	{
-		gfx_color_t fgcolor;
-		gfx_color_t bgcolor;
-
-#if 0
-		fgcolor.visual = s->gfx_state->resstate->static_palette[0];
-		fgcolor.mask = GFX_MASK_VISUAL;
-		bgcolor.visual = s->gfx_state->resstate->static_palette[255];
-		bgcolor.mask = GFX_MASK_VISUAL;
-#endif
-		s->titlebar_port = gfxw_new_port(s->visual, NULL, gfx_rect(0, 0, 320, 10), 
-						 fgcolor, bgcolor);
-	} else
-		s->titlebar_port = gfxw_new_port(s->visual, NULL, gfx_rect(0, 0, 320, 10), 
-						 s->ega_colors[0], s->ega_colors[15]);
+	/* Black on white for every version. VGA games used to get two
+	   uninitialised stack colours here (the static-palette setup was #if 0'd
+	   out), so Jones in the Fast Lane's menu came up black on black; the EGA
+	   colours are now set for VGA too (_sci1_alloc_ega_colors). */
+	s->titlebar_port = gfxw_new_port(s->visual, NULL, gfx_rect(0, 0, 320, 10),
+					 s->ega_colors[0], s->ega_colors[15]);
 	s->titlebar_port->color.mask |= GFX_MASK_PRIORITY;
 	s->titlebar_port->color.priority = 11;
 	s->titlebar_port->bgcolor.mask |= GFX_MASK_PRIORITY;

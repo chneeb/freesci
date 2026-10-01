@@ -318,3 +318,24 @@ mid-game save):
   debug breakpoint in `songit_tee_death_notification` (iterator.c:1894, "Missed breakpoint") and the process dies.
   The stock build does it on a forced restart (a scratch hook calling `kRestartGame` at 70 s). Not investigated.
 `.bss` PIO unchanged (31,456); Pimoroni and desktop untouched.
+
+## Ninth run: Jones completes its round -- and two colour bugs
+
+No OOM with the compact maps: Jones finished its turn and the player's next one started. Two glitches, and an SQ3
+regression from the same build:
+
+- **Uninitialised `pico_pal_insert` (all games).** `gfx_new_pixmap` never set the field, so text and other non-view
+  pixmaps carried malloc leftovers, and `pico_blit_indexed` wrote them into the LCD palette whenever they looked like
+  an SRAM pointer. The `[pal] bad insert ptr` lines (Jones: a text pixmap; SQ3: the 320x200 background) and the
+  earlier HardFault with BFAR 0x70000000 were the cases the guard caught; the rest silently recoloured the screen.
+  The compact hash maps moved the heap layout and so the leftovers: SQ3's quit dialog came up with a light brown
+  text background. Now NULL in `gfx_new_pixmap`; this also closes the "text pixmap one-byte overwrite" open item --
+  there was no overwrite.
+- **VGA menu black on black (desktop too).** For VGA games the title-bar port got two uninitialised stack colours
+  (the static-palette setup in `game.c` was `#if 0`), and `ega_colors[16]` -- which the interpreter's own UI uses --
+  was never filled. `_sci1_alloc_ega_colors` fills them for VGA (0 black, 15 white = SCI1's system 0 and 255, the
+  rest nearest in the static palette) and the title bar uses them for every version. Entry 255 of Jones' palette 999
+  is not white, so the Pico driver now forces LCD entry 255 to white for VGA pictures, as SCI1 does (get_pic_color
+  already returned white for 255). Desktop: menu black on white, selection inverted.
+- Jones' clock red during his turn: not explained yet -- either the garbage inserts above or the view-palette
+  conflict (the merge work). Re-check with this build.
