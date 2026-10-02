@@ -422,3 +422,24 @@ the one alive at exit). It is loaded once per game now; the resource state's `st
 it. A probe showed Jones never hits this case (its panels are new pictures whose previous palette is the shared
 static one), so it was NOT the climb, but the free is correct and kept (embedded views mark the borrowed palette
 external, so no double free).
+
+## Fourteenth run: Jones stuck in the Employment Office -- scripts that dispose of themselves (engine, desktop too)
+
+Normal build, week-2 savegame restored: at the end of the week, Jones' turn froze in the Employment Office (music on,
+Escape menu dead). Reproduced on desktop with the user's savegame (~/.freesci/jones/save_1), with and without the GC
+pool and without the save-under fix -- an old engine bug. Traced with scratch probes (kernel-call histogram, VM call
+stack, an instruction trace through scriptdebug.c's disassembler, a property watch):
+- The dialog loop (`employment doit`, script 255) waits for a choice; for the computer player the choice comes from
+  `computerScript` (script 206), attached with `setScript` WITHOUT `init` and then `cue`d once -- the code relies on a
+  FRESH instance, state -1. It had state 21: a finished state machine from Jones' previous visit. Resetting it to -1
+  (experiment) made Jones work through the employers and the game went on into week 3.
+- The savegame had script 206 loaded with 10 lockers. Every ScriptID call on a loaded script adds a locker, and
+  `kDisposeScript` resets them to 1 only when NOT called from the script's own code; Jones' employment dialog disposes
+  of 206 from inside 206 (`[dispose] script 206 lockers 17 own segment 1`), so it only lost one locker and was never
+  unloaded; the next visit reused the old objects.
+Fix (kscripts.c, all games): a self-dispose is deferred and carried out in full (lockers to 1, uninstantiate) as soon
+as no execution-stack frame runs in that script; checked at every callk. In one desktop run seven scripts went through
+it (206, 207, 210, 107, 232, 111, 217) -- all of them used to stay loaded for good, script memory the Pico never got
+back. Regression (ASan, SQ3/KQ4/PQ2/CB restored, same keys): differences only of the size two runs of the same binary
+show (walking/driving timing); 0 errors. Old savegames that already hold a stale 206 still hang once at the next
+Employment Office visit. vocab_debug.c's opcode reader (debugging tools only) no longer trusts vocab 998's layout.
