@@ -241,12 +241,20 @@ opcode* vocabulary_get_opcodes(resource_mgr_t *resmgr)
 	}
 
 	count=getInt(r->data);
+	if (count < 0 || count > 256 || 2 + 2 * count > (int) r->size)
+		count = 0; /* not the layout this reader knows: all "undefined" */
 
 	o= (opcode*)sci_malloc(sizeof(opcode)*256);
 	for(i=0; i<count; i++)
 		{
 			int offset=getInt(r->data+2+i*2);
-			int len=getInt(r->data+offset)-2;
+			int len;
+
+			if (offset < 0 || offset + 4 > (int) r->size)
+				break;
+			len=getInt(r->data+offset)-2;
+			if (len < 0 || offset + 4 + len > (int) r->size)
+				break; /* the remaining names are "undefined" below */
 			o[i].type=getInt(r->data+offset+2);
 			o[i].number=i;
 			o[i].name= (char*)sci_malloc(len+1);
@@ -256,6 +264,7 @@ opcode* vocabulary_get_opcodes(resource_mgr_t *resmgr)
 			printf("Opcode %02X: %s, %d\n", i, o[i].name, o[i].type);
 #endif
 		}
+	count = i;
 	for(i=count; i<256; i++)
 		{
 			o[i].type=0;
