@@ -433,6 +433,27 @@ void *sci_malloc_sram(size_t size);
 #	define sci_malloc_sram(size) sci_malloc(size)
 #endif
 
+/* The garbage collector's temporary memory (gc.c, its reg_t hash maps, the
+   segment interfaces). On the PIO Pico one run_gc borrows the idle 32 KB
+   priority scratch for it (gc_pool_begin/end); everywhere else, and when the
+   pool is not active or full, these are plain sci_malloc/sci_calloc/sci_free.
+   See sci_memory.c. */
+#if (defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)) || defined(GC_POOL_TEST)
+#	define SCI_GC_POOL 1 /* GC_POOL_TEST: the same pool on desktop, for testing */
+void gc_pool_begin(void *mem, size_t size);
+void gc_pool_end(void);
+void gc_pool_use_keep(int on);
+void *gc_pool_alloc(size_t n, int zero);
+void gc_pool_free(void *p);
+#	define GC_MALLOC(n) gc_pool_alloc((n), 0)
+#	define GC_CALLOC(c, n) gc_pool_alloc((size_t)(c) * (size_t)(n), 1)
+#	define GC_FREE(p) gc_pool_free(p)
+#else
+#	define GC_MALLOC(n) sci_malloc(n)
+#	define GC_CALLOC(c, n) sci_calloc((c), (n))
+#	define GC_FREE(p) sci_free(p)
+#endif
+
 #ifdef _WIN32
 extern void
 debug_win32_memory(int dbg_setting);

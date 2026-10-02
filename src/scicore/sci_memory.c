@@ -602,3 +602,141 @@ sci_refcount_memdup(void *data, size_t len)
 	memcpy(dest, data, len);
 	return dest;
 }
+
+#ifdef SCI_GC_POOL
+/* ---- The GC pool (see sci_memory.h) -----------------------------------------
+   Jones in the Fast Lane ran out of heap in the GC's own maps: one run builds
+   a map of every reachable reference (~640 nodes of 12 bytes plus buckets),
+   then a second, normalised one, ~20 KB of short-lived small blocks at the
+   moment the heap is fullest. The 32 KB priority scratch is idle while the GC
+   runs (it is only used inside a picture or view decode, and the GC runs at
+   callk, between kernel calls), so run_gc borrows it.
+
+   Two stacks over the block: the TEMPORARY end grows down from the top and
+   holds the reference search (segment interfaces, the first map, worklist
+   chunks); it resets as soon as everything in it is freed. The KEEP end grows
+   up from the bottom and holds the normalised map that run_gc uses to the end
+   (gc_pool_use_keep). Frees inside the pool only count down; an allocation
+   that does not fit goes to the heap, and so does everything outside a GC
+   run. 4-byte alignment: these are ints, reg_ts and pointers. */
+static unsigned char *gcp_base = NULL, *gcp_end = NULL;
+static unsigned char *gcp_tmp, *gcp_keep; /* the two cursors */
+static int gcp_tmp_live, gcp_keep_live, gcp_use_keep;
+static unsigned char *gcp_last_base = NULL, *gcp_last_end = NULL; /* after gc_pool_end */
+
+/* Desktop test builds (GC_POOL_TEST) under AddressSanitizer: memory the pool
+   does not currently hand out is poisoned, so a use after the GC run, or of a
+   stack region after it reset, is reported. */
+#if defined(__SANITIZE_ADDRESS__)
+#include <sanitizer/asan_interface.h>
+#define GCP_POISON(p, n) ASAN_POISON_MEMORY_REGION((p), (n))
+#define GCP_UNPOISON(p, n) ASAN_UNPOISON_MEMORY_REGION((p), (n))
+#else
+#define GCP_POISON(p, n) ((void)0)
+#define GCP_UNPOISON(p, n) ((void)0)
+#endif
+#ifdef GC_POOL_TEST
+static size_t gcp_high = 0;
+static unsigned long gcp_spills = 0, gcp_runs = 0;
+#endif
+
+void
+gc_pool_begin(void *mem, size_t size)
+{
+	gcp_base = (unsigned char *) mem;
+	gcp_end = gcp_base + (size & ~(size_t)3);
+	gcp_last_base = gcp_base;
+	gcp_last_end = gcp_end;
+	gcp_tmp = gcp_end;
+	gcp_keep = gcp_base;
+	gcp_tmp_live = gcp_keep_live = gcp_use_keep = 0;
+	GCP_POISON(gcp_base, gcp_end - gcp_base);
+#ifdef GC_POOL_TEST
+	gcp_runs++;
+#endif
+}
+
+void
+gc_pool_end(void)
+{
+	if (gcp_tmp_live || gcp_keep_live)
+		sciprintf("[gc] pool ended with %d+%d blocks still live\n", gcp_tmp_live, gcp_keep_live);
+#ifdef GC_POOL_TEST
+	if (gcp_runs % 20 == 0)
+		fprintf(stderr, "[gcpool] %lu runs, high water %lu of %lu bytes, %lu spills\n", gcp_runs,
+			(unsigned long) gcp_high, (unsigned long)(gcp_end - gcp_base), gcp_spills);
+#endif
+	if (gcp_base)
+		GCP_POISON(gcp_base, gcp_end - gcp_base);
+	gcp_base = gcp_end = NULL;
+}
+
+void
+gc_pool_use_keep(int on)
+{
+	gcp_use_keep = on;
+}
+
+void *
+gc_pool_alloc(size_t n, int zero)
+{
+	void *p = NULL;
+
+	n = (n + 3) & ~(size_t)3;
+	if (gcp_base && n && n <= (size_t)(gcp_tmp - gcp_keep)) {
+		if (gcp_use_keep) {
+			p = gcp_keep;
+			gcp_keep += n;
+			gcp_keep_live++;
+		} else {
+			gcp_tmp -= n;
+			p = gcp_tmp;
+			gcp_tmp_live++;
+		}
+		GCP_UNPOISON(p, n);
+#ifdef GC_POOL_TEST
+		if ((size_t)((gcp_keep - gcp_base) + (gcp_end - gcp_tmp)) > gcp_high)
+			gcp_high = (gcp_keep - gcp_base) + (gcp_end - gcp_tmp);
+#endif
+		if (zero)
+			memset(p, 0, n);
+		return p;
+	}
+#ifdef GC_POOL_TEST
+	if (gcp_base)
+		gcp_spills++;
+#endif
+	return zero ? sci_calloc(1, n ? n : 1) : sci_malloc(n ? n : 1);
+}
+
+void
+gc_pool_free(void *p)
+{
+	unsigned char *q = (unsigned char *) p;
+
+	if (!q)
+		return;
+	if (gcp_base && q >= gcp_base && q < gcp_end) {
+		if (q >= gcp_tmp) {
+			if (--gcp_tmp_live == 0) {
+				GCP_POISON(gcp_tmp, gcp_end - gcp_tmp);
+				gcp_tmp = gcp_end;
+			}
+		} else if (--gcp_keep_live == 0) {
+			GCP_POISON(gcp_base, gcp_keep - gcp_base);
+			gcp_keep = gcp_base;
+		}
+		return;
+	}
+	if (q >= gcp_last_base && q < gcp_last_end) {
+		/* A pool block freed after its GC run: never hand it to the heap. */
+		static int logged = 0;
+		if (!logged) {
+			logged = 1;
+			sciprintf("[gc] pool block %p freed after the GC run\n", p);
+		}
+		return;
+	}
+	sci_free(p);
+}
+#endif
