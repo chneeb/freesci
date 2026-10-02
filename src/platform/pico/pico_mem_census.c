@@ -665,6 +665,11 @@ census_checkpoint(const char *tag)
 
 	printf("[mem] CHECKPOINT %s: free=%lu arena=%lu\n", tag,
 	       (unsigned long) mi.fordblks, (unsigned long) mi.arena);
+#ifdef PICO_VIEW_ARENA
+	if (view_arena_base())
+		printf("[view] arena: %u bytes free, largest %u\n",
+		       (unsigned) view_arena_free_bytes(), (unsigned) view_arena_largest());
+#endif
 	census_print(1, 40);
 	census_heap_walk(tag);
 }

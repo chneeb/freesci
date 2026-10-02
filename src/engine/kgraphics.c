@@ -3813,6 +3813,24 @@ kAnimate(state_t *s, int funct_nr, int argc, reg_t *argv)
 	int open_animation = 0;
 	int real_pic_not_valid;
 
+#if defined(HAVE_PICO) && defined(FSCI_PROBE_MEM_CENSUS)
+	{ /* Census builds: the live sites every 2 minutes of play, so a slow
+	     climb (one picture all game: Jones in the Fast Lane) names itself
+	     before the failure does. */
+		static long next_s = -1;
+		long now_s, now_us;
+
+		sci_gettime(&now_s, &now_us);
+		if (next_s < 0)
+			next_s = now_s + 120;
+		else if (now_s >= next_s) {
+			extern void census_checkpoint(const char *tag);
+			next_s = now_s + 120;
+			census_checkpoint("periodic");
+		}
+	}
+#endif
+
 
 	process_sound_events(s); /* Take care of incoming events (kAnimate is called semi-regularly) */
 	_k_animate_ran = 1; /* Used by some of the invoked functions to check for recursion, which may,
