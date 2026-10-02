@@ -397,3 +397,28 @@ a resource that is not in memory -- after a restore the cache is empty and the o
 board was decompressed into a fresh heap block just to be freed, before `visual[0]` is lent as the decompress target.
 Now `scir_test_resource` (look up, never load). Pico-only code; it also spares SCI0 games a pointless pic load after a
 restore. The slow-climb question is still open: the census run did not get far enough for periodic checkpoints.
+
+## Thirteenth run (census after the restore fix) -- capacity: the GC pool and the palettes
+
+The census run restored the week-2 savegame, re-entered the board and played on, then the heap filled completely
+(24 B free, no gaps). Not one leak but several normal things: fonts (15 KB, loaded on first use), dialog widgets and
+text pixmaps (~17 KB), the GC's map mid-run (8.7 KB in 639 nodes -- the allocation that failed, as in the normal
+build), and 8 resident 2 KB palettes (`sci_pal_1.c:132`).
+
+**The GC pool.** `run_gc` borrows the idle 32 KB priority scratch (only used inside a picture/view decode; the GC runs
+at callk, between kernel calls) for its segment interfaces, both reg_t maps, their nodes and the worklist chunks. Two
+stacks: temporaries from the top (reset when all freed), the kept normalised map from the bottom; heap fallback when
+full; worklist chunks recycled. Routed explicitly (GC_MALLOC/GC_CALLOC/GC_FREE in gc.c, seg_manager.c's seg
+interfaces and, via MAP_* macros in hashmap.c, the reg_t maps only) -- NOT at the malloc chokepoint, so no engine
+allocation made during a GC can land in the scratch. A pool block freed after its run is ignored and logged. PIO only;
+`-DGC_POOL_TEST=1` enables the same pool on desktop with a static buffer and ASan poisoning of everything the pool is
+not handing out. Desktop, ASan, GC every 64 kernel calls: SQ3/KQ4/PQ2/CB 240-380 runs each, Jones 480 runs at the
+Pico's 1024; high water 18-23 KB of 32 KB on 64-bit, 0 spills, 0 errors; SQ3/PQ2 pixel-identical.
+
+**The palettes.** (1) `_reset_graphics_input` read a fresh static palette 999 on every call -- game start, restart and
+each savegame restore -- without freeing the previous copy (LSan: Jones + one forced restart leaked 2 copies, now 1,
+the one alive at exit). It is loaded once per game now; the resource state's `static_palette` is initialised to NULL
+(it came from an uninitialised sci_malloc). (2) `SET_PALETTE` replaced a palette the visual map owned without freeing
+it. A probe showed Jones never hits this case (its panels are new pictures whose previous palette is the shared
+static one), so it was NOT the climb, but the free is correct and kept (embedded views mark the borrowed palette
+external, so no double free).

@@ -385,8 +385,17 @@ _reset_graphics_input(state_t *s)
 	} else
 	{
 		/* Check for Amiga palette file. */
-		FILE *f = sci_fopen("spal", "rb");
-		if (f) {
+		FILE *f;
+
+		/* The static palette is loaded once per game. This runs again on
+		   every restart and savegame restore, and used to read a fresh copy
+		   each time without freeing the old one: 2 KB lost per restore (8
+		   copies resident in a Jones in the Fast Lane census after a
+		   restore). The palette never changes within a game. */
+		if (s->gfx_state->resstate->static_palette) {
+			_sci1_alloc_system_colors(s);
+			_sci1_alloc_ega_colors(s);
+		} else if ((f = sci_fopen("spal", "rb"))) {
 			s->gfx_state->resstate->static_palette = 
 			  gfxr_read_pal1_amiga(&s->gfx_state->resstate->static_palette_entries, f);
 			fclose(f);

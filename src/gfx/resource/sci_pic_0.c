@@ -2070,6 +2070,15 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 
 			case PIC_SCI1_OPX_SET_PALETTE:
 				p0printf("Set palette @%d\n", pos);
+				/* A palette the pixmap owns is replaced, not kept: an overlay
+				   (kDrawPic onto the current picture) sets its own palette on
+				   the same visual map, and the old one leaked -- 2 KB for every
+				   panel Jones in the Fast Lane opened over its board, the slow
+				   climb that ended its long games. */
+				if (pic->visual_map->colors
+				    && !(pic->visual_map->flags & GFX_PIXMAP_FLAG_EXTERNAL_PALETTE))
+					free(pic->visual_map->colors);
+				pic->visual_map->colors = NULL;
 				pic->visual_map->flags &= ~GFX_PIXMAP_FLAG_EXTERNAL_PALETTE;
 #ifdef HAVE_PICO
 				if (_pdc) {
@@ -2324,6 +2333,9 @@ gfxr_draw_pic11(gfxr_pic_t *pic, int flags, int default_palette, int size,
 			    1, /* 1bpp, which handles masks and the rest for us */
 			    0, 0, 0, 0, 0, 0, 0, 0, 16, 0);
 
+	if (pic->visual_map->colors
+	    && !(pic->visual_map->flags & GFX_PIXMAP_FLAG_EXTERNAL_PALETTE))
+		free(pic->visual_map->colors); /* replaced, not leaked (see SET_PALETTE above) */
 	pic->visual_map->colors = gfxr_read_pal11(-1, &(pic->visual_map->colors_nr), resource + palette_data_ptr, 1284);
 
 	if (has_bitmap)
