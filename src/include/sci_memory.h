@@ -438,7 +438,8 @@ void *sci_malloc_sram(size_t size);
    priority scratch for it (gc_pool_begin/end); everywhere else, and when the
    pool is not active or full, these are plain sci_malloc/sci_calloc/sci_free.
    See sci_memory.c. */
-#if (defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED)) || defined(GC_POOL_TEST)
+/* PICO_NO_GC_POOL: a bisect build without it (the heap, as before). */
+#if (defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED) && !defined(PICO_NO_GC_POOL)) || defined(GC_POOL_TEST)
 #	define SCI_GC_POOL 1 /* GC_POOL_TEST: the same pool on desktop, for testing */
 void gc_pool_begin(void *mem, size_t size);
 void gc_pool_end(void);
