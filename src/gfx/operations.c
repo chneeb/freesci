@@ -2478,7 +2478,13 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   state->pic_nr is still the old room number at this point. */
 	{
 		resource_mgr_t *resmgr = (resource_mgr_t *)state->resstate->misc_payload;
-		resource_t *old_res = scir_find_resource(resmgr, sci_pic, state->pic_nr, 0);
+		/* Look the entry up WITHOUT loading it: scir_find_resource loads a
+		   resource that is not in memory. After a savegame restore the cache
+		   is empty and the "old" room is the same one, so that decompressed
+		   the whole picture into a fresh heap block just to evict it -- for
+		   Jones in the Fast Lane's board 55,611 bytes, before visual[0] is
+		   lent as the decompress target below (the OOM after a restore). */
+		resource_t *old_res = scir_test_resource(resmgr, sci_pic, state->pic_nr);
 		scir_evict_resource_data(resmgr, old_res);
 	}
 

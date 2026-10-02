@@ -385,3 +385,15 @@ Desktop checks: Jones into week 2 -- the clock resets and shows only the new wed
 restored and played with the same keys against a baseline binary, screenshots every 10 s: SQ3 and PQ2 pixel-identical;
 KQ4 and CB differ only where the walking character stopped (timing; two runs of the same binary differ the same way);
 0 ASan errors. NB CB's "sticky kDrawCel corners" may be this mechanism too -- re-check.
+
+## Twelfth run: a Jones savegame restore -- the picture loaded just to be evicted
+
+Normal build: Jones' week 2 ran out of heap in the GC's map nodes (12 B, 24 B free; a 4,230 B song had already fallen
+back to silence). A periodic census checkpoint (every 2 minutes of play, census builds only) was added to find a slow
+climb. The census run restored a week-2 savegame: the first Jones restore on the device. The restore itself worked
+(checkpoints `restore-1` .. `restore-5-done`), then re-entering the board failed on `malloc 55611` with ~23 KB
+contiguous: `gfxop_new_pic`'s prologue "evicts the old room's raw pic resource" with `scir_find_resource`, which LOADS
+a resource that is not in memory -- after a restore the cache is empty and the old room is the same room, so the 55 KB
+board was decompressed into a fresh heap block just to be freed, before `visual[0]` is lent as the decompress target.
+Now `scir_test_resource` (look up, never load). Pico-only code; it also spares SCI0 games a pointless pic load after a
+restore. The slow-climb question is still open: the census run did not get far enough for periodic checkpoints.
