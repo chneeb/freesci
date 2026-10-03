@@ -10,6 +10,7 @@
 #include "hw_config.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 
 DWORD get_fattime(void) { return 0; }
@@ -41,6 +42,41 @@ extern int pico_composed_enabled;
     && !defined(PICO_WORKING_PRIORITY) && !defined(PICO_PSRAM_WORKING_PRIORITY)
 extern int pico_static_view_priority_enabled;
 #endif
+
+/* [R] in the chooser: the savegame to restore right after launch ("save_N"),
+   empty for a fresh start. Read by main.c, which hands it to the in-game
+   clean-heap restore path (vm.c). The latest save is the highest-numbered
+   save_N folder holding a "state" file: FreeSCI fills holes and overwrites in
+   place, so that is only exact as long as no save is deleted or overwritten
+   (the PicoCalc has no clock to tell otherwise). */
+char pico_resume_save[16] = "";
+
+static int highest_save(const char *game)
+{
+    char path[NAME_LEN + 40];
+    DIR dir;
+    FILINFO fno;
+    int best = -1;
+
+    snprintf(path, sizeof(path), "0:/freesci/%s", game);
+    if (f_opendir(&dir, path) != FR_OK)
+        return -1;
+    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0]) {
+        int n;
+        char tail;
+        FILINFO st;
+        char statepath[NAME_LEN + 64];
+
+        if (!(fno.fattrib & AM_DIR) || strncasecmp(fno.fname, "save_", 5)
+            || sscanf(fno.fname + 5, "%d%c", &n, &tail) != 1 || n < 0 || n <= best)
+            continue;
+        snprintf(statepath, sizeof(statepath), "0:/freesci/%s/%s/state", game, fno.fname);
+        if (f_stat(statepath, &st) == FR_OK)
+            best = n;
+    }
+    f_closedir(&dir);
+    return best;
+}
 
 bool pico_show_dir_chooser(char *out_path, size_t len)
 {
@@ -78,6 +114,7 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
         if (redraw) {
             lcd_clear();
             lcd_print_string("Select SCI game:\n");
+            lcd_print_string("  [R] resume last save\n");
 #ifdef PICO_CHOOSER_TOGGLES
             /* Per-launch A/B toggles, off by default since 2026-09-29: every
                tested game runs with sound, the composed surface and static-view
@@ -117,7 +154,25 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
         } else if (key == 0xB6) {   /* DOWN */
             if (sel < count - 1) { sel++; redraw = true; }
         } else if (key == 0x0A) {   /* ENTER */
+            pico_resume_save[0] = '\0';
             snprintf(out_path, len, "0:/freesci/%s", names[sel]);
+            return true;
+        } else if (key == 'r' || key == 'R') {
+            int n = highest_save(names[sel]);
+
+            if (n < 0) {
+                char msg[NAME_LEN + 48];
+                snprintf(msg, sizeof(msg), "No saved game for %s.\n\nPress any key.\n", names[sel]);
+                lcd_clear();
+                lcd_print_string(msg);
+                while (kbd_read() < 0)
+                    ;
+                redraw = true;
+                continue;
+            }
+            snprintf(pico_resume_save, sizeof(pico_resume_save), "save_%d", n);
+            snprintf(out_path, len, "0:/freesci/%s", names[sel]);
+            printf("[resume] %s: restoring %s\n", names[sel], pico_resume_save);
             return true;
 #ifdef PICO_CHOOSER_TOGGLES
 #if (defined(PICO_STATIC_VIEW_PRIORITY) || defined(PICO_STATIC_VIEW_BAKE)) \

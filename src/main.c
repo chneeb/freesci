@@ -1484,6 +1484,23 @@ main(int argc, char** argv)
 	gamestate->have_mouse_flag = (cl_options.mouse == DONTCARE)?
 		active_conf->mouse : cl_options.mouse;
 
+#ifdef HAVE_PICO
+	{
+		/* The chooser's [R] (pico_sdcard.c): restore that savegame through
+		   the same clean-heap path an in-game restore takes (vm.c), with its
+		   Pico fixups -- game_restore() below has none of them. The abort
+		   flag makes run_vm hand back before the first instruction, so
+		   _game_run finds the pending restore straight away. */
+		extern char pico_resume_save[];
+
+		if (!savegame_name && pico_resume_save[0]) {
+			g_pico_restore_pending_name = (char *) malloc(strlen(pico_resume_save) + 1);
+			strcpy(g_pico_restore_pending_name, pico_resume_save);
+			pico_resume_save[0] = '\0';
+			script_abort_flag = 1;
+		}
+	}
+#endif
 	if (savegame_name)
 		game_restore(&gamestate, savegame_name);
 	else

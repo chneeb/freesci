@@ -251,6 +251,10 @@ Games must be in subdirectories under `0:/freesci/` on the SD card (e.g. `0:/fre
 The chooser scans that directory, presents a scrollable list via the ILI9488 display,
 and navigates with the I2C keyboard (UP/DOWN/ENTER/ESC). Behaviour is identical to tiny_agi's
 `show_dir_chooser()` — only the root path changed from `0:/agi` to `0:/freesci`.
+**`[R]` resumes the latest save** (2026-10-03): the highest-numbered `save_N` folder with a `state` file in the
+game's directory -- exact only while no save is deleted or overwritten (no RTC: all FatFS times are 1980, which is
+also why the in-game restore lists look unsorted). `main.c` hands the slot to the in-game clean-heap restore path
+(`g_pico_restore_pending_name` + `script_abort_flag`), not to `game_restore()`, which lacks the Pico fixups.
 
 
 ### Debugging Pico offline (disassembler + desktop repro)
