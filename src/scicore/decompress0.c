@@ -40,13 +40,43 @@
    resource type, or a pic/view bigger than the scratch, falls back to
    sci_malloc.  Caller evicts pic/view data immediately (sci_resmgr.c), so the
    scratch is only ever live for one decode at a time. */
-static unsigned char *
+/* A buffer lent for one resource load (gfxr_interpreter_calculate_pic lends
+   the resident 64 KB visual[0] for a VGA pic, which can be ~55 KB decompressed
+   -- far more than the scratch). Like the scratch it is never freed through
+   res->data; the lender ends the loan after the data has gone to PSRAM. */
+unsigned char *g_pico_decompress_borrow = NULL;
+unsigned int g_pico_decompress_borrow_size = 0;
+
+/* A script resource can hold the decompress scratch between loads
+   (decompress01: scripts are copied into their segment on instantiation and
+   read only right after a load, so a resident copy is not needed). Whoever
+   takes the scratch next evicts that owner first -- the owner's next access
+   simply reloads it. resource.c installs the evictor. */
+resource_t *g_pico_scratch_owner = NULL;
+void (*g_pico_scratch_evict)(resource_t *res) = NULL;
+
+void
+pico_scratch_take(void)
+{
+	resource_t *o = g_pico_scratch_owner;
+
+	g_pico_scratch_owner = NULL;
+	if (o && o->data == g_pico_decompress_scratch && g_pico_scratch_evict)
+		g_pico_scratch_evict(o);
+}
+
+unsigned char *
 pico_decompress_alloc(int type, unsigned int size)
 {
+	if (type == sci_pic && g_pico_decompress_borrow
+	    && size <= g_pico_decompress_borrow_size)
+		return g_pico_decompress_borrow;
 	if ((type == sci_pic || type == sci_view)
 	    && g_pico_decompress_scratch
-	    && size <= PICO_DECOMPRESS_SCRATCH_SIZE)
+	    && size <= PICO_DECOMPRESS_SCRATCH_SIZE) {
+		pico_scratch_take();
 		return g_pico_decompress_scratch;
+	}
 	/* Sound is non-essential: on the SRAM-tight Pico its resource may not find
 	   a contiguous block.  Use raw malloc so OOM returns NULL (the caller fails
 	   the song load and the game keeps running silently) instead of sci_malloc's
@@ -74,7 +104,8 @@ pico_decompress_alloc(int type, unsigned int size)
 
 #  define DECOMPRESS_ALLOC_DATA(type, size) pico_decompress_alloc((type), (size))
 #  define DECOMPRESS_FREE_DATA(p) \
-	do { if ((unsigned char*)(p) != g_pico_decompress_scratch) free(p); } while (0)
+	do { if ((unsigned char*)(p) != g_pico_decompress_scratch \
+	         && ((unsigned char*)(p) != g_pico_decompress_borrow || !(p))) free(p); } while (0)
 #else
 #  define DECOMPRESS_ALLOC_DATA(type, size) ((unsigned char*)sci_malloc(size))
 #  define DECOMPRESS_FREE_DATA(p) free(p)
@@ -534,6 +565,53 @@ unsigned long long pico_decomp_us = 0;
 unsigned long pico_decomp_count = 0;
 unsigned long pico_decomp_bytes = 0;
 extern unsigned long long pico_perf_us(void);
+#endif
+
+#ifdef PICO_STREAM_DECOMPRESS
+/* The window for decompress01.c's LZW decoder (decrypt3/gbits), which lives in
+   another file: one stream at a time, like every decompression here. */
+static decomp_stream_t g_ext_stream;
+
+void pico_stream_begin(int fd, unsigned int total) { stream_init(&g_ext_stream, fd, total); }
+guint8 pico_stream_byte(unsigned int i) { return stream_at(&g_ext_stream, i); }
+void pico_stream_end(void) { stream_finish(&g_ext_stream); }
+
+/* decompress01 (SCI01 / VGA resources) through the same window. SCI01 method 0
+   is a plain copy and method 1 is this file's Huffman decoder (SCI0 method 2),
+   so both reuse the stream machinery above. Returns -1 if the method is not
+   streamed in this build (the caller then reads a flat buffer as before), else
+   decrypt2's result. Leaves the fd where a flat read would have. This also has
+   to be used whenever STREAM_M2 is compiled in: decrypt2 then reads its source
+   through SRC2() as a stream descriptor, so a flat buffer would be misread. */
+int
+pico_stream_decompress01(guint8 *dest, int resh, int method, unsigned int complength, int size)
+{
+	decomp_stream_t stm;
+	int rc;
+
+	if (!((method == 0 && STREAM_M0) || (method == 1 && STREAM_M2)))
+		return -1;
+	stream_init(&stm, resh, complength);
+	if (method == 0) {
+		unsigned int done = 0;
+
+		while (done < complength) {
+			unsigned int want = complength - done;
+			int got;
+
+			if (want > STREAM_WINDOW)
+				want = STREAM_WINDOW;
+			got = read(resh, dest + done, want);
+			if (got <= 0)
+				break;
+			done += (unsigned int) got;
+		}
+		rc = (done == complength) ? 0 : SCI_ERROR_IO_ERROR;
+	} else
+		rc = decrypt2(dest, (guint8 *) &stm, size, complength);
+	stream_finish(&stm);
+	return rc;
+}
 #endif
 
 int decompress0(resource_t *result, int resh, int sci_version)

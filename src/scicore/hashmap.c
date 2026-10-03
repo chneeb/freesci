@@ -43,6 +43,14 @@
 #endif
 
 
+/* Allocation for the maps and their nodes; a map type may route them
+   elsewhere (reg_t_hashmap.c: the GC pool). */
+#ifndef MAP_CALLOC
+#  define MAP_CALLOC(c, n) sci_calloc((c), (n))
+#  define MAP_MALLOC(n) sci_malloc(n)
+#  define MAP_FREE(p) free(p)
+#endif
+
 #ifdef DUPLICATOR
 #  define DUP_VALUE(x) DUPLICATOR((x))
 #else
@@ -56,7 +64,7 @@
 TYPE##_hash_map_t *								\
 new_##TYPE##_hash_map(void)							\
 {										\
-	TYPE##_hash_map_t *map = (TYPE##_hash_map_t*)sci_calloc(1, sizeof(TYPE##_hash_map_t));\
+	TYPE##_hash_map_t *map = (TYPE##_hash_map_t*)MAP_CALLOC(1, sizeof(TYPE##_hash_map_t));\
 										\
 	return map;								\
 }										\
@@ -107,7 +115,7 @@ free_##TYPE##_hash_map_node_t##_recursive(TYPE##_hash_map_node_t *node)		\
 	if (node) {								\
 		CLEAR_NODE(node);				                \
 		free_##TYPE##_hash_map_node_t##_recursive(node->next);		\
-		free(node);							\
+		MAP_FREE(node);							\
 	}									\
 }										\
 										\
@@ -124,7 +132,7 @@ free_##TYPE##_hash_map(TYPE##_hash_map_t *map)					\
 										\
 	map->base_value = -42000; /* Trigger problems for people who		\
 			     ** forget to loose the reference  */		\
-	free(map);								\
+	MAP_FREE(map);								\
 }										\
 										\
 int										\
@@ -157,7 +165,7 @@ TYPE##_hash_map_check_value(TYPE##_hash_map_t *map, TYPE value,                 
                 (*node)->next = NULL;                                           \
 		(*node)->name = DUP_VALUE(value);				\
 	} else {								\
-		*node = (TYPE##_hash_map_node_t*)sci_malloc(sizeof(TYPE##_hash_map_node_t));\
+		*node = (TYPE##_hash_map_node_t*)MAP_MALLOC(sizeof(TYPE##_hash_map_node_t));\
 		(*node)->name = DUP_VALUE(value);				\
 		(*node)->value = map->base_value++;				\
                 (*node)->next = NULL;                                           \

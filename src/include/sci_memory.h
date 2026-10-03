@@ -374,6 +374,17 @@ sci_refcount_memdup(void *data, size_t len);
    this — their decompressed data stays resident, so it must not share scratch. */
 #	define PICO_DECOMPRESS_SCRATCH_SIZE 16384
 extern unsigned char *g_pico_decompress_scratch;
+/* One-load lend of a larger buffer (decompress0.c): a VGA pic decompresses into
+   the resident visual[0] instead of a fresh ~55 KB block. Set and cleared by the
+   lender (gfxr_interpreter_calculate_pic); never freed through res->data. */
+extern unsigned char *g_pico_decompress_borrow;
+extern unsigned int g_pico_decompress_borrow_size;
+unsigned char *pico_decompress_alloc(int type, unsigned int size);
+/* Scratch ownership for SCI01 script resources (decompress0.c). */
+struct _resource_struct;
+extern struct _resource_struct *g_pico_scratch_owner;
+extern void (*g_pico_scratch_evict)(struct _resource_struct *res);
+void pico_scratch_take(void);
 
 /* [arenagrow] raw-malloc probe (FSCI_PROBE_ARENA only).  The sci_* allocators
    self-instrument, but the dominant arena-ratchet drivers are RAW malloc()s
@@ -420,6 +431,28 @@ void *pico_sram_alloc_soft(size_t size);
 void *sci_malloc_sram(size_t size);
 #else
 #	define sci_malloc_sram(size) sci_malloc(size)
+#endif
+
+/* The garbage collector's temporary memory (gc.c, its reg_t hash maps, the
+   segment interfaces). On the PIO Pico one run_gc borrows the idle 32 KB
+   priority scratch for it (gc_pool_begin/end); everywhere else, and when the
+   pool is not active or full, these are plain sci_malloc/sci_calloc/sci_free.
+   See sci_memory.c. */
+/* PICO_NO_GC_POOL: a bisect build without it (the heap, as before). */
+#if (defined(HAVE_PICO) && !defined(PICO_PSRAM_MAPPED) && !defined(PICO_NO_GC_POOL)) || defined(GC_POOL_TEST)
+#	define SCI_GC_POOL 1 /* GC_POOL_TEST: the same pool on desktop, for testing */
+void gc_pool_begin(void *mem, size_t size);
+void gc_pool_end(void);
+void gc_pool_use_keep(int on);
+void *gc_pool_alloc(size_t n, int zero);
+void gc_pool_free(void *p);
+#	define GC_MALLOC(n) gc_pool_alloc((n), 0)
+#	define GC_CALLOC(c, n) gc_pool_alloc((size_t)(c) * (size_t)(n), 1)
+#	define GC_FREE(p) gc_pool_free(p)
+#else
+#	define GC_MALLOC(n) sci_malloc(n)
+#	define GC_CALLOC(c, n) sci_calloc((c), (n))
+#	define GC_FREE(p) sci_free(p)
 #endif
 
 #ifdef _WIN32

@@ -26,8 +26,19 @@
 ***************************************************************************/
 /* Reads data from a resource file and stores the result in memory */
 
+#include <stdint.h>
 #include <sci_memory.h>
 #include <sciresource.h>
+
+#ifdef HAVE_PICO
+/* res->data may be the permanent decompress scratch or a lent buffer
+   (decompress0.c): never free those. */
+#  define PICO_DECOMP01_IS_LENT(p) ((p) && ((unsigned char*)(p) == g_pico_decompress_scratch \
+				   || (unsigned char*)(p) == g_pico_decompress_borrow))
+#  define DECOMP01_FREE_DATA(p) do { if (!PICO_DECOMP01_IS_LENT(p)) free(p); } while (0)
+#else
+#  define DECOMP01_FREE_DATA(p) free(p)
+#endif
 
 /***************************************************************************
 * The following code was originally created by Carl Muckenhoupt for his
@@ -54,11 +65,62 @@ static gint16 curtoken, endtoken;
 
 guint32 gbits(int numbits,  guint8 * data, int dlen);
 
+#ifdef PICO_STREAM_DECOMPRESS
+/* Set while decrypt3 reads its input through decompress0.c's 4 KB window
+   instead of a flat copy of the compressed block (pico_decompress01_stream). */
+static int gbits_stream = 0;
+extern void pico_stream_begin(int fd, unsigned int total);
+extern guint8 pico_stream_byte(unsigned int i);
+extern void pico_stream_end(void);
+#  define GBITS_BYTE(data, i) (gbits_stream ? pico_stream_byte(i) : (data)[(i)])
+#else
+#  define GBITS_BYTE(data, i) ((data)[(i)])
+#endif
+
+#ifdef HAVE_PICO
+/* The LZW tables (~20.5 KB) are needed only while one resource decompresses.
+   Once the 32 KB pic-priority scratch exists (gfxop_new_pic's first call),
+   they live in it: that scratch is busy only during a pic decode (after the
+   pic's resource is loaded) and a view's per-cel decode (after the view is
+   decompressed), and no LZW decompression runs inside either. Before it exists
+   -- the scripts loaded at game start -- they are a temporary allocation,
+   released after each decompression (decrypt3_release). They used to be a
+   permanent 20.5 KB (Jones in the Fast Lane census, 2026-10-01). */
+extern unsigned char *g_pico_priority_scratch;
+static int lzw_tables_owned = 0;
+
+static void
+decrypt3_release(void)
+{
+	if (lzw_tables_owned) {
+		free(tokens);
+		free(stak);
+		lzw_tables_owned = 0;
+	}
+	tokens = NULL;
+	stak = NULL;
+}
+#else
+#  define decrypt3_release() do { } while (0)
+#endif
+
 void decryptinit3(void)
 {
 	int i;
+#ifdef HAVE_PICO
+	if (g_pico_priority_scratch && !lzw_tables_owned) {
+		tokens = (struct tokenlist *) g_pico_priority_scratch;
+		stak = (gint8 *) (g_pico_priority_scratch + 0x1004 * sizeof(*tokens));
+	}
+	if (!tokens) {
+		tokens = (struct tokenlist*)sci_malloc(0x1004 * sizeof(*tokens));
+		stak = (gint8*)sci_malloc(0x1014);
+		lzw_tables_owned = 1;
+	}
+#else
 	if (!tokens) tokens = (struct tokenlist*)sci_malloc(0x1004 * sizeof(*tokens));
 	if (!stak) stak = (gint8*)sci_malloc(0x1014);
+#endif
 	lastchar = lastbits = bitstring = stakptr = 0;
 	numbits = 9;
 	curtoken = 0x102;
@@ -151,7 +213,7 @@ guint32 gbits(int numbits,  guint8 * data, int dlen)
 	for(i=(numbits>>3)+1;i>=0;i--)
 		{
 			if (i+place < dlen)
-				bitstring |=data[place+i] << (8*(2-i));
+				bitstring |= GBITS_BYTE(data, place+i) << (8*(2-i));
 		}
 	/*  bitstring = data[place+2] | (long)(data[place+1])<<8
 	    | (long)(data[place])<<16;*/
@@ -514,8 +576,93 @@ byte *view_reorder(byte *inbuffer, int dsize)
 
 
 
+#ifdef PICO_STREAM_DECOMPRESS
+/* Decompress one SCI01 resource body (the 8-byte header already read) with
+   its input streamed through the 4 KB window: methods 0/1 via decompress0.c,
+   methods 2-4 via decrypt3, whose only input access is gbits reading strictly
+   forward (<= 3 bytes past the bit position). The reorder of methods 3/4 is
+   the caller's. Returns -1 if the method is not handled here, else 0 or an
+   SCI_ERROR_* code; leaves the fd where a flat read would have. Not gated on
+   HAVE_PICO so tests/decompdiff can prove it against the stock path. */
+int
+pico_decompress01_stream(guint8 *dest, int resh, int method, unsigned int complength, int size)
+{
+	extern int pico_stream_decompress01(guint8 *dest, int resh, int method,
+					    unsigned int complength, int size);
+	int rc;
+
+	if (method == 0 || method == 1)
+		return pico_stream_decompress01(dest, resh, method, complength, size);
+	if (method < 2 || method > 4)
+		return -1;
+	pico_stream_begin(resh, complength);
+	decryptinit3();
+	gbits_stream = 1;
+	rc = decrypt3(dest, NULL, size, complength) ? SCI_ERROR_DECOMPRESSION_OVERFLOW : 0;
+	gbits_stream = 0;
+	decrypt3_release();
+	pico_stream_end();
+	return rc;
+}
+
+/* Decompress one SCI01 resource body (header already read) straight into PSRAM
+   at 'addr', staged through 'stage' (stage_size bytes): the output never needs
+   an SRAM copy of its own. Works for method 0 (chunked reads) and method 2,
+   because decrypt3 writes its output strictly forward and keeps all of its
+   state in statics, so it resumes across calls with a smaller 'length'.
+   Returns -1 for a method not handled here, else 0 or an SCI_ERROR_* code;
+   leaves the fd where a flat read would have. */
+int
+pico_decompress01_to_psram(int resh, int method, unsigned int complength, int size,
+			   uint32_t addr, guint8 *stage, int stage_size)
+{
+	extern void psram_store(uint32_t a, const uint8_t *s, size_t n);
+	int done = 0;
+
+	if (method == 0) {
+		long start = lseek(resh, 0, SEEK_CUR);
+
+		if ((int) complength != size)
+			return SCI_ERROR_DECOMPRESSION_OVERFLOW;
+		while (done < size) {
+			int want = size - done, got;
+
+			if (want > stage_size)
+				want = stage_size;
+			got = read(resh, stage, want);
+			if (got <= 0)
+				break;
+			psram_store(addr + done, stage, got);
+			done += got;
+		}
+		lseek(resh, start + complength, SEEK_SET);
+		return (done == size) ? 0 : SCI_ERROR_IO_ERROR;
+	}
+	if (method != 2)
+		return -1;
+
+	pico_stream_begin(resh, complength);
+	decryptinit3();
+	gbits_stream = 1;
+	while (done < size) {
+		int n = size - done;
+
+		if (n > stage_size)
+			n = stage_size;
+		decrypt3(stage, NULL, n, complength);
+		psram_store(addr + done, stage, n);
+		done += n;
+	}
+	gbits_stream = 0;
+	decrypt3_release();
+	pico_stream_end();
+	return 0;
+}
+#endif
+
 int decompress01(resource_t *result, int resh, int sci_version)
 {
+	int rc3;
 	guint16 compressedLength, result_size;
 	guint16 compressionMethod;
 	guint8 *buffer;
@@ -561,6 +708,63 @@ int decompress01(resource_t *result, int resh, int sci_version)
 		return SCI_ERROR_EMPTY_OBJECT;
 	}
 
+#ifdef HAVE_PICO
+	/* The Pico treatment decompress0 already had. The output comes from
+	   pico_decompress_alloc -- the lent visual[0] for a VGA pic (up to ~55 KB
+	   in Jones in the Fast Lane), the scratch for small pics/views, else a
+	   real allocation -- except for methods 3/4, whose reorder step frees its
+	   input. Methods 0 and 1 read through decompress0's 4 KB window instead
+	   of a flat copy of the whole compressed block, and MUST when the build
+	   streams method 2: decrypt2 then takes a stream descriptor, not a buffer. */
+	if (compressionMethod == 3 || compressionMethod == 4)
+		result->data = (unsigned char*)sci_malloc(result->size);
+	else if (result->type == sci_script && g_pico_decompress_scratch
+		 && result->size <= PICO_DECOMPRESS_SCRATCH_SIZE) {
+		/* A script is copied into its segment when instantiated and read
+		   only right after a load, so it does not need a heap block of its
+		   own: decompress it into the scratch and own the scratch until the
+		   next user takes it (pico_scratch_take). Jones in the Fast Lane's
+		   scripts reach 10.7 KB, and that transient block is what a
+		   fragmented heap could not find (device OOM 2026-10-01). */
+		pico_scratch_take();
+		result->data = g_pico_decompress_scratch;
+		g_pico_scratch_owner = result;
+	} else
+		result->data = pico_decompress_alloc(result->type, result->size);
+	if (!result->data) { /* graceful sound path in pico_decompress_alloc */
+		result->status = SCI_STATUS_NOMALLOC;
+		return SCI_ERROR_DECOMPRESSION_INSANE;
+	}
+#  ifdef PICO_STREAM_DECOMPRESS
+	{
+		int rc = pico_decompress01_stream(result->data, resh, compressionMethod,
+						  compressedLength, result->size);
+		if (rc >= 0) {
+			if (rc) {
+				if (!PICO_DECOMP01_IS_LENT(result->data))
+					free(result->data);
+				result->data = NULL;
+				result->status = SCI_STATUS_NOMALLOC;
+				return (rc == SCI_ERROR_IO_ERROR) ? rc : SCI_ERROR_DECOMPRESSION_OVERFLOW;
+			}
+			if (compressionMethod == 3)
+				result->data = view_reorder(result->data, result->size);
+			else if (compressionMethod == 4)
+				result->data = pic_reorder(result->data, result->size);
+			result->status = SCI_STATUS_ALLOCATED;
+			return 0;
+		}
+	}
+#  endif
+	buffer = (guint8*)sci_malloc_sram(compressedLength);
+	if (read(resh, buffer, compressedLength) != compressedLength) {
+		if (!PICO_DECOMP01_IS_LENT(result->data))
+			free(result->data);
+		result->data = NULL;
+		free(buffer);
+		return SCI_ERROR_IO_ERROR;
+	};
+#else
 	buffer = (guint8*)sci_malloc_sram(compressedLength);
 	result->data = (unsigned char*)sci_malloc(result->size);
 
@@ -569,6 +773,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 		free(buffer);
 		return SCI_ERROR_IO_ERROR;
 	};
+#endif
 
 
 #ifdef _SCI_DECOMPRESS_DEBUG
@@ -585,7 +790,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 0: /* no compression */
 		if (result->size != compressedLength) {
-			free(result->data);
+			DECOMP01_FREE_DATA(result->data);
 			result->data = NULL;
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -597,7 +802,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 1: /* Some huffman encoding */
 		if (decrypt2(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -608,8 +813,10 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 2: /* ??? */
 		decryptinit3();
-		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+		rc3 = decrypt3(result->data, buffer, result->size, compressedLength);
+		decrypt3_release();
+		if (rc3) {
+			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -620,8 +827,10 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 3: 
 		decryptinit3();
-		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+		rc3 = decrypt3(result->data, buffer, result->size, compressedLength);
+		decrypt3_release();
+		if (rc3) {
+			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -633,8 +842,10 @@ int decompress01(resource_t *result, int resh, int sci_version)
 
 	case 4:
 		decryptinit3();
-		if (decrypt3(result->data, buffer, result->size, compressedLength)) {
-			free(result->data);
+		rc3 = decrypt3(result->data, buffer, result->size, compressedLength);
+		decrypt3_release();
+		if (rc3) {
+			DECOMP01_FREE_DATA(result->data);
 			result->data = 0; /* So that we know that it didn't work */
 			result->status = SCI_STATUS_NOMALLOC;
 			free(buffer);
@@ -648,7 +859,7 @@ int decompress01(resource_t *result, int resh, int sci_version)
 		fprintf(stderr,"Resource %s.%03hi: Compression method SCI1/%hi not "
 			"supported!\n", sci_resource_types[result->type], result->number,
 			compressionMethod);
-		free(result->data);
+		DECOMP01_FREE_DATA(result->data);
 		result->data = 0; /* So that we know that it didn't work */
 		result->status = SCI_STATUS_NOMALLOC;
 		free(buffer);

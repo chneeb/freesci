@@ -28,6 +28,10 @@
 #define BUILD_MAP_FUNCTIONS
 #include "reg_t_hashmap.h"
 
+/* The GC's maps live in the GC pool on the PIO Pico (sci_memory.h). */
+#define MAP_CALLOC(c, n) GC_CALLOC((c), (n))
+#define MAP_MALLOC(n) GC_MALLOC(n)
+#define MAP_FREE(p) GC_FREE(p)
 #include "hashmap.c"
 
 static inline int

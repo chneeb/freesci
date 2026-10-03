@@ -13,6 +13,7 @@ void     pico_set_flash_timings(int cpu_mhz, int flash_max_mhz);
 
 uint32_t psram_alloc(size_t bytes);
 void     psram_reset(void);
+uint32_t psram_epoch(void);
 
 /* ---- song slots: PSRAM that SURVIVES psram_reset -------------------------
    psram_alloc is a bump allocator that psram_reset() rewinds to 0 on every
@@ -27,6 +28,17 @@ void     psram_reset(void);
 
    A fixed slot table rather than a heap: songs are few and long-lived, so
    there is nothing for a real allocator to earn here. */
+/* Staging slot for one VGA view's decompressed resource while it is decoded
+   (scir_pico_load_to_psram -> gfxr_draw_view1_psram), above the PIO working
+   priority map (0x790000 + 32,000). A fixed slot, not the arena: in a room
+   that never changes picture (Jones in the Fast Lane's town board) the arena
+   is not rewound, and a copy per view load would only grow it. */
+#define PSRAM_VIEW_STAGE_ADDR 0x7A0000u
+#define PSRAM_VIEW_STAGE_SIZE 0x10000u
+/* The bump arena must stay below the fixed slots (the parse scratch at
+   0x700000 is the lowest); psram_alloc halts legibly instead of overrunning. */
+#define PSRAM_ARENA_LIMIT     0x700000u
+
 #define PSRAM_SONG_BASE       0x710000u
 #define PSRAM_SONG_SLOT_SIZE  65536u
 #define PSRAM_SONG_SLOTS      8

@@ -45,9 +45,12 @@
 
 /* On Pico, decompress0 hands the permanent pic/view decompress scratch
    (operations.c) out as res->data; it must never be sci_free'd or the next
-   decode would reuse a freed block.  Every res->data free site guards on this. */
+   decode would reuse a freed block.  Every res->data free site guards on this.
+   The same goes for a lent buffer (g_pico_decompress_borrow: visual[0] during
+   a VGA pic load). */
 #ifdef HAVE_PICO
-#	define PICO_IS_DECOMPRESS_SCRATCH(p) ((unsigned char*)(p) == g_pico_decompress_scratch)
+#	define PICO_IS_DECOMPRESS_SCRATCH(p) ((unsigned char*)(p) == g_pico_decompress_scratch \
+		|| ((p) && (unsigned char*)(p) == g_pico_decompress_borrow))
 #else
 #	define PICO_IS_DECOMPRESS_SCRATCH(p) (0)
 #endif
@@ -780,6 +783,20 @@ _scir_free_resource_sources(resource_source_t *rss)
 	}
 }
 
+#ifdef HAVE_PICO
+/* Evicts the SCI01 script resource that holds the decompress scratch, when the
+   next user takes the scratch (decompress0.c pico_scratch_take). */
+static resource_mgr_t *s_scratch_mgr = NULL;
+void scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res);
+
+static void
+pico_scratch_evict(resource_t *res)
+{
+	if (s_scratch_mgr)
+		scir_evict_resource_data(s_scratch_mgr, res);
+}
+#endif
+
 resource_mgr_t *
 scir_new_resource_manager(char *dir, int version,
 			  char allow_patches, int max_memory)
@@ -913,6 +930,10 @@ scir_new_resource_manager(char *dir, int version,
 	chdir(caller_cwd);
 	free(caller_cwd);
 
+	#ifdef HAVE_PICO
+	s_scratch_mgr = mgr;
+	g_pico_scratch_evict = pico_scratch_evict;
+#endif
 	return mgr;
 }
 
@@ -1140,16 +1161,94 @@ scir_evict_resource_data(resource_mgr_t *mgr, resource_t *res)
 	res->status = SCI_STATUS_NOMALLOC;
 }
 
+#if defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
+/* Load a resource's decompressed bytes straight into PSRAM at 'addr' (a fixed
+   staging slot of max_size bytes) instead of res->data: for a VGA view of up to ~35 KB that has to be decoded
+   but never needs an SRAM copy (gfxr_draw_view1_psram reads it through a
+   cache). Handles only volume-sourced resources of the SCI01 family (the
+   decompress01 games) that are not already loaded, with method 0 or 2; the
+   output is staged through the idle decompress scratch. Returns 0 and fills
+   *size, or -1 when not handled -- the caller then loads it normally. */
+int
+scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
+			uint32_t addr, unsigned int max_size, int *size)
+{
+	extern int pico_decompress01_to_psram(int resh, int method, unsigned int complength,
+					      int size, uint32_t addr, guint8 *stage, int stage_size);
+	resource_t *res = scir_test_resource(mgr, type, number);
+	char filename[PATH_MAX];
+	guint8 hdr[8];
+	int fh, fh_cached = 0, rc;
+	unsigned int clen, dsz, method, id;
+
+	if (!res || res->status || !g_pico_decompress_scratch
+	    || decompressors[mgr->sci_version] != &decompress01
+	    || SCIR_SOURCE(res)->source_type != RESSOURCE_TYPE_VOLUME)
+		return -1;
+
+	strcpy(filename, SCIR_SOURCE(res)->location.file.name);
+#ifdef SCIR_KEEP_VOLUMES_OPEN
+	fh = scir_volume_open(SCIR_SOURCE(res), filename, &fh_cached);
+#else
+	fh = open(filename, O_RDONLY | O_BINARY);
+#endif
+	if (!IS_VALID_FD(fh))
+		return -1;
+	lseek(fh, res->file_offset, SEEK_SET);
+	if (read(fh, hdr, 8) != 8) {
+		if (!fh_cached)
+			close(fh);
+		return -1;
+	}
+	id = hdr[0] | (hdr[1] << 8);
+	clen = hdr[2] | (hdr[3] << 8);
+	dsz = hdr[4] | (hdr[5] << 8);
+	method = hdr[6] | (hdr[7] << 8);
+	if ((id >> 11) != (unsigned) type || (id & 0x7ff) != (unsigned) number
+	    || clen <= 4 || (method != 0 && method != 2) || dsz > max_size) {
+		if (!fh_cached)
+			close(fh);
+		return -1;
+	}
+
+	pico_scratch_take(); /* the scratch is the staging buffer below */
+	rc = pico_decompress01_to_psram(fh, method, clen - 4, dsz, addr,
+					g_pico_decompress_scratch, PICO_DECOMPRESS_SCRATCH_SIZE);
+	if (!fh_cached)
+		close(fh);
+	if (rc) {
+		sciprintf("Error %d occured while reading %s.%03d to PSRAM\n",
+			  rc, sci_resource_types[type], number);
+		return -1;
+	}
+	*size = (int) dsz;
+	return 0;
+}
+#endif /* PICO_STREAM_DECOMPRESS && !PICO_PSRAM_MAPPED */
+
 void
 scir_free_all_lru(resource_mgr_t *mgr)
 {
-	while (mgr->lru_last) {
-		resource_t *goner = mgr->lru_last;
-		_scir_remove_from_lru(mgr, goner); /* sets status = ALLOCATED */
-		if (!PICO_IS_DECOMPRESS_SCRATCH(goner->data))
+	resource_t *goner = mgr->lru_last;
+
+	while (goner) {
+		resource_t *prev = SCIR_LRU_PREV(mgr, goner);
+
+		/* An entry in the decompress scratch frees nothing, and it may be in
+		   use right now: an SCI01 script owns the scratch while
+		   script_instantiate copies it, and that copy's own segment
+		   allocation is what triggers this flush (pico_reclaim_heap). Evicting
+		   it NULLed res->data under the copy -- the script came up as garbage
+		   ("does not have a dispatch table"; Jones in the Fast Lane, device
+		   2026-10-01). It stays enqueued; the next user of the scratch evicts
+		   it (pico_scratch_take). */
+		if (!PICO_IS_DECOMPRESS_SCRATCH(goner->data)) {
+			_scir_remove_from_lru(mgr, goner); /* sets status = ALLOCATED */
 			sci_free(goner->data);
-		goner->data = NULL;
-		goner->status = SCI_STATUS_NOMALLOC;
+			goner->data = NULL;
+			goner->status = SCI_STATUS_NOMALLOC;
+		}
+		goner = prev;
 	}
 }
 #endif

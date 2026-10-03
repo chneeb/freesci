@@ -1167,6 +1167,10 @@ run_vm(state_t *s, int restoring)
 
 		case 0x21: /* callk */
 			gc_countdown(s);
+			{ /* kscripts.c: a script that disposed of itself is unloaded once it stopped running */
+				extern void script_process_pending_disposals(state_t *s);
+				script_process_pending_disposals(s);
+			}
 
 			xs->sp -= (opparams[1] >> 1)+1;
 			if (s->version >= SCI_VERSION_FTU_NEW_SCRIPT_HEADER) {

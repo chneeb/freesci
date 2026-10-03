@@ -526,6 +526,48 @@ static void pico_exit(struct _gfx_driver *drv)
     drv->state = NULL;
 }
 
+/* VGA (SCI01) games: the palette slots are the picture's own 256 colours (set by
+   its SET_PALETTE opcode), or the static palette (palette 999) when it sets
+   none -- exactly what desktop draws the picture with. visual[0] then holds VGA
+   indices directly, and 256-colour cels map through the identity LUT in
+   pico_blit_indexed, as they index the system palette in Sierra's interpreter.
+   Called from gfxop_new_pic in place of pico_setup_sci0_palette. */
+void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int colors_nr)
+{
+    struct _pico_state *ps = (struct _pico_state *)drv->state;
+    if (!ps || !colors) return;
+    for (int i = 0; i < 256; i++) {
+        if (i < colors_nr) {
+            ps->palette[i][0] = colors[i].r;
+            ps->palette[i][1] = colors[i].g;
+            ps->palette[i][2] = colors[i].b;
+        } else
+            ps->palette[i][0] = ps->palette[i][1] = ps->palette[i][2] = 0;
+    }
+    /* SCI1's system white: entry 255 is white whatever the picture's palette
+       holds (kgraphics.c get_pic_color, the title bar and menus). */
+    ps->palette[255][0] = ps->palette[255][1] = ps->palette[255][2] = 255;
+    /* The engine's colour allocator (gfx_alloc_color, from gfxop_set_color
+       and every text pixmap install) hands out the first UNLOCKED entry and
+       writes its colour into this palette via pico_set_palette. With only 0
+       and 255 locked that overwrote the picture's own colours 1, 2, 3...
+       (Jones' clock). In a VGA picture every entry belongs to the picture, as
+       in Sierra's interpreter: lock them all as system colours with their
+       current RGB, so an allocation matches an existing entry instead. */
+    if (drv->mode && drv->mode->palette) {
+        gfx_palette_t *mp = drv->mode->palette;
+        for (int i = 0; i < 256 && i < mp->max_colors_nr; i++) {
+            mp->colors[i].r = ps->palette[i][0];
+            mp->colors[i].g = ps->palette[i][1];
+            mp->colors[i].b = ps->palette[i][2];
+            mp->colors[i].lockers = GFX_COLOR_SYSTEM;
+        }
+    }
+#ifdef PICO_LCD_16BIT
+    pico_rebuild_pal565(ps);
+#endif
+}
+
 /* Called from gfxop_new_pic after gfxr_get_pic populates gfx_sci0_pic_colors[].
    Fills ps->palette[0..255] so flush_region produces correct RGB output. */
 void pico_setup_sci0_palette(gfx_driver_t *drv)
@@ -672,6 +714,43 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                   int bake_static_pri) /* 1: also write this cel's priority into the
                                           PSRAM priority map (GFX_BUFFER_STATIC only) */
 {
+    /* A VGA view cel inserts its view's used palette entries into the LCD
+       palette before it is drawn, as Sierra's SCI1 interpreter does (ScummVM
+       "insert" mode): its pixels then index colours that are really there,
+       e.g. Jones in the Fast Lane's player buttons, which were white where the
+       town board's palette has white. A few hundred byte writes per cel; not
+       cached by pointer, as a freed view's list can be reused by another. */
+    if (pxm->pico_pal_insert
+        && ((uintptr_t)pxm->pico_pal_insert < 0x20000000u
+            || (uintptr_t)pxm->pico_pal_insert >= 0x20082000u
+            || ((uintptr_t)pxm->pico_pal_insert & 1)
+            || ((const gfx_pal_insert_t *)pxm->pico_pal_insert)->n > 256)) {
+        /* Not an SRAM heap address: the pixmap is not a live VGA view cel
+           (a stale or overwritten pixmap reached the blit -- device HardFault
+           2026-10-01, BFAR 0x70000000). Name it once and draw without the
+           insert instead of faulting. */
+        static int s_bad_insert_logged = 0;
+        if (!s_bad_insert_logged) {
+            s_bad_insert_logged = 1;
+            sciprintf("[pal] bad insert ptr %p in pixmap %p: ID %06x loop %d cel %d %dx%d "
+                      "index %dx%d flags %04x handle %d colors %d psram %d\n",
+                      pxm->pico_pal_insert, (void *)pxm, pxm->ID, pxm->loop, pxm->cel,
+                      pxm->xl, pxm->yl, pxm->index_xl, pxm->index_yl, pxm->flags,
+                      pxm->internal.handle, pxm->colors_nr, pxm->psram_valid);
+        }
+    } else if (pxm->pico_pal_insert) {
+        const gfx_pal_insert_t *pi = (const gfx_pal_insert_t *)pxm->pico_pal_insert;
+        for (int k = 0; k < pi->n; k++) {
+            uint8_t idx = pi->e[k][0];
+            ps->palette[idx][0] = pi->e[k][1];
+            ps->palette[idx][1] = pi->e[k][2];
+            ps->palette[idx][2] = pi->e[k][3];
+        }
+#ifdef PICO_LCD_16BIT
+        pico_rebuild_pal565(ps);
+#endif
+    }
+
     int xl = src.xl, yl = src.yl;
     /* color_key is an int (-1 == GFX_PIXMAP_COLOR_KEY_NONE); test has_alpha on the
        int BEFORE narrowing to a byte.  Truncating -1 to a byte yields 255, which

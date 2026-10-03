@@ -1258,7 +1258,30 @@ _cfsml_write_int_hash_map_t(FILE *fh, int_hash_map_t* save_struc)
     min = max = DCS_INT_HASH_MAX+1;
     fprintf(fh, "[%d][\n", max);
     for (i = 0; i < min; i++) {
+#ifdef SCI_COMPACT_HASHMAPS
+      /* Hand-edited (see int_hashmap.h): memory has fewer buckets than the
+         format's 256 chains. Gather format chain i -- the nodes with
+         (name & 0xff) == i, all in memory bucket INT_HASH_MEM(i) -- into a
+         temporary chain in their memory order, write it, and append it back
+         to that bucket. The file is byte for byte what a 256-bucket build
+         writes: same chains, same order within each chain. */
+      int_hash_map_node_t **bucket = &(save_struc->nodes[INT_HASH_MEM(i)]);
+      int_hash_map_node_t **src = bucket, *chain = NULL, **tail = &chain;
+
+      while (*src) {
+        if (((*src)->name & 0xff) == i) {
+          *tail = *src;
+          *src = (*src)->next;
+          tail = &((*tail)->next);
+          *tail = NULL;
+        } else
+          src = &((*src)->next);
+      }
+      write_int_hash_map_node_tp(fh, &chain);
+      *src = chain; /* src is the bucket's end now */
+#else
       write_int_hash_map_node_tp(fh, &(save_struc->nodes[i]));
+#endif
       fprintf(fh, "\n");
     }
     fprintf(fh, "]");
@@ -1325,10 +1348,28 @@ int min, max, i;
                _cfsml_error("More elements than space available (%d) in '%s' at line %d\n", max, token, *line);
                return CFSML_FAILURE;
              }
+#ifdef SCI_COMPACT_HASHMAPS
+             /* Hand-edited (see the writer): read format chain i and append
+                it to its memory bucket, keeping the order within it. */
+             {
+               int_hash_map_node_t *chain = NULL, **end;
+
+               if (read_int_hash_map_node_tp(fh, &chain, value, line, hiteof)) {
+                  _cfsml_error("Token expected by read_int_hash_map_node_tp() for nodes[i++] at line %d\n", *line);
+                  return CFSML_FAILURE;
+               }
+               end = &(save_struc->nodes[INT_HASH_MEM(i)]);
+               while (*end)
+                 end = &((*end)->next);
+               *end = chain;
+               i++;
+             }
+#else
              if (read_int_hash_map_node_tp(fh, &(save_struc->nodes[i++]), value, line, hiteof)) {
                 _cfsml_error("Token expected by read_int_hash_map_node_tp() for nodes[i++] at line %d\n", *line);
                 return CFSML_FAILURE;
              }
+#endif
            } else done = 1;
          } while (!done);
       } else
@@ -3957,6 +3998,11 @@ read_int_hash_map_tp(FILE *fh, int_hash_map_t **foo, char *lastval, int *line, i
 {
 	*foo = (int_hash_map_t*)malloc(sizeof(int_hash_map_t));
 	PICO_ARENA_PROBE_RAW(sizeof(int_hash_map_t));
+#ifdef SCI_COMPACT_HASHMAPS
+	/* The reader appends each format chain to a memory bucket (fewer
+	   buckets than chains), so the buckets must start empty. */
+	memset((*foo)->nodes, 0, sizeof((*foo)->nodes));
+#endif
 /* Auto-generated CFSML data reader code */
   {
     int _cfsml_eof = 0, _cfsml_error;

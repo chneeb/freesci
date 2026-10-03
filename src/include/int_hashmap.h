@@ -30,11 +30,27 @@
 
 /* Assumes that the ints are relatively evenly distributed */
 
+/* The savegame format: 256 bucket chains, chain b holding the keys with
+   (key & 0xff) == b (savegame.c writes and reads exactly these). */
 #define DCS_INT_HASH_MAX 255
 
-#define HASH_MAX DCS_INT_HASH_MAX
+#ifdef SCI_COMPACT_HASHMAPS
+/* PIO Pico: 32 buckets in memory instead of 256 -- every loaded script has
+   one of these maps (its object indices), and 256 buckets are 1 KB each.
+   The in-memory hash MUST be a function of (key & 0xff) alone: savegame.c
+   rebuilds each format chain from the one memory bucket holding it. Buckets
+   0..31 of 33, like the original's 0..255 of 256 plus one: apply_to_*
+   (hashmap.c) never visits the last bucket. */
+#  define INT_HASH_MEM(x) ((((x) ^ ((x) >> 3)) & 31))
+#  define INT_HASH_MEM_MAX 32
+#else
+#  define INT_HASH_MEM(x) ((x) & 0xff)
+#  define INT_HASH_MEM_MAX DCS_INT_HASH_MAX
+#endif
+
+#define HASH_MAX INT_HASH_MEM_MAX
 #define COMP(x, y) ((x)-(y))
-#define HASH(x) (x & 0xff)
+#define HASH(x) INT_HASH_MEM(x)
 #undef MUST_FREE
 
 #include "hashmap.h"

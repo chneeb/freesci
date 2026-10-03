@@ -60,6 +60,9 @@ dirty_probe_on(void)
 #endif
 #ifdef HAVE_PICO
 #include "psram_alloc.h"
+#ifdef PICO_VIEW_ARENA
+#include "view_arena.h"
+#endif
 #include <malloc.h>
 #include <sciresource.h>
 #include <pico/stdlib.h>
@@ -134,6 +137,7 @@ pico_print_largest(const char *when, int nr)
 }
 #endif
 extern void pico_setup_sci0_palette(gfx_driver_t *drv);
+extern void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int colors_nr);
 
 /* Free the permanent decode scratches when a game fully exits to the chooser.
    They are never freed during a game (the whole point of the permanent-scratch
@@ -152,6 +156,15 @@ pico_reset_decode_scratches(void)
 		free(g_pico_decompress_scratch);
 		g_pico_decompress_scratch = NULL;
 	}
+#ifdef PICO_VIEW_ARENA
+	/* The VGA view arena (resmgr.c) -- only once nothing in it is live; a
+	   block still in use would otherwise be freed into the heap later. */
+	if (view_arena_base() && view_arena_largest() == (PICO_VIEW_ARENA & ~7) - 8) {
+		void *m = view_arena_base();
+		view_arena_init(NULL, 0);
+		free(m);
+	}
+#endif
 }
 #endif
 
@@ -1902,6 +1915,9 @@ _gfxop_set_pointer(gfx_state_t *state, gfx_pixmap_t *pxm)
 
 	if (draw_new) {
 		state->mouse_pointer = pxm;
+#ifdef GFXR_VIEW_BUDGET
+		g_gfxr_pointer_pixmap = pxm;
+#endif
 		DRAW_POINTER;
 		_gfxop_get_pointer_bounds(state, &pointer_bounds);
 	}
@@ -2416,9 +2432,14 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   pico_blit_indexed via pico_render_background).  There is no SCI1 graphics
 	   support on Pico and a VGA game cannot be coerced to EGA (version is detected
 	   from the resource files, not a render toggle).  Halt legibly instead of
-	   HardFaulting.  state->version == resmgr->sci_version (the SCI_VERSION_* enum). */
-	if (state->version >= SCI_VERSION_01_VGA) {
-		pico_oom_report("SCI1/VGA game not supported (SCI0 only)",
+	   HardFaulting.  state->version == resmgr->sci_version (the SCI_VERSION_* enum).
+
+	   Branch pico-sci1: SCI_VERSION_01_VGA (Jones in the Fast Lane) now takes the
+	   Pico decode path too (sci_resmgr.c routes VGA pics through the PSRAM
+	   branch; the embedded bitmap decodes straight into visual[0]). Later
+	   versions still halt: their pic/view formats are not handled. */
+	if (state->version > SCI_VERSION_01_VGA) {
+		pico_oom_report("SCI1/VGA game not supported (SCI0 + SCI01 VGA only)",
 				(unsigned long)state->version,
 				__FILE__, __LINE__, "gfxop_new_pic");
 		/* pico_oom_report halts; not reached. */
@@ -2457,7 +2478,13 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	   state->pic_nr is still the old room number at this point. */
 	{
 		resource_mgr_t *resmgr = (resource_mgr_t *)state->resstate->misc_payload;
-		resource_t *old_res = scir_find_resource(resmgr, sci_pic, state->pic_nr, 0);
+		/* Look the entry up WITHOUT loading it: scir_find_resource loads a
+		   resource that is not in memory. After a savegame restore the cache
+		   is empty and the "old" room is the same one, so that decompressed
+		   the whole picture into a fresh heap block just to evict it -- for
+		   Jones in the Fast Lane's board 55,611 bytes, before visual[0] is
+		   lent as the decompress target below (the OOM after a restore). */
+		resource_t *old_res = scir_test_resource(resmgr, sci_pic, state->pic_nr);
 		scir_evict_resource_data(resmgr, old_res);
 	}
 
@@ -2679,9 +2706,19 @@ gfxop_new_pic(gfx_state_t *state, int nr, int flags, int default_palette)
 	pico_priority_seed();   /* working map := the new room's static map */
 #endif
 
-	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors.
-	   Must happen before pico_render_background calls flush_region. */
-	pico_setup_sci0_palette(state->driver);
+	/* Populate ps->palette[0..255] from the freshly decoded gfx_sci0_pic_colors
+	   (SCI0) or the picture's own palette (VGA). Must happen before
+	   pico_render_background calls flush_region. */
+	if (state->version >= SCI_VERSION_01_VGA) {
+		gfx_pixmap_t *vm = state->pic ? state->pic->visual_map : NULL;
+
+		if (vm && vm->colors)
+			pico_setup_vga_palette(state->driver, vm->colors, vm->colors_nr);
+		else
+			pico_setup_vga_palette(state->driver, state->static_palette,
+					       state->static_palette_entries);
+	} else
+		pico_setup_sci0_palette(state->driver);
 
 	/* Allocate visual[0] now (the freed 64KB block is available) and render
 	   the background from PSRAM so the room art appears immediately. */

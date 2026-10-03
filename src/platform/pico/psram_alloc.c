@@ -44,10 +44,21 @@ __no_inline_not_in_flash_func(pico_set_flash_timings)(int cpu_mhz, int flash_max
 
 static uint32_t s_psram_offset = 0;
 
+static uint32_t s_psram_epoch = 0;
+
 uint32_t
 psram_alloc(size_t bytes)
 {
     uint32_t addr = s_psram_offset;
+
+    if ((uint64_t)s_psram_offset + bytes > PSRAM_ARENA_LIMIT) {
+        /* Past here are the parse scratch, the song slots and the working
+           priority map: overrunning would corrupt them silently. */
+        extern void pico_oom_report(const char *what, unsigned long size,
+                                    const char *file, int line, const char *funct);
+        pico_oom_report("PSRAM arena full", (unsigned long)bytes,
+                        __FILE__, __LINE__, "psram_alloc");
+    }
     s_psram_offset += (uint32_t)bytes;
     return addr;
 }
@@ -56,6 +67,14 @@ void
 psram_reset(void)
 {
     s_psram_offset = 0;
+    s_psram_epoch++;
+}
+
+/* Changes on every psram_reset, so a cached arena address can tell it is stale. */
+uint32_t
+psram_epoch(void)
+{
+    return s_psram_epoch;
 }
 
 /* Song slots (see psram_alloc.h).  Deliberately NOT touched by psram_reset:

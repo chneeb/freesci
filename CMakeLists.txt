@@ -66,6 +66,11 @@ elseif(PLATFORM STREQUAL "pico")
         "LINKER:--wrap=calloc"
         "LINKER:--wrap=realloc"
         "LINKER:--wrap=free")
+    if(NOT PICO_PSRAM_MAPPED)
+        # PIO: the VGA view arena (view_arena.c) answers malloc_usable_size for
+        # its own blocks, so the live-byte and census accounting can stay as is.
+        target_link_options(pico_malloc INTERFACE "LINKER:--wrap=malloc_usable_size")
+    endif()
 
     # Make USB-CDC stdout non-blocking: default is a 500 ms per-write wait when the
     # host has enumerated the port but nothing is draining it (PicoCalc is
@@ -544,6 +549,28 @@ if(PLATFORM STREQUAL "pico")
     endif()
     if(PICO_PWM_AUDIO AND NOT PICO_PSRAM_MAPPED)
         add_compile_definitions(PICO_SONG_MAX_BYTES=${PICO_SONG_MAX_BYTES})
+    endif()
+
+    # Upper bound on the SRAM held by cached decoded VGA views (PIO only;
+    # resmgr.c gfxr_get_view). Views stay cached until the next picture is
+    # drawn, and Jones in the Fast Lane keeps one picture (the town board) up
+    # for the whole game, so without a bound the cache grows until the heap is
+    # gone (device OOM 2026-10-01: 8.5 KB free of 477 KB). Above the budget the
+    # least recently used views are freed and re-decoded on demand, into the
+    # same PSRAM. SCI0 games are not affected. set() and the define stay
+    # together (see PICO_SONG_MAX_BYTES above). 48 KB first; 32 KB since the
+    # census at the next OOM showed the cache holding ~38 KB of real SRAM.
+    set(PICO_VGA_VIEW_BUDGET "32768" CACHE STRING "SRAM budget for cached decoded VGA views (PIO)")
+    if(NOT PICO_PSRAM_MAPPED)
+        # The views live in an arena of the same size, allocated once from the
+        # clean heap on the first VGA picture (view_arena.c); SCI0 games never
+        # allocate it.
+        add_compile_definitions(GFXR_VIEW_BUDGET=${PICO_VGA_VIEW_BUDGET}
+                                PICO_VIEW_ARENA=${PICO_VGA_VIEW_BUDGET})
+        # Script object-index maps with 32 buckets instead of 256 (~1 KB per
+        # loaded script) and GC maps with 128 instead of 512; the savegame
+        # format is unchanged (int_hashmap.h, savegame.c).
+        add_compile_definitions(SCI_COMPACT_HASHMAPS=1)
     endif()
 
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)

@@ -235,6 +235,12 @@ gfx_new_pixmap(int xl, int yl, int resid, int loop, int cel)
 
 #ifdef HAVE_PICO
 	pxm->pico_reg_next = NULL;
+	/* Only VGA view cels have a palette insert list (sci_view_1.c). Left
+	   uninitialised, text and other pixmaps carried malloc garbage here, and
+	   pico_blit_indexed wrote it into the LCD palette whenever it looked like
+	   an SRAM pointer (the "[pal] bad insert ptr" lines, and the HardFault
+	   with BFAR 0x70000000, were the cases it did not). */
+	pxm->pico_pal_insert = NULL;
 	gfx_pixmaps_live++;
 	gfx_pixmap_registry_add(pxm);
 #endif

@@ -302,6 +302,61 @@ kScriptID(state_t *s, int funct_nr, int argc, reg_t *argv)
 }
 
 
+/* A script that disposes of ITSELF (DisposeScript called from its own code).
+** Sierra's interpreter unloads it regardless of how often it was loaded; it
+** was only kept here, one locker less, because its code is still running.
+** Every ScriptID call on a loaded script adds a locker, so such a script was
+** in practice never unloaded, and the next load reused its objects with the
+** values of the last use. Jones in the Fast Lane's Employment Office does
+** this: its computerScript, a state machine that has to start fresh, came
+** back finished (state 21) and the computer player waited forever.
+** The dispose is now deferred instead: carried out in full as soon as no
+** frame on the execution stack runs in that script any more. */
+#define PENDING_DISPOSALS 4
+static struct { int script; seg_id_t seg; } pending_disposal[PENDING_DISPOSALS];
+static int pending_disposals = 0;
+static state_t *pending_disposal_state = NULL;
+
+static int
+_script_is_running(state_t *s, seg_id_t seg)
+{
+	int i;
+
+	for (i = 0; i <= s->execution_stack_pos; i++)
+		if (s->execution_stack[i].addr.pc.segment == seg)
+			return 1;
+	return 0;
+}
+
+void
+script_process_pending_disposals(state_t *s)
+{
+	int i = 0;
+
+	if (pending_disposal_state != s) { /* restore or restart: a new state */
+		pending_disposals = 0;
+		pending_disposal_state = s;
+		return;
+	}
+	while (i < pending_disposals) {
+		int script = pending_disposal[i].script;
+		seg_id_t seg = pending_disposal[i].seg;
+
+		if (sm_script_is_loaded(&(s->seg_manager), script, SCRIPT_ID)
+		    && sm_seg_get(&(s->seg_manager), script) == seg
+		    && !sm_script_marked_deleted(&(s->seg_manager), script)) {
+			if (_script_is_running(s, seg)) {
+				i++;
+				continue;
+			}
+			sm_set_lockers(&(s->seg_manager), 1, script, SCRIPT_ID);
+			script_uninstantiate(s, script);
+			s->execution_stack_pos_changed = 1;
+		}
+		pending_disposal[i] = pending_disposal[--pending_disposals];
+	}
+}
+
 reg_t
 kDisposeScript(state_t *s, int funct_nr, int argc, reg_t *argv)
 {
@@ -316,6 +371,27 @@ kDisposeScript(state_t *s, int funct_nr, int argc, reg_t *argv)
 	    
 	    if (s->execution_stack[s->execution_stack_pos].addr.pc.segment != id)
 		    sm_set_lockers(&(s->seg_manager), 1, script, SCRIPT_ID);
+	    else {
+		    /* Disposing of itself: defer (see above). */
+		    int i;
+
+		    if (pending_disposal_state != s) {
+			    pending_disposals = 0;
+			    pending_disposal_state = s;
+		    }
+		    for (i = 0; i < pending_disposals; i++)
+			    if (pending_disposal[i].script == script)
+				    break;
+		    if (i == pending_disposals && pending_disposals < PENDING_DISPOSALS) {
+			    pending_disposal[pending_disposals].script = script;
+			    pending_disposal[pending_disposals].seg = id;
+			    pending_disposals++;
+			    return s->r_acc;
+		    }
+		    if (i < pending_disposals)
+			    return s->r_acc; /* already pending */
+		    /* table full: the old behaviour (one locker less) */
+	    }
 	}
 
 	script_uninstantiate(s, script);

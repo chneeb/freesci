@@ -15,6 +15,18 @@ picture on the device. Baseline today (nothing converted yet):
 NB under HAVE_PICO the decoder DEFERS every index_data allocation to its caller,
 so both differs must supply visual/priority/aux buffers themselves.
 
+VGA (2026-09-30, branch pico-sci1): visdiff also handles SCI01 VGA games. A game
+with a palette 999 resource is switched to SCI_VERSION_01_VGA (the resource map
+alone says SCI0 for Jones in the Fast Lane; SCIVERSION=<n> overrides), the static
+palette is passed to both decoders, the EGA dither is skipped, and the priority
+map is diffed too. The Pico side now decodes as on the device: the pic is stored
+to (stub) PSRAM and read through the stream cache with resource == NULL, so code
+that touches the resource pointer directly crashes here, not on the device (each
+pic runs in a child process; RAWPTR=1 passes res->data instead). DUMP=<dir>
+writes the Pico visual map as picNNN.ppm; a run where every pic is one colour
+fails. Baseline: sq3 115 / kq4 150 / pq2 78 / colonel 88 / jones 7, 0 differ.
+Build the Pico copy with the shipping defines: -DHAVE_PICO=1 -DPICO_DECODE_CONTROL_MAP=1.
+
 --- picodiff (control map) ---
 
 Decodes a pic's CONTROL map twice -- once through the desktop byte-per-pixel path

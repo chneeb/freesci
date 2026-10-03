@@ -1681,7 +1681,7 @@ list_all_outgoing_references_nop (seg_interface_t *self, state_t *s, reg_t addr,
 static void
 deallocate_self (seg_interface_t *self)
 {
-	sci_free (self);
+	GC_FREE (self);
 }
 
 
@@ -2070,7 +2070,7 @@ get_seg_interface(seg_manager_t *self, seg_id_t segid)
 		return NULL; /* Invalid segment */
 
 	mobj = self->heap[segid];
-	retval = (seg_interface_t*)sci_malloc(sizeof(seg_interface_t));
+	retval = (seg_interface_t*)GC_MALLOC(sizeof(seg_interface_t)); /* GC pool during run_gc */
 	memcpy(retval, seg_interfaces[mobj->type - 1], sizeof (seg_interface_t));
 
 	if (mobj->type != retval->type_id) {

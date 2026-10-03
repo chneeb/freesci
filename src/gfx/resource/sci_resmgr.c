@@ -30,6 +30,9 @@
 #include <gfx_widgets.h>
 #include <gfx_resmgr.h>
 #include <gfx_options.h>
+#ifdef PICO_VIEW_ARENA
+#include "view_arena.h"
+#endif
 #ifdef HAVE_PICO
 #include "psram_alloc.h"
 #include <pico/stdlib.h>
@@ -97,8 +100,29 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			       int flags, int default_palette, int nr, void *internal)
 {
 	resource_mgr_t *resmgr = (resource_mgr_t *) state->misc_payload;
-	resource_t *res = scir_find_resource(resmgr, sci_pic, nr, 0);
+	resource_t *res;
 	int need_unscaled = unscaled_pic != NULL;
+#ifdef HAVE_PICO
+	/* A VGA pic is up to ~55 KB decompressed (Jones in the Fast Lane), far
+	   past the 16 KB scratch and the heap's contiguous margin. Lend the
+	   resident visual[0] (gfxop_new_pic has already borrowed it as the decode
+	   buffer) as the decompress target: the data goes to PSRAM and is evicted
+	   below BEFORE the decode reuses the buffer. The loan ends right after the
+	   eviction, or on the early error return. */
+	int pic_sci1 = (state->version >= SCI_VERSION_01_VGA) ? state->version : 0;
+
+	if (pic_sci1 && g_pico_decode_visual_buf) {
+		g_pico_decompress_borrow = g_pico_decode_visual_buf;
+		g_pico_decompress_borrow_size = GFXR_AUX_MAP_SIZE;
+	}
+#  define PICO_END_DECOMPRESS_LOAN() \
+	do { g_pico_decompress_borrow = NULL; g_pico_decompress_borrow_size = 0; } while (0)
+#  define VGA_DESKTOP_PATH 0 /* the Pico branch below handles VGA pics too */
+#else
+#  define PICO_END_DECOMPRESS_LOAN() do { } while (0)
+#  define VGA_DESKTOP_PATH 1
+#endif
+	res = scir_find_resource(resmgr, sci_pic, nr, 0);
 	gfxr_pic0_params_t style, basic_style;
 	
 	basic_style.line_mode = GFX_LINE_MODE_CORRECT;
@@ -109,10 +133,12 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 	style.brush_mode = state->options->pic0_brush_mode;
 	style.pic_port_bounds = state->options->pic_port_bounds;
 
-	if (!res || !res->data)
+	if (!res || !res->data) {
+		PICO_END_DECOMPRESS_LOAN();
 		return GFX_ERROR;
+	}
 
-	if (state->version >= SCI_VERSION_01_VGA) {
+	if (VGA_DESKTOP_PATH && state->version >= SCI_VERSION_01_VGA) {
 		if (need_unscaled)
 		{
 			if (state->version == SCI_VERSION_1_1)
@@ -143,6 +169,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 			pico_picdec_cache_begin(_ra, res->size);
 		}
 		scir_evict_resource_data(resmgr, res);
+		PICO_END_DECOMPRESS_LOAN(); /* res->data (maybe visual[0]) is in PSRAM now */
 		scir_free_all_lru(resmgr);
 
 		/* Allocate the visual buffer (64KB).  Two modes:
@@ -264,7 +291,7 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 		   is still NULL (control gets its own pass below), so control draws no-op
 		   via the index_data / NULL-buffer guards in the draw helpers. */
 		gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
-				&style, res->id, 0,
+				&style, res->id, pic_sci1,
 				state->static_palette, state->static_palette_entries);
 
 #ifdef FSCI_PROBE_GFX
@@ -355,8 +382,18 @@ gfxr_interpreter_calculate_pic(gfx_resstate_t *state, gfxr_pic_t *scaled_pic, gf
 
 			gfxr_clear_pic0(scaled_pic, SCI_TITLEBAR_SIZE);
 
+			/* The first pass already built the pic's priority band table
+			   (pic->internal, SCI01 priority-table opcodes); this pass builds
+			   the same one again. Drop the first so the decoder does not log
+			   "pic->internal is not NULL; possible memory corruption" twice
+			   per VGA pic. */
+			if (scaled_pic->internal) {
+				free(scaled_pic->internal);
+				scaled_pic->internal = NULL;
+			}
+
 			gfxr_draw_pic01(scaled_pic, flags, default_palette, res->size, NULL,
-					&style, res->id, 0,
+					&style, res->id, pic_sci1,
 					state->static_palette, state->static_palette_entries);
 
 			{	/* Offload control to PSRAM; gfxop_scan_bitmask reads it back
@@ -471,14 +508,109 @@ gfxr_palettize_view(gfxr_view_t *view, gfx_pixmap_color_t *source, int source_en
 gfxr_view_t *
 gfxr_draw_view11(int id, byte *resource, int size);
 
+#if defined(HAVE_PICO) && defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
+/* Where each VGA view's cels went in the PSRAM arena, so a view the cache
+   evicted (resmgr.c, GFXR_VIEW_BUDGET) is re-decoded into the same place. An
+   entry is valid only while the arena has not been rewound since (psram_epoch:
+   every picture change frees all views and resets the arena anyway). Heap,
+   allocated on the first VGA view: SCI0 games never pay for it. */
+#define PICO_VIEW_PSRAM_SLOTS 64
+static struct pico_view_psram { int nr; uint32_t base, size, epoch; } *s_view_psram = NULL;
+static int s_view_psram_next = 0;
+extern void pico_view_cels_reuse(uint32_t base);
+extern uint32_t pico_view_cels_reuse_end(void);
+
+static int
+pico_view_psram_lookup(int nr)
+{
+	int i;
+
+	if (!s_view_psram)
+		return -1;
+	for (i = 0; i < PICO_VIEW_PSRAM_SLOTS; i++)
+		if (s_view_psram[i].nr == nr && s_view_psram[i].epoch == psram_epoch())
+			return i;
+	return -1;
+}
+
+static void
+pico_view_psram_record(int nr, uint32_t base, uint32_t size)
+{
+	int i, slot = -1;
+
+	if (!s_view_psram) {
+		s_view_psram = (struct pico_view_psram *) sci_malloc(sizeof(*s_view_psram) * PICO_VIEW_PSRAM_SLOTS);
+		for (i = 0; i < PICO_VIEW_PSRAM_SLOTS; i++)
+			s_view_psram[i].nr = -1;
+	}
+	for (i = 0; i < PICO_VIEW_PSRAM_SLOTS && slot < 0; i++) /* a free or stale slot first */
+		if (s_view_psram[i].nr < 0 || s_view_psram[i].epoch != psram_epoch())
+			slot = i;
+	if (slot < 0) { /* all live: replace round-robin (that view then grows the arena once more) */
+		slot = s_view_psram_next;
+		s_view_psram_next = (s_view_psram_next + 1) % PICO_VIEW_PSRAM_SLOTS;
+	}
+	s_view_psram[slot].nr = nr;
+	s_view_psram[slot].base = base;
+	s_view_psram[slot].size = size;
+	s_view_psram[slot].epoch = psram_epoch();
+}
+#endif
+
 gfxr_view_t *
 gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int palette)
 {
 	resource_mgr_t *resmgr = (resource_mgr_t *) state->misc_payload;
-	resource_t *res = scir_find_resource(resmgr, sci_view, nr, 0);
+	resource_t *res = NULL;
 	int resid = GFXR_RES_ID(GFX_RESOURCE_TYPE_VIEW, nr);
-	gfxr_view_t *result;
+	gfxr_view_t *result = NULL;
 
+#if defined(HAVE_PICO) && defined(PICO_STREAM_DECOMPRESS) && !defined(PICO_PSRAM_MAPPED)
+#  define PICO_VIEW_TO_PSRAM 1
+#endif
+#ifdef PICO_VIEW_TO_PSRAM
+	/* (PIO only: the mapped target's default heap is PSRAM already.)
+	   VGA views go straight into PSRAM and are decoded from there, so no SRAM
+	   copy of the resource exists (Jones in the Fast Lane: 14 views are
+	   16-35 KB); each cel goes to PSRAM as it is decoded (sci_view_1.c). A
+	   resource the PSRAM loader does not handle falls back to the normal load. */
+	if (state->version == SCI_VERSION_01_VGA || state->version == SCI_VERSION_01_VGA_ODD) {
+		extern int scir_pico_load_to_psram(resource_mgr_t *mgr, int type, int number,
+						   uint32_t addr, unsigned int max_size, int *size);
+		extern gfxr_view_t *gfxr_draw_view1_psram(int id, uint32_t addr, int size,
+							  gfx_pixmap_color_t *static_pal, int static_pal_nr);
+		int vsize;
+
+		if (scir_pico_load_to_psram(resmgr, sci_view, nr, PSRAM_VIEW_STAGE_ADDR,
+					    PSRAM_VIEW_STAGE_SIZE, &vsize) == 0) {
+			int slot = pico_view_psram_lookup(nr);
+			uint32_t base = psram_alloc(0); /* the arena top: this decode's cels start here */
+
+			if (slot >= 0)
+				pico_view_cels_reuse(s_view_psram[slot].base);
+#ifdef PICO_VIEW_ARENA
+			g_view_arena_active = 1; /* the view's blocks go to the arena (resmgr.c) */
+#endif
+			result = gfxr_draw_view1_psram(resid, PSRAM_VIEW_STAGE_ADDR, vsize, state->static_palette,
+						       state->static_palette_entries);
+#ifdef PICO_VIEW_ARENA
+			g_view_arena_active = 0;
+#endif
+			if (slot >= 0) {
+				uint32_t end = pico_view_cels_reuse_end();
+				if (end - s_view_psram[slot].base != s_view_psram[slot].size)
+					sciprintf("[view] %d re-decoded to %lu bytes, recorded %lu\n", nr,
+						  (unsigned long)(end - s_view_psram[slot].base),
+						  (unsigned long)s_view_psram[slot].size);
+			} else if (result)
+				pico_view_psram_record(nr, base, psram_alloc(0) - base);
+			if (!result)
+				return NULL;
+		}
+	}
+	if (!result) {
+#endif
+	res = scir_find_resource(resmgr, sci_view, nr, 0);
 	if (!res || !res->data)
 		return NULL;
 
@@ -494,13 +626,22 @@ gfxr_interpreter_get_view(gfx_resstate_t *state, int nr, void *internal, int pal
 	case SCI_VERSION_01_VGA_ODD:
 	case SCI_VERSION_1_EARLY:
 	case SCI_VERSION_1_LATE:
+#ifdef PICO_VIEW_ARENA
+		g_view_arena_active = 1;
+#endif
 		result=gfxr_draw_view1(resid, res->data, res->size, state->static_palette, state->static_palette_entries); 
+#ifdef PICO_VIEW_ARENA
+		g_view_arena_active = 0;
+#endif
 		break;
 	case SCI_VERSION_1_1:
 	case SCI_VERSION_32:
 		result=gfxr_draw_view11(resid, res->data, res->size); 
 		break;
 	}
+#ifdef PICO_VIEW_TO_PSRAM
+	} /* !result: normal load */
+#endif
 
 	if (state->version >= SCI_VERSION_01_VGA)
 	{

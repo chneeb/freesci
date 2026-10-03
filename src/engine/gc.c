@@ -19,6 +19,9 @@
 ***************************************************************************/
 
 #include "gc.h"
+#ifdef SCI_GC_POOL
+#include <gfx_resource.h> /* GFXR_AUX_MAP_SIZE: the priority scratch's size */
+#endif
 
 #define WORKLIST_CHUNK_SIZE 32
 
@@ -31,13 +34,32 @@ typedef struct _worklist {
 	struct _worklist *next;
 } worklist_t;
 
+/* Emptied chunks are kept for reuse until the search ends: in the GC pool a
+   freed block is not reusable before its whole stack is (sci_memory.c). */
+static worklist_t *spare_worklists = NULL;
+
 static worklist_t *
 fresh_worklist(worklist_t *old)
 {
-	worklist_t *retval = (worklist_t*)sci_malloc(sizeof(worklist_t));
+	worklist_t *retval = spare_worklists;
+
+	if (retval)
+		spare_worklists = retval->next;
+	else
+		retval = (worklist_t*)GC_MALLOC(sizeof(worklist_t));
 	retval->used = 0;
 	retval->next = old;
 	return retval;
+}
+
+static void
+free_spare_worklists(void)
+{
+	while (spare_worklists) {
+		worklist_t *next = spare_worklists->next;
+		GC_FREE(spare_worklists);
+		spare_worklists = next;
+	}
 }
 
 static worklist_t *
@@ -91,7 +113,8 @@ worklist_pop(worklist_t **wlp)
 
 	if (!wl->used) {
 		*wlp = wl->next;
-		sci_free(wl);
+		wl->next = spare_worklists;
+		spare_worklists = wl;
 	}
 
 	return retval;
@@ -103,7 +126,7 @@ free_worklist(worklist_t *wl)
 	if (wl) {
 		if (wl->next)
 			free_worklist(wl->next);
-		sci_free(wl);
+		GC_FREE(wl);
 	}
 }
 
@@ -133,10 +156,16 @@ normalise_hashmap_ptrs(reg_t_hash_map_ptr nonnormal_map, seg_interface_t **inter
 {
 	normaliser_t normaliser;
 
+#ifdef SCI_GC_POOL
+	gc_pool_use_keep(1); /* run_gc keeps this map to the end */
+#endif
 	normaliser.normal_map = new_reg_t_hash_map();
 	normaliser.interfaces_nr = interfaces_nr;
 	normaliser.interfaces = interfaces;
 	apply_to_reg_t_hash_map(nonnormal_map, &normaliser, &store_normalised);
+#ifdef SCI_GC_POOL
+	gc_pool_use_keep(0);
+#endif
 
 	return normaliser.normal_map;
 }
@@ -158,7 +187,7 @@ reg_t_hash_map_ptr
 find_all_used_references(state_t *s)
 {
 	seg_manager_t *sm = &(s->seg_manager);
-	seg_interface_t **interfaces = (seg_interface_t**)sci_calloc(sizeof(seg_interface_t *), sm->heap_size);
+	seg_interface_t **interfaces = (seg_interface_t**)GC_CALLOC(sizeof(seg_interface_t *), sm->heap_size);
 	reg_t_hash_map_ptr nonnormal_map = new_reg_t_hash_map();
 	reg_t_hash_map_ptr normal_map = NULL;
 	worklist_t *worklist = new_worklist();
@@ -257,8 +286,10 @@ find_all_used_references(state_t *s)
 	for (i = 1; i < sm->heap_size; i++)
 		if (interfaces[i])
 			interfaces[i]->deallocate_self(interfaces[i]);
-	sci_free(interfaces);
+	GC_FREE(interfaces);
 	free_reg_t_hash_map(nonnormal_map);
+	free_worklist(worklist);
+	free_spare_worklists();
 	return normal_map;
 }
 
@@ -302,6 +333,19 @@ run_gc(state_t *s)
 	memset(&(deallocator.segcount), 0, sizeof(int) * (MEM_OBJ_MAX + 1));
 #endif
 
+#ifdef SCI_GC_POOL
+	{
+		/* Borrow the idle priority scratch for this run (sci_memory.h). */
+#  ifdef HAVE_PICO
+		extern unsigned char *g_pico_priority_scratch;
+		unsigned char *pool = g_pico_priority_scratch;
+#  else /* GC_POOL_TEST on desktop: a buffer of the same size */
+		static unsigned char pool[(GFXR_AUX_MAP_SIZE + 1) >> 1] __attribute__((aligned(8)));
+#  endif
+		if (pool)
+			gc_pool_begin(pool, (GFXR_AUX_MAP_SIZE + 1) >> 1);
+	}
+#endif
 	deallocator.use_map = find_all_used_references(s);
 
 	for (seg_nr = 1; seg_nr < sm->heap_size; seg_nr++)
@@ -319,6 +363,9 @@ run_gc(state_t *s)
 		}
 
 	free_reg_t_hash_map(deallocator.use_map);
+#ifdef SCI_GC_POOL
+	gc_pool_end();
+#endif
 
 #ifdef DEBUG_GC
 	{

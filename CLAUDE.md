@@ -41,6 +41,7 @@ experiments were moved **verbatim** to `docs/history/` — read the relevant one
 | `docs/history/pico-build-flags.md` | Default PIO build rationale, flag cleanup, chooser toggles, log-noise gating |
 | `docs/history/pico-4bpp-attempt.md` | The abandoned 4bpp/D16 packing work and the harness techniques it produced |
 | `docs/history/pico-misc.md` | Old branch/merge status, LCD loading-progress idea, RP2040 note, parked next-steps list |
+| `docs/history/pico-sci1.md` | SCI01 VGA on PIO (Jones in the Fast Lane): VGA pics/views/palettes, view arena, SCI1 songs in PSRAM, compact hash maps, GC pool, save-unders, colour allocator, self-disposing scripts -- every device run 2026-09-30..10-03 |
 
 `PICO_SQ3_SRAM_CEILING_ASSESSMENT.md` (repo root) is the Codex SRAM-ceiling assessment referenced in the memory history.
 
@@ -100,7 +101,9 @@ Everything else defaults correctly; the mapped-only options (`PICO_PSRAM_SCRIPTS
 `PICO_WORKING_PRIORITY`) are all ON and each is an A/B switch.
 
 **After ANY shared-file change, rebuild the PIO target and check its `.bss` is unchanged** — that is the
-guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 30,832** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
+guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 31,800** (measured 2026-10-03 after the
+SCI01 VGA work: view arena state, palette-insert guard, save-under table +260, GC pool +44, pending disposals +40; Pimoroni
+29,952). Before that **30,832** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
 volume cache + fast seek, PSRAM working priority map, measured 2026-09-29; 30,656 before the working map, 30,084 before the volume cache, 29,952 before the packing, 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
 17,608) are from earlier configs, not regressions:
 ```bash
@@ -142,7 +145,7 @@ PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
 `PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); `PICO_LCD_BACKLIGHT=96`; `PICO_VOLUME_CACHE` ON; `PICO_PSRAM_WORKING_PRIORITY` ON; 133 MHz
 (`PICO_SYS_CLOCK_MHZ=360` -- pico-286's High profile, tested once, resource load 14.8 -> 11.8 s on SQ3 -- and `PICO_SYS_CLOCK_MHZ=396` are opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
-itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 30,832.
+itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 31,800 (2026-10-03).
 
 The game chooser shows **no toggles** by default since 2026-09-29: every tested game (SQ3, KQ4, PQ2, Colonel's
 Bequest) runs with sound, the composed surface and static-view priority on, so they are compile-time settings
@@ -189,6 +192,7 @@ Notes:
 | `src/platform/pico/audio/pwm_synth.c` | PWM audio (from tiny_agi) |
 | `src/platform/pico/psram/psram_spi.{c,h,pio}` | Ian Scott's rp2040-psram PIO SPI driver (vendored) |
 | `src/platform/pico/psram_alloc.{h,c}` | PSRAM bump allocator (`psram_alloc/reset/store/load`) |
+| `src/platform/pico/view_arena.{h,c}` | PIO: first-fit allocator over the 32 KB VGA view arena (stress test: `tests/viewarena`) |
 
 ### Pico driver design
 - `gfx_driver_pico` uses 8bpp palette mode (bytespp=1, xfact=1, yfact=1)
@@ -304,13 +308,22 @@ Engine / VM (`pico-engine-fixes.md`):
 - `VM_STACK_SIZE` stays **0x1000**. Shrinking it (0x400) overflowed on SQ3 room 2 recursion → HardFault.
 - `selector_names` and `kernel_names` stay **resident** (freeing them silently drops `PUT_SEL32` writes /
   breaks `has_kernel_function`).
-- `GC_INTERVAL` is **2048** on Pico (clone-table growth OOM at larger values; 4096 tried, unattributable).
+- `GC_INTERVAL` is **1024** on Pico (halved from 2048 on 2026-09-12 for PQ2's clone table; 4096 tried, unattributable).
 - **Never run `run_gc` from inside an allocation** — `pico_reclaim_heap` is LRU-flush-only (it HardFaulted
   walking a half-restored state).
 - `said.y` and the generated `said.c` are edited **in lockstep** (also true for the lazy `said_tree` alloc).
 - A missing song must behave like NOSOUND in `ksound.c` — a NULL iterator reaching `sfx_add_song` opens the SCI
   console. Shared code, not Pico-gated.
-- SCI1/VGA is **rejected with a legible LCD halt** in `gfxop_new_pic`; Pico is SCI0-only.
+- SCI0 and **SCI01 VGA** (`SCI_VERSION_01_VGA`, Jones in the Fast Lane) run on the PIO target; anything later
+  (`state->version > SCI_VERSION_01_VGA`) is **rejected with a legible LCD halt** in `gfxop_new_pic` (pico-sci1.md).
+- A script that calls `DisposeScript` on **itself** is unloaded in full once no execution-stack frame runs in it
+  (`kscripts.c`, deferred, checked at every callk). Do not go back to "one locker less": ScriptID adds a locker per
+  call, so such scripts were never unloaded and the next load reused stale objects (Jones' computer player froze).
+- `_k_redraw_view_list` restores a no-update view's **save-under** (a widget snapshot of its rect) unless the REAL
+  PicNotValid flag -- captured before `_k_prepare_view_list` counts views into it -- is 1. Do not merge the two
+  values again (Jones' clock never reset).
+- The VGA **static palette is loaded once per game** (`_reset_graphics_input`); every restart/restore used to leak a
+  2 KB copy. The 16 EGA colours (`ega_colors`) are filled for VGA too -- the interpreter's own menus use them.
 
 Memory (`pico-memory-oom.md`):
 - OOMs on Pico must be **legible** (`pico_oom_report` → LCD), never a HardFault. `sci_malloc` halts; raw
@@ -329,6 +342,24 @@ Memory (`pico-memory-oom.md`):
 - Every PIO pic decode borrows `visual[0]` as its visual buffer — `gfxop_new_pic` AND `gfxop_add_to_pic`
   (overlays). A decode that needs a fresh 64 KB block fails silently on a fragmented heap:
   `gfxr_add_to_pic` ignores the decode's return value (the SQ3 Pestulon bug, fixed 2026-09-27).
+  VGA pics also borrow it as the **decompress** target (55 KB board).
+- Never look a resource up with `scir_find_resource` just to evict it -- it LOADS what is not in memory (after a
+  restore that was a 55 KB pic decompressed to be freed). Use `scir_test_resource`.
+- **The GC's temporary memory lives in the idle 32 KB priority scratch** for one `run_gc` (GC_MALLOC/GC_CALLOC/
+  GC_FREE, `sci_memory.c`): routed explicitly in gc.c, the seg interfaces and the reg_t maps -- NEVER at the malloc
+  chokepoint, so no engine allocation made during a GC can land there. The scratch must stay idle at callk (only
+  picture/view decodes use it). `-DPICO_NO_GC_POOL` bisects it; `-DGC_POOL_TEST=1` runs it on desktop with ASan.
+- **VGA view metadata lives in the 32 KB view arena** (`view_arena.c`, = `PICO_VGA_VIEW_BUDGET`): `__wrap_malloc`
+  serves it while `g_view_arena_active`; free/realloc/`malloc_usable_size` route by ownership. Eviction is the plain
+  budget -- an extra "keep 16 KB free" rule thrashed (view 0 alone is 15.9 KB).
+- **Compact hash maps** (`SCI_COMPACT_HASHMAPS`, PIO): script object maps 32 buckets, GC maps 128. The in-memory
+  hash must stay a function of `key & 0xff`: savegame.c's hand-edited reader/writer regroup the 256 format chains
+  from it, so the file format is unchanged. Buckets `0..N-1` of `N+1` -- `apply_to_*` never visits the last one.
+- `gfx_new_pixmap` must initialise every HAVE_PICO field: an uninitialised `pico_pal_insert` was written into the
+  LCD palette whenever it looked like an SRAM pointer (random recolouring, a HardFault at BFAR 0x70000000).
+- VGA on the Pico: `pico_setup_vga_palette` locks all 256 mode-palette entries (otherwise `gfx_alloc_color` hands
+  out the picture's own entries and overwrites them) and keeps entry 255 white; VGA kernel colours carry their
+  palette index (`get_pic_color`) because Pico fills draw by index.
 
 Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 - `free`/`realloc` route by **ownership** (`psram_heap_owns`) at the single `--wrap` chokepoint in
@@ -391,8 +422,15 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   `PICO_PWM_VOLUME` (default 50) sets the output ceiling. Drums: offline A/B renders (desktop synth taps + the
   exact `pico_pwm.c` output stage) and the trade-offs of interpolation / low-pass / a 22,050 Hz synth are in
   `pico-sound.md`; interpolation or a low-pass would cost almost nothing if revisited. (sound)
-- **SCI1/VGA on Pico** — not supported (legible halt in `gfxop_new_pic`). Jones in the Fast Lane (VGA, `SCI_VERSION_01_VGA`)
-  plays on DESKTOP since 2026-09-30, keyboard only; a Pico port would start on the Pimoroni target (pico-engine-fixes.md). (engine)
+- **Jones in the Fast Lane (SCI01 VGA) on PIO** — plays through weeks on the device since 2026-10-03 (pico-sci1.md).
+  Open: brief **face flicker** / the Monolith clerk staying discoloured -- every VGA view cel re-inserts its palette
+  on each draw; the fix is Sierra-style palette **merging** (free slot / exact match / closest, pixels remapped).
+  Memory margin in long games unmeasured since the GC pool and palette fixes -- run the census build (it has a
+  2-minute periodic checkpoint) deep into a fresh game. Savegames made before `b32a6404` may hold a stale
+  `computerScript` (state 21, script 206) and freeze Jones once at the Employment Office. (sci1)
+- **Restart crash in the sound code** (desktop, ASan): an in-game restart with a "tee" song iterator active hits
+  `songit_tee_death_notification` (iterator.c ~1887/1894) from `sfx_reset_player` -- use-after-free / debug
+  breakpoint. Pre-existing; could hit the device on a restart. (sound)
 - **Runtime actor-to-actor control writes** are a no-op (`state->control_map` NULL). (misc)
 - **396 MHz on PIO**: soak it before trusting it long-term; it is opt-in (`-DPICO_SYS_CLOCK_MHZ=396`). (clock)
 
@@ -409,6 +447,12 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
 - **Ask which resources actually load in the shipping config before building anything.**
 - **Check for the error line before building a theory on an allocation failure** — recovery paths are silent.
 - **Measure coverage, not excess** — an "excess pixels" metric cannot tell harmful overdraw from the only draw.
+- **For a game that hangs without an error, find the loop's shape first, then the wait condition**: a kernel-call
+  histogram (no Animate = a modal loop), the VM call stack, then an instruction trace through scriptdebug.c's
+  `disassemble` (the old disassembler cannot read SCI01 scripts) and a property watch. That found Jones' frozen
+  computer player in an afternoon; the trigger was stale script state, not anything in the loop.
+- **When a reproduction is timing-dependent, compare a binary with itself before blaming a change** (two runs of the
+  same build differed by 130,000 px in KQ4).
 - **CMake: a dependent default must come after what it depends on**, keep `set()` and its
   `add_compile_definitions` adjacent, and after any default change `rm -rf` the build dir and read
   `CMakeCache.txt` — "it built" was true in every broken case.

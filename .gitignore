@@ -22,3 +22,23 @@ tests/drvdiff/*.ppm
 tests/decompdiff/stream_decomp.c
 tests/decompdiff/stream_decomp.o
 tests/decompdiff/decompdiff
+tests/decompdiff/stream_decomp01.c
+tests/decompdiff/stream_decomp01.o
+# viewdiff harness build products (pico_view1.c is a COPY of sci_view_1.c)
+tests/viewdiff/pico_view1.c
+tests/viewdiff/pico_view1.o
+tests/viewdiff/pico_pixmap.o
+tests/viewdiff/viewdiff
+tests/viewdiff/pico_decomp01.c
+tests/viewdiff/pico_decomp01.o
+# songdiff harness build products (pico_iterator.c is a COPY of iterator.c)
+tests/songdiff/pico_iterator.c
+tests/songdiff/pico_iterator.o
+tests/songdiff/songdiff
+# resdiff harness build products (p_*.c are COPIES of src/scicore files)
+tests/resdiff/p_*.c
+tests/resdiff/*.o
+tests/resdiff/resdiff
+tests/resdiff/resdiff_old
+# viewarena allocator stress test binary
+tests/viewarena/viewarena
