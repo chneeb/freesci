@@ -50,6 +50,7 @@ extern int pico_static_view_priority_enabled;
    place, so that is only exact as long as no save is deleted or overwritten
    (the PicoCalc has no clock to tell otherwise). */
 char pico_resume_save[16] = "";
+extern int pico_vga_palette_merge; /* pico_driver.c: [P], VGA games only */
 
 static int highest_save(const char *game)
 {
@@ -115,6 +116,9 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
             lcd_clear();
             lcd_print_string("Select SCI game:\n");
             lcd_print_string("  [R] resume last save\n");
+            lcd_print_string(pico_vga_palette_merge
+                             ? "  [P] VGA palette merge: ON\n"
+                             : "  [P] VGA palette merge: off\n");
 #ifdef PICO_CHOOSER_TOGGLES
             /* Per-launch A/B toggles, off by default since 2026-09-29: every
                tested game runs with sound, the composed surface and static-view
@@ -157,6 +161,11 @@ bool pico_show_dir_chooser(char *out_path, size_t len)
             pico_resume_save[0] = '\0';
             snprintf(out_path, len, "0:/freesci/%s", names[sel]);
             return true;
+        } else if (key == 'p' || key == 'P') {
+            /* VGA view palettes merged instead of inserted (pico_driver.c);
+               only VGA games (Jones) are affected. */
+            pico_vga_palette_merge = !pico_vga_palette_merge;
+            redraw = true;
         } else if (key == 'r' || key == 'R') {
             int n = highest_save(names[sel]);
 

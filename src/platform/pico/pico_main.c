@@ -492,6 +492,10 @@ int main(void)
 #ifdef PICO_PSRAM_WORKING_PRIORITY
         printf("[gfx] PSRAM working priority map ON\n");
 #endif
+        {
+            extern int pico_vga_palette_merge; /* pico_driver.c, chooser [P] */
+            printf("[gfx] VGA palette merge %s\n", pico_vga_palette_merge ? "ON" : "off");
+        }
         printf("Launching freesci_main\n");
         freesci_main(argc, argv);
         printf("freesci_main returned\n");

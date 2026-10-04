@@ -23,9 +23,7 @@
 #include "lcdspi.h"
 #include "kbd_input.h"
 #include "psram_alloc.h"
-#ifdef PICO_VGA_PALETTE_MERGE
 #include "../../platform/pico/pico_palmerge.h"
-#endif
 #ifdef PICO_PWM_AUDIO
 #include "../../platform/pico/audio/pwm_synth.h"
 #endif
@@ -535,7 +533,18 @@ static void pico_exit(struct _gfx_driver *drv)
    indices directly, and 256-colour cels map through the identity LUT in
    pico_blit_indexed, as they index the system palette in Sierra's interpreter.
    Called from gfxop_new_pic in place of pico_setup_sci0_palette. */
+/* VGA view palettes: merged into the picture's (1, pico_palmerge.c) or
+   written over the LCD palette on every draw (0, the insert). Chosen per
+   launch with [P] in the chooser (pico_sdcard.c); -DPICO_VGA_PALETTE_MERGE=ON
+   only changes the default. Merging fixes the face flicker but made Jones'
+   board after a savegame restore look wrong on the device (2026-10-04, see
+   docs/history/pico-sci1.md), so it stays off by default. */
 #ifdef PICO_VGA_PALETTE_MERGE
+int pico_vga_palette_merge = 1;
+#else
+int pico_vga_palette_merge = 0;
+#endif
+
 /* The used flags of the picture palette last decoded by SET_PALETTE
    (sci_pic_0.c), valid for the colour array they came with. A picture that
    sets none (static palette) counts as using every entry it has. */
@@ -567,14 +576,11 @@ void pico_vga_palette_flags(int from, int to, int flags, int on)
 {
     palmerge_set_flags(from, to, flags, on);
 }
-#endif /* PICO_VGA_PALETTE_MERGE */
 
 void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int colors_nr)
 {
     struct _pico_state *ps = (struct _pico_state *)drv->state;
-#ifdef PICO_VGA_PALETTE_MERGE
     unsigned char used[32];
-#endif
     if (!ps || !colors) return;
     for (int i = 0; i < 256; i++) {
         if (i < colors_nr) {
@@ -584,25 +590,22 @@ void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int c
         } else
             ps->palette[i][0] = ps->palette[i][1] = ps->palette[i][2] = 0;
     }
-#ifdef PICO_VGA_PALETTE_MERGE
     if (colors == g_pico_pic_pal_used_for)
         memcpy(used, g_pico_pic_pal_used, sizeof(used));
     else
         for (int i = 0; i < 32; i++) /* no flags: every entry it has is in use */
             used[i] = (i * 8 + 8 <= colors_nr) ? 0xff
                     : (i * 8 < colors_nr) ? (unsigned char)((1 << (colors_nr - i * 8)) - 1) : 0;
-#endif
     /* The picture's palette and used flags start the merge state; view
        colours are merged into the entries it leaves free. Entry 255 is
        SCI1's system white whatever the picture holds (kgraphics.c
        get_pic_color, the title bar and menus). */
-#ifdef PICO_VGA_PALETTE_MERGE
-    palmerge_attach(ps->palette);
-    palmerge_set_picture((const unsigned char (*)[3]) ps->palette, used);
-    s_vga_mode_pal = (drv->mode) ? drv->mode->palette : NULL;
-#else
-    ps->palette[255][0] = ps->palette[255][1] = ps->palette[255][2] = 255;
-#endif
+    if (pico_vga_palette_merge) {
+        palmerge_attach(ps->palette);
+        palmerge_set_picture((const unsigned char (*)[3]) ps->palette, used);
+        s_vga_mode_pal = (drv->mode) ? drv->mode->palette : NULL;
+    } else
+        ps->palette[255][0] = ps->palette[255][1] = ps->palette[255][2] = 255;
     /* The engine's colour allocator (gfx_alloc_color, from gfxop_set_color
        and every text pixmap install) hands out the first UNLOCKED entry and
        writes its colour into this palette via pico_set_palette. With only 0
@@ -795,8 +798,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                       pxm->xl, pxm->yl, pxm->index_xl, pxm->index_yl, pxm->flags,
                       pxm->internal.handle, pxm->colors_nr, pxm->psram_valid);
         }
-    } else if (pxm->pico_pal_insert) {
-#ifdef PICO_VGA_PALETTE_MERGE
+    } else if (pxm->pico_pal_insert && pico_vga_palette_merge) {
         /* Merge the view's colours (pico_palmerge.c) -- once per palette
            version, not per draw -- and remap this cel through the result
            below. An entry in use is never overwritten, so a view drawn later
@@ -810,10 +812,10 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
             pi->stamp = palmerge_version();
         }
         insert = pi;
-#else
+    } else if (pxm->pico_pal_insert) {
         /* Insert: the view's used entries are written into the LCD palette
            before each draw (what a later view draws over is recoloured on
-           the next push -- the face flicker; PICO_VGA_PALETTE_MERGE). */
+           the next push -- the face flicker; pico_vga_palette_merge). */
         const gfx_pal_insert_t *pi = (const gfx_pal_insert_t *)pxm->pico_pal_insert;
         for (int k = 0; k < pi->n; k++) {
             uint8_t idx = pi->e[k][0];
@@ -823,7 +825,6 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
         }
 #ifdef PICO_LCD_16BIT
         pico_rebuild_pal565(ps);
-#endif
 #endif
     }
 

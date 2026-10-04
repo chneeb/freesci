@@ -578,7 +578,8 @@ if(PLATFORM STREQUAL "pico")
     # face flicker, but Jones' board came out wrong on the device (2026-10-04):
     # most likely the game's kPalette(3) frees entries the board still uses,
     # and views then take them. OFF (the old insert) until that is understood.
-    option(PICO_VGA_PALETTE_MERGE "Merge VGA view palettes instead of inserting them" OFF)
+    # The chooser's [P] toggles it per launch; this only sets the default.
+    option(PICO_VGA_PALETTE_MERGE "Merge VGA view palettes by default (chooser [P] toggles it)" OFF)
     if(PICO_VGA_PALETTE_MERGE)
         add_compile_definitions(PICO_VGA_PALETTE_MERGE=1)
     endif()

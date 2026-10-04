@@ -101,7 +101,7 @@ Everything else defaults correctly; the mapped-only options (`PICO_PSRAM_SCRIPTS
 `PICO_WORKING_PRIORITY`) are all ON and each is an A/B switch.
 
 **After ANY shared-file change, rebuild the PIO target and check its `.bss` is unchanged** — that is the
-guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 31,800** (measured 2026-10-03 after the
+guarantee that the PicoCalc build is untouched. Current default PIO baseline: **`.bss` 31,896** (2026-10-04: +96 for the `[R]` resume and the `[P]` palette-merge toggle; 31,800 measured 2026-10-03 after the
 SCI01 VGA work: view arena state, palette-insert guard, save-under table +260, GC pool +44, pending disposals +40; Pimoroni
 29,952). Before that **30,832** (sound ON, `PICO_STREAM_METHODS=7`, packed resource directory,
 volume cache + fast seek, PSRAM working priority map, measured 2026-09-29; 30,656 before the working map, 30,084 before the volume cache, 29,952 before the packing, 25,344 with methods=1; `-DPICO_PWM_AUDIO=OFF` gives 17,608). Older figures in `docs/history/` (17,280 / 17,284 /
@@ -124,7 +124,7 @@ kept as cheap standing insurance — it was the canary for the now-CLOSED "aspb"
 | `FSCI_PROBE_STR` (**ON**) | `FSCI_PROBE_STR` | `[strprobe]` — SCI string kernels writing past the dest buffer's real size; `kFormat` overflow check in `CHECK_OVERFLOW1` | `kstring.c` |
 | `FSCI_PROBE_GFX` (OFF) | `FSCI_PROBE_GFX` | `[pcol]`/`[ctl]` (priority/control decode), `[ovl]` (overlay base-restore/composite: `restore_base`, base PSRAM `vaddr`, visual-sum `delta`), `[oc]` (onControl scans), `[pblit]` (occlusion), `[pstat]`/`[pbuf]`/`[pupd]` (driver static-buffer swap / cel-buffer target / flush+BACK-restore rects) + desktop mirrors `[dpcol]`/`[dpblit]` (env `FREESCI_PRIPROBE=1`) | `sci_resmgr.c`, `kgraphics.c`, `pico_driver.c`, `operations.c`, `gfx_support.c` |
 | `FSCI_PROBE_MEM` (OFF) | `FSCI_PROBE_MEM` | `[mem] BREAKDOWN`/`PXM`/`room enter`/`room ready` lines, plus `[mem] largest` (biggest allocatable block now + session minimum -- the real margin; KQ4 2026-09-28: ~41 KB in play, ~25 KB after a load); desktop `desktop_mem_probe` (env `FREESCI_MEMPROBE=1`) | `kgraphics.c`, `operations.c` |
-| `FSCI_PROBE_MEM_CENSUS` (OFF) | `FSCI_PROBE_MEM_CENSUS` | `[mem] CENSUS`/`SITES` + the `--wrap` malloc histogram & call-site tagger (every live block; raw mallocs by caller `pc:` -- resolve with `arm-none-eabi-addr2line -f -e build-pico-census/src/freesci.elf 0xPC`), and the `[heap]` walk per room and at OOM (free gaps, their neighbours, pins; self-checked against `mallinfo`) (~27 KB `.bss`). **Implies `FSCI_PROBE_MEM`** (the dump prints inside the breakdown). | `kgraphics.c`, `pico_mem_census.c` |
+| `FSCI_PROBE_MEM_CENSUS` (OFF) | `FSCI_PROBE_MEM_CENSUS` | `[mem] CENSUS`/`SITES` + the `--wrap` malloc histogram & call-site tagger (every live block; raw mallocs by caller `pc:` -- resolve with `arm-none-eabi-addr2line -f -e build-pico-sci1-census/src/freesci.elf 0xPC`), and the `[heap]` walk per room and at OOM (free gaps, their neighbours, pins; self-checked against `mallinfo`) (~27 KB `.bss`). **Implies `FSCI_PROBE_MEM`** (the dump prints inside the breakdown). | `kgraphics.c`, `pico_mem_census.c` |
 | `FSCI_PROBE_PARSER` (OFF) | `FSCI_PROBE_PARSER` | `[gnf]` per-command GNF-rebuild transient byte size | `kstring.c` |
 | `FSCI_PROBE_ARENA` (OFF) | `FSCI_PROBE_ARENA` | `[arenagrow]` — names the allocation that forces an sbrk grow (`sci_*` sites plus the raw decode/restore sites via `PICO_ARENA_PROBE_RAW`) | `sci_memory.c`, `sci_resmgr.c`, `operations.c`, `savegame.c` |
 | `FSCI_PROBE_PERF` (OFF) | `FSCI_PROBE_PERF` | `[perf]` per-room pic-decode time. Built for the XIP-RAM comparison; kept as a reusable decode timer | `operations.c`, `pico_time.c` |
@@ -145,7 +145,7 @@ PIO shipping config (fresh configure, 2026-09-26): `PICO_STATIC_COMPOSED`, `PICO
 `PICO_CONTROL_MAP`, `PICO_PACK_VOCAB`, `PICO_REBOOT_BETWEEN_GAMES` ON; sound cluster ON (`PICO_PWM_AUDIO`,
 `PICO_SND_RATE=11025`, `PICO_PSRAM_SONGS`, `PICO_STREAM_DECOMPRESS` with `PICO_STREAM_METHODS=7`, `PICO_SONG_MAX_BYTES=65536`, `PICO_PWM_VOLUME=50`); `PICO_LCD_BACKLIGHT=96`; `PICO_VOLUME_CACHE` ON; `PICO_PSRAM_WORKING_PRIORITY` ON; 133 MHz
 (`PICO_SYS_CLOCK_MHZ=360` -- pico-286's High profile, tested once, resource load 14.8 -> 11.8 s on SQ3 -- and `PICO_SYS_CLOCK_MHZ=396` are opt-in — it works but costs battery; it drags `PICO_PSRAM_SM_MHZ` to 198 by
-itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 31,800 (2026-10-03).
+itself); SD 30000, LCD 25000; probes off except `FSCI_PROBE_STR`; `.bss` 31,896 (2026-10-04).
 
 The game chooser shows **no toggles** by default since 2026-09-29: every tested game (SQ3, KQ4, PQ2, Colonel's
 Bequest) runs with sound, the composed surface and static-view priority on, so they are compile-time settings
@@ -428,12 +428,13 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   `pico-sound.md`; interpolation or a low-pass would cost almost nothing if revisited. (sound)
 - **Jones in the Fast Lane (SCI01 VGA) on PIO** — plays through weeks on the device since 2026-10-03 (pico-sci1.md).
   Open: brief **face flicker** / the Monolith clerk staying discoloured -- every VGA view cel re-inserts its palette
-  on each draw. Sierra-style palette **merging** exists behind `-DPICO_VGA_PALETTE_MERGE=ON` (default OFF since
-  2026-10-04; `pico_palmerge.c`, offline test `tests/palmerge`: 0 used-entry changes over all 90 views): faces were
-  right on the device but the BOARD came out wrong -- most likely the game's `kPalette(3, 144, 255, 1)` /
-  `(3, 8, 16, 1)` frees entries the board picture still uses (it marks 136 used, 0..255), and views then take them.
-  The kPalette 2/3 hook and the picture palette's used flags only act with the option on. Next step: which board
-  colours lie in 8..16 / 144..255, and what Sierra does when such entries are released.
+  on each draw. Sierra-style palette **merging** (`pico_palmerge.c`, offline test `tests/palmerge`) is a per-launch
+  chooser toggle **`[P]`, default OFF** (`-DPICO_VGA_PALETTE_MERGE=ON` only flips the default). On a FRESH game it is
+  right on the device (board, clerk, faces); after a **savegame restore** the board's buildings come out speckled. The
+  board picture's own flags are correct then (136 used, `[pal]` trace 2026-10-04); the order differs -- after a restore
+  the game draws views before its `kPalette(3, 144, 255)` frees the pool, and later views reuse those entries. Pinning
+  the entries of static (baked) cels did NOT fix it, nor did feeding overlay palettes into the merge (both reverted).
+  Faces with 175-222 colours also overflow the pool (closest-colour fallback). Details: pico-sci1.md, 15th run.
   Memory margin in long games unmeasured since the GC pool and palette fixes -- run the census build (it has a
   2-minute periodic checkpoint) deep into a fresh game. Savegames made before `b32a6404` may hold a stale
   `computerScript` (state 21, script 206) and freeze Jones once at the Employment Office. (sci1)

@@ -1894,7 +1894,7 @@ kPalette(state_t *s, int funct_nr, int argc, reg_t *argv)
 		
 	case 2 : /* setFlag(from, to, flags) */
 	case 3 : /* unsetFlag(from, to, flags): Jones frees 8..16 and 144..255 */
-#if defined(HAVE_PICO) && defined(PICO_VGA_PALETTE_MERGE)
+#ifdef HAVE_PICO
 		{ /* The Pico's VGA palette merge (pico_palmerge.c) honours them;
 		     desktop draws in true colour and needs neither. */
 			extern void pico_vga_palette_flags(int from, int to, int flags, int on);

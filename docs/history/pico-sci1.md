@@ -443,3 +443,38 @@ it (206, 207, 210, 107, 232, 111, 217) -- all of them used to stay loaded for go
 back. Regression (ASan, SQ3/KQ4/PQ2/CB restored, same keys): differences only of the size two runs of the same binary
 show (walking/driving timing); 0 errors. Old savegames that already hold a stale 206 still hang once at the next
 Employment Office visit. vocab_debug.c's opcode reader (debugging tools only) no longer trusts vocab 998's layout.
+
+## Fifteenth run: palette merging -- right on a fresh game, wrong after a restore (kept off, `[P]`)
+
+The face flicker comes from the insert: every VGA view cel writes its palette over the LCD palette on each draw, so
+whatever a later view draws over is recoloured on the next push. `pico_palmerge.c` merges instead, as Sierra's SCI1.1
+does in ScummVM's description (from memory, not checked against a disassembly): an entry in use is never
+overwritten; a view colour goes to its own index if free, else to an entry already holding that colour, else to the
+first free entry, else to the closest colour, and the cel is remapped through the result (`gfx_pal_insert_t` carries
+the mapping and the palette version it was made at). The picture's SET_PALETTE gives the used flags
+(`_pico_note_pal_used`, sci_pic_0.c), and `kPalette(2/3)` sets/clears them (Jones frees 8..16 and 144..255 around
+every scene). Offline (`tests/palmerge`, all 90 views into pic 11): 0 used-entry changes, 89.5% exact colours.
+
+Device, in order:
+1. **Board speckled everywhere** (faces right). A real bug: in SET_PALETTE the second `_pico_note_pal_used` sat
+   after a bare `else` and ran for a PSRAM-decoded picture too, with `resource == NULL` -- the used flags were read
+   from the boot ROM at 0x0. Fixed (braces), kept.
+2. **`[pal]` trace, fresh game:** board and faces right (Monolith photo). Board flags: 136 used, bitmap
+   `3d01ff..ff00..00c0` (0, 2-5, 8, 16-143, 254, 255) -- identical to the offline replay. The game then frees 80-111
+   entries in 144..255 at each scene change and the next views (Jones, view 0) take them straight back. View 500
+   (222 colours) and view 282 (175) do not fit: 7 and, after a restore, 32 colours fell back to the closest entry.
+3. **After a savegame restore:** the board's buildings speckled, roads and ground right. The trace showed the
+   board picture with the SAME correct flags and no view ever taking a flagged entry -- so the recoloured pixels are
+   VIEW pixels baked into the background. The order differs from a fresh game: view 751 (loop 11) took 38 entries
+   (6-15, 144-172) BEFORE the game's `kPalette(3, 144, 255)`, which freed them again; view 0 and 282 then reused them.
+   (Sierra keeps the palette in the savegame, as ScummVM does -- not verified -- so it may never see this order.)
+4. Two fixes tried, neither helped, both reverted: feeding overlay pictures' palettes (`gfxop_add_to_pic`) into the
+   merge, and pinning the entries of cels drawn to the static buffer so `kPalette(3)` cannot free them. The second
+   was built without a confirming log (the user's call, to save a flash); the photo after a restore was still
+   garbled, no log. So which draws really own those pixels is still unproven.
+
+Kept: the merge code, the `[P]` chooser toggle (default off, `pico_vga_palette_merge`; `[gfx] VGA palette merge
+ON/off` in the launch log), the kPalette 2/3 hook and the used flags (both only act with the merge on), and the
+boot-ROM fix. `.bss` 31,896. Ideas if revisited: save the merge state (palette + used flags) in the savegame as
+Sierra does, or restore by replaying the room the way a fresh game enters it; log the static/back target of every
+cel that takes entries before trying another fix.

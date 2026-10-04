@@ -294,7 +294,7 @@ static int _gfxr_pic0_colors_initialized = 0;
 
 #define SCI1_PALETTE_SIZE 1284
 
-#if defined(HAVE_PICO) && defined(PICO_VGA_PALETTE_MERGE)
+#ifdef HAVE_PICO
 /* The Pico merges view palettes into the picture's (pico_palmerge.c), which
    needs the picture palette's per-entry used flags -- gfxr_read_pal1 drops
    them. Entries are 4 bytes, {used, r, g, b}, after a 260-byte header. */
@@ -2108,17 +2108,19 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 					psram_load(_pdc->addr + pos, _pb, SCI1_PALETTE_SIZE);
 					pic->visual_map->colors = gfxr_read_pal1(resid, &pic->visual_map->colors_nr,
 										 _pb, SCI1_PALETTE_SIZE);
-#ifdef PICO_VGA_PALETTE_MERGE
 					_pico_note_pal_used(_pb, pic->visual_map->colors);
-#endif
 					free(_pb);
 				} else
 #endif
+				{
 				pic->visual_map->colors = gfxr_read_pal1(resid, &pic->visual_map->colors_nr,
 									 resource+pos, SCI1_PALETTE_SIZE);
-#if defined(HAVE_PICO) && defined(PICO_VGA_PALETTE_MERGE)
+#ifdef HAVE_PICO
+				/* inside the else: from PSRAM, resource is NULL (this read
+				   the boot ROM -- random used flags, Jones' speckled board) */
 				_pico_note_pal_used(resource + pos, pic->visual_map->colors);
 #endif
+				}
 				pos += SCI1_PALETTE_SIZE;
 				goto end_op_loop;
 
