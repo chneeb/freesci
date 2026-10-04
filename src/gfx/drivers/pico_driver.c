@@ -23,6 +23,9 @@
 #include "lcdspi.h"
 #include "kbd_input.h"
 #include "psram_alloc.h"
+#ifdef PICO_VGA_PALETTE_MERGE
+#include "../../platform/pico/pico_palmerge.h"
+#endif
 #ifdef PICO_PWM_AUDIO
 #include "../../platform/pico/audio/pwm_synth.h"
 #endif
@@ -532,9 +535,46 @@ static void pico_exit(struct _gfx_driver *drv)
    indices directly, and 256-colour cels map through the identity LUT in
    pico_blit_indexed, as they index the system palette in Sierra's interpreter.
    Called from gfxop_new_pic in place of pico_setup_sci0_palette. */
+#ifdef PICO_VGA_PALETTE_MERGE
+/* The used flags of the picture palette last decoded by SET_PALETTE
+   (sci_pic_0.c), valid for the colour array they came with. A picture that
+   sets none (static palette) counts as using every entry it has. */
+unsigned char g_pico_pic_pal_used[32]; /* bitmap, bit i = entry i */
+const void *g_pico_pic_pal_used_for = NULL;
+static gfx_palette_t *s_vga_mode_pal = NULL;
+
+/* palmerge (pico_palmerge.c) works on ps->palette directly; after it took
+   entries, refresh what derives from it: the 16-bit LCD table and the mode
+   palette the engine's colour allocator matches against. */
+static void pico_palmerge_publish(struct _pico_state *ps)
+{
+    (void)ps; /* palmerge writes ps->palette itself (attached) */
+#ifdef PICO_LCD_16BIT
+    pico_rebuild_pal565(ps);
+#endif
+    if (s_vga_mode_pal) {
+        for (int i = 0; i < 256 && i < s_vga_mode_pal->max_colors_nr; i++) {
+            s_vga_mode_pal->colors[i].r = palmerge_rgb[i][0];
+            s_vga_mode_pal->colors[i].g = palmerge_rgb[i][1];
+            s_vga_mode_pal->colors[i].b = palmerge_rgb[i][2];
+        }
+    }
+}
+
+/* kPalette 2/3 (kgraphics.c): the game marks entries used or frees them, e.g.
+   Jones frees 8..16 and 144..255 around its dialogs for the views to come. */
+void pico_vga_palette_flags(int from, int to, int flags, int on)
+{
+    palmerge_set_flags(from, to, flags, on);
+}
+#endif /* PICO_VGA_PALETTE_MERGE */
+
 void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int colors_nr)
 {
     struct _pico_state *ps = (struct _pico_state *)drv->state;
+#ifdef PICO_VGA_PALETTE_MERGE
+    unsigned char used[32];
+#endif
     if (!ps || !colors) return;
     for (int i = 0; i < 256; i++) {
         if (i < colors_nr) {
@@ -544,9 +584,25 @@ void pico_setup_vga_palette(gfx_driver_t *drv, gfx_pixmap_color_t *colors, int c
         } else
             ps->palette[i][0] = ps->palette[i][1] = ps->palette[i][2] = 0;
     }
-    /* SCI1's system white: entry 255 is white whatever the picture's palette
-       holds (kgraphics.c get_pic_color, the title bar and menus). */
+#ifdef PICO_VGA_PALETTE_MERGE
+    if (colors == g_pico_pic_pal_used_for)
+        memcpy(used, g_pico_pic_pal_used, sizeof(used));
+    else
+        for (int i = 0; i < 32; i++) /* no flags: every entry it has is in use */
+            used[i] = (i * 8 + 8 <= colors_nr) ? 0xff
+                    : (i * 8 < colors_nr) ? (unsigned char)((1 << (colors_nr - i * 8)) - 1) : 0;
+#endif
+    /* The picture's palette and used flags start the merge state; view
+       colours are merged into the entries it leaves free. Entry 255 is
+       SCI1's system white whatever the picture holds (kgraphics.c
+       get_pic_color, the title bar and menus). */
+#ifdef PICO_VGA_PALETTE_MERGE
+    palmerge_attach(ps->palette);
+    palmerge_set_picture((const unsigned char (*)[3]) ps->palette, used);
+    s_vga_mode_pal = (drv->mode) ? drv->mode->palette : NULL;
+#else
     ps->palette[255][0] = ps->palette[255][1] = ps->palette[255][2] = 255;
+#endif
     /* The engine's colour allocator (gfx_alloc_color, from gfxop_set_color
        and every text pixmap install) hands out the first UNLOCKED entry and
        writes its colour into this palette via pico_set_palette. With only 0
@@ -720,6 +776,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
        e.g. Jones in the Fast Lane's player buttons, which were white where the
        town board's palette has white. A few hundred byte writes per cel; not
        cached by pointer, as a freed view's list can be reused by another. */
+    const gfx_pal_insert_t *insert = NULL;
     if (pxm->pico_pal_insert
         && ((uintptr_t)pxm->pico_pal_insert < 0x20000000u
             || (uintptr_t)pxm->pico_pal_insert >= 0x20082000u
@@ -739,6 +796,24 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
                       pxm->internal.handle, pxm->colors_nr, pxm->psram_valid);
         }
     } else if (pxm->pico_pal_insert) {
+#ifdef PICO_VGA_PALETTE_MERGE
+        /* Merge the view's colours (pico_palmerge.c) -- once per palette
+           version, not per draw -- and remap this cel through the result
+           below. An entry in use is never overwritten, so a view drawn later
+           cannot recolour another (the face flicker of the old insert). */
+        gfx_pal_insert_t *pi = (gfx_pal_insert_t *)pxm->pico_pal_insert;
+        if (!palmerge_rgb) /* a cel before the first VGA picture set the palette */
+            palmerge_attach(ps->palette);
+        if (pi->stamp != palmerge_version()) {
+            if (palmerge_merge(pi->e, pi->n))
+                pico_palmerge_publish(ps);
+            pi->stamp = palmerge_version();
+        }
+        insert = pi;
+#else
+        /* Insert: the view's used entries are written into the LCD palette
+           before each draw (what a later view draws over is recoloured on
+           the next push -- the face flicker; PICO_VGA_PALETTE_MERGE). */
         const gfx_pal_insert_t *pi = (const gfx_pal_insert_t *)pxm->pico_pal_insert;
         for (int k = 0; k < pi->n; k++) {
             uint8_t idx = pi->e[k][0];
@@ -748,6 +823,7 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
         }
 #ifdef PICO_LCD_16BIT
         pico_rebuild_pal565(ps);
+#endif
 #endif
     }
 
@@ -794,6 +870,9 @@ pico_blit_indexed(struct _pico_state *ps, gfx_pixmap_t *pxm, int priority,
             lut[i] = nearest_pal(ps, pxm->colors[i].r,
                                  pxm->colors[i].g, pxm->colors[i].b);
     }
+    if (insert) /* a VGA view cel: its colours as merged above */
+        for (int k = 0; k < insert->n; k++)
+            lut[insert->e[k][0]] = insert->e[k][4];
 
     uint8_t *row_dst = destbuf;
     uint8_t *row_pri = pri_buf;

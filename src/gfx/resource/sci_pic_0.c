@@ -294,6 +294,26 @@ static int _gfxr_pic0_colors_initialized = 0;
 
 #define SCI1_PALETTE_SIZE 1284
 
+#if defined(HAVE_PICO) && defined(PICO_VGA_PALETTE_MERGE)
+/* The Pico merges view palettes into the picture's (pico_palmerge.c), which
+   needs the picture palette's per-entry used flags -- gfxr_read_pal1 drops
+   them. Entries are 4 bytes, {used, r, g, b}, after a 260-byte header. */
+extern unsigned char g_pico_pic_pal_used[32]; /* bitmap */
+extern const void *g_pico_pic_pal_used_for;
+
+static void
+_pico_note_pal_used(const byte *pal, const void *colors)
+{
+	int c;
+
+	memset(g_pico_pic_pal_used, 0, 32);
+	for (c = 0; c < 256; c++)
+		if (pal[260 + c * 4])
+			g_pico_pic_pal_used[c >> 3] |= (unsigned char)(1 << (c & 7));
+	g_pico_pic_pal_used_for = colors;
+}
+#endif
+
 #ifdef FILL_RECURSIVE_DEBUG
 /************************************/
 int fillc = 100000000;
@@ -2088,11 +2108,17 @@ gfxr_draw_pic01(gfxr_pic_t *pic, int flags, int default_palette, int size,
 					psram_load(_pdc->addr + pos, _pb, SCI1_PALETTE_SIZE);
 					pic->visual_map->colors = gfxr_read_pal1(resid, &pic->visual_map->colors_nr,
 										 _pb, SCI1_PALETTE_SIZE);
+#ifdef PICO_VGA_PALETTE_MERGE
+					_pico_note_pal_used(_pb, pic->visual_map->colors);
+#endif
 					free(_pb);
 				} else
 #endif
 				pic->visual_map->colors = gfxr_read_pal1(resid, &pic->visual_map->colors_nr,
 									 resource+pos, SCI1_PALETTE_SIZE);
+#if defined(HAVE_PICO) && defined(PICO_VGA_PALETTE_MERGE)
+				_pico_note_pal_used(resource + pos, pic->visual_map->colors);
+#endif
 				pos += SCI1_PALETTE_SIZE;
 				goto end_op_loop;
 

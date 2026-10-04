@@ -51,6 +51,7 @@ add_library(scipicoplatform STATIC
     pico_time.c
     pico_io.c
     pico_sdcard.c
+    pico_palmerge.c
     kbd_input.c
     hw_config.c
     ${PICO_AUDIO_SOURCES}

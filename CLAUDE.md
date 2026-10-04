@@ -428,7 +428,12 @@ Pimoroni / mapped (`pico-pimoroni-mapped.md`):
   `pico-sound.md`; interpolation or a low-pass would cost almost nothing if revisited. (sound)
 - **Jones in the Fast Lane (SCI01 VGA) on PIO** — plays through weeks on the device since 2026-10-03 (pico-sci1.md).
   Open: brief **face flicker** / the Monolith clerk staying discoloured -- every VGA view cel re-inserts its palette
-  on each draw; the fix is Sierra-style palette **merging** (free slot / exact match / closest, pixels remapped).
+  on each draw. Sierra-style palette **merging** exists behind `-DPICO_VGA_PALETTE_MERGE=ON` (default OFF since
+  2026-10-04; `pico_palmerge.c`, offline test `tests/palmerge`: 0 used-entry changes over all 90 views): faces were
+  right on the device but the BOARD came out wrong -- most likely the game's `kPalette(3, 144, 255, 1)` /
+  `(3, 8, 16, 1)` frees entries the board picture still uses (it marks 136 used, 0..255), and views then take them.
+  The kPalette 2/3 hook and the picture palette's used flags only act with the option on. Next step: which board
+  colours lie in 8..16 / 144..255, and what Sierra does when such entries are released.
   Memory margin in long games unmeasured since the GC pool and palette fixes -- run the census build (it has a
   2-minute periodic checkpoint) deep into a fresh game. Savegames made before `b32a6404` may hold a stale
   `computerScript` (state 21, script 206) and freeze Jones once at the Employment Office. (sci1)

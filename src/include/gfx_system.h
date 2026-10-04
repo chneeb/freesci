@@ -123,10 +123,13 @@ typedef struct { /* gfx_mode_t: Graphics mode description */
 #define GFX_COLOR_INDEX_UNMAPPED -1
 
 #ifdef HAVE_PICO
-/* The used entries of a VGA view's palette: n x {index, r, g, b}. */
+/* The used entries of a VGA view's palette: n x {index, r, g, b, mapped}.
+   mapped is the LCD palette entry the colour was merged to (pico_palmerge.c),
+   valid while stamp equals the merge state's version. */
 typedef struct {
 	unsigned short n;
-	unsigned char e[][4];
+	unsigned short stamp;
+	unsigned char e[][5];
 } gfx_pal_insert_t;
 #endif
 

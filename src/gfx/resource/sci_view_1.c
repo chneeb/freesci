@@ -499,14 +499,16 @@ gfxr_draw_view1(int id, byte *resource, int size, gfx_pixmap_color_t *static_pal
 		for (c = 0; c < 256; c++)
 			if (VRB(pe + c * 4))
 				n++;
-		view->pico_pal = (gfx_pal_insert_t *) sci_malloc(sizeof(gfx_pal_insert_t) + 4 * n);
+		view->pico_pal = (gfx_pal_insert_t *) sci_malloc(sizeof(gfx_pal_insert_t) + 5 * n);
 		view->pico_pal->n = n;
+		view->pico_pal->stamp = 0; /* not merged yet (versions start at 1) */
 		for (c = 0, n = 0; c < 256; c++)
 			if (VRB(pe + c * 4)) {
 				view->pico_pal->e[n][0] = c;
 				view->pico_pal->e[n][1] = VRB(pe + c * 4 + 1);
 				view->pico_pal->e[n][2] = VRB(pe + c * 4 + 2);
 				view->pico_pal->e[n][3] = VRB(pe + c * 4 + 3);
+				view->pico_pal->e[n][4] = c;
 				n++;
 			}
 		view->colors = static_pal;

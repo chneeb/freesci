@@ -582,7 +582,7 @@ gfxr_view_bytes(gfxr_view_t *v)
 		}
 #ifdef HAVE_PICO
 	if (v->pico_pal)
-		b += sizeof(gfx_pal_insert_t) + 4 * v->pico_pal->n;
+		b += sizeof(gfx_pal_insert_t) + 5 * v->pico_pal->n;
 #endif
 	return b;
 }

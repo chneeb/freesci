@@ -573,6 +573,16 @@ if(PLATFORM STREQUAL "pico")
         add_compile_definitions(SCI_COMPACT_HASHMAPS=1)
     endif()
 
+    # VGA view palettes MERGED into the picture's (pico_palmerge.c, Sierra SCI1
+    # style) instead of written over the LCD palette on every draw. Fixes the
+    # face flicker, but Jones' board came out wrong on the device (2026-10-04):
+    # most likely the game's kPalette(3) frees entries the board still uses,
+    # and views then take them. OFF (the old insert) until that is understood.
+    option(PICO_VGA_PALETTE_MERGE "Merge VGA view palettes instead of inserting them" OFF)
+    if(PICO_VGA_PALETTE_MERGE)
+        add_compile_definitions(PICO_VGA_PALETTE_MERGE=1)
+    endif()
+
     option(PICO_PACK_VOCAB "Pack parser word vocab into one allocation on Pico" ON)
     if(PICO_PACK_VOCAB)
         add_compile_definitions(PICO_PACK_VOCAB=1)

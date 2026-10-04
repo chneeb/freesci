@@ -61,7 +61,7 @@ void *vd_cel_pal(gfx_pixmap_t *p);
 void pico_view_cels_reuse(uint32_t base);
 uint32_t pico_view_cels_reuse_end(void);
 gfx_pixmap_color_t *gfxr_read_pal1(int id, int *colors_nr, byte *resource, int size);
-typedef struct { unsigned short n; unsigned char e[][4]; } vd_pal_insert_t; /* gfx_pal_insert_t */
+typedef struct { unsigned short n; unsigned short stamp; unsigned char e[][5]; } vd_pal_insert_t; /* gfx_pal_insert_t */
 static guint8 stage[16384];      /* the decompress scratch the device stages through */
 static gfx_pixmap_color_t *g_spal;
 static int g_spal_nr;
